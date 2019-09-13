@@ -1,0 +1,29 @@
+language: generic
+services:
+  - docker
+
+env:
+  global:
+    - DOCKER_USERNAME=icymint
+    - AS_DEF=true
+  matrix:
+    - NAME: frpc
+      DIR: frp
+      VERSION: 0.29.0
+    - NAME: frps
+      DIR: frp
+      VERSION: 0.29.0
+    - NAME: ghc
+      VERSION: 8.6.5
+    - NAME: ghc
+      VERSION: 8.4.3
+      AS_DEF: false
+
+script:
+  - docker build -t $DOCKER_USERNAME/$NAME:$VERSION --build-arg name=$NAME --build-arg ver=$VERSION ${DIR:-$NAME}
+
+deploy:
+  provider: script
+  script: bash deploy.sh
+  on:
+    branch: deploy
