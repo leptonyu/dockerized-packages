@@ -1,3 +1,4 @@
+sudo: required
 language: generic
 services:
   - docker
@@ -19,8 +20,10 @@ env:
     #   VERSION: 8.4.3
     #   AS_DEF: false
 
+before_install:
+  - sudo docker run --rm --privileged multiarch/qemu-user-static:register --reset
+
 script:
-  - docker run --rm --privileged multiarch/qemu-user-static --reset -p yes
   - docker run --rm -t arm64v8/ubuntu uname -m
   # - docker build -t $DOCKER_USERNAME/$NAME:$VERSION --build-arg name=$NAME --build-arg ver=$VERSION ${DIR:-$NAME}
 
