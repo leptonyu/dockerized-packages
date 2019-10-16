@@ -10,6 +10,7 @@ RUN cd /tmp \
  && wget https://github.com/redneb/ghc-alt-libc/releases/download/ghc-${GHC_VERSION}-musl/${GHC_XZ} \
  && tar xf ${GHC_XZ} \
  && apk --no-cache add bash perl alpine-sdk ncurses xz-dev gmp-dev postgresql-dev zlib-dev cabal \
+ && ln -sf /usr/lib/libncursesw.so.6 /usr/lib/libtinfow.so.6 \
  && cd /tmp/ghc-${GHC_VERSION} \
  && ./configure --prefix=${GHC_INSTALL_PATH} \
  && make install \
