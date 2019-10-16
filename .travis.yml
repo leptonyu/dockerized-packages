@@ -17,6 +17,7 @@ env:
       VERSION: 8.8.1
     - NAME: ghc
       VERSION: 8.6.5
+      AS_DEF: false
     - NAME: ghc
       VERSION: 8.4.3
       AS_DEF: false
