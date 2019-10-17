@@ -19,7 +19,13 @@ env:
       VERSION: 8.6.5
       AS_DEF: false
     - NAME: ghc
-      VERSION: 8.4.3
+      VERSION: 8.4.4
+      AS_DEF: false
+    - NAME: ghc
+      VERSION: 8.2.1
+      AS_DEF: false
+    - NAME: ghc
+      VERSION: 8.0.2
       AS_DEF: false
 
 script:
