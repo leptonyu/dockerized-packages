@@ -27,6 +27,8 @@ env:
     - NAME: ghc
       VERSION: 8.0.2
       AS_DEF: false
+    - NAME: gradle
+      VERSION: 14
 
 script:
   - docker build -t $DOCKER_USERNAME/$NAME:$VERSION --build-arg name=$NAME --build-arg ver=$VERSION ${DIR:-$NAME}
