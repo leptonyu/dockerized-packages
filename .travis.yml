@@ -7,22 +7,21 @@ env:
     - DOCKER_USERNAME=icymint
     - AS_DEF=true
   matrix:
-    # - NAME: frpc
-    #   DIR: frp
-    #   VERSION: 0.29.0
-    # - NAME: frps
-    #   DIR: frp
-    #   VERSION: 0.29.0
-    # - NAME: ghc
-    #   VERSION: 8.8.1
-    # - NAME: ghc
-    #   VERSION: 8.6.5
-    #   AS_DEF: false
-    # - NAME: ghc
-    #   VERSION: 8.4.3
-    #   AS_DEF: false
-    - NAME: jdk
-      DIR: gradle
+    - NAME: frpc
+      DIR: frp
+      VERSION: 0.29.0
+    - NAME: frps
+      DIR: frp
+      VERSION: 0.29.0
+    - NAME: ghc
+      VERSION: 8.8.1
+    - NAME: ghc
+      VERSION: 8.6.5
+      AS_DEF: false
+    - NAME: ghc
+      VERSION: 8.4.3
+      AS_DEF: false
+    - NAME: gradle
       VERSION: 14
 
 script:
