@@ -22,6 +22,7 @@ env:
     #   VERSION: 8.4.3
     #   AS_DEF: false
     - NAME: jdk
+      DIR: gradle
       VERSION: 14
 
 script:
