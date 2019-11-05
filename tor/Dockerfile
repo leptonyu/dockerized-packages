@@ -9,8 +9,7 @@ RUN apk upgrade --update \
     && ln -sf /dev/stdout /var/log/tor/notices.log \
     && ln -sf /usr/share/zoneinfo/${TZ} /etc/localtime \
     && echo "${TZ}" > /etc/timezone \
-    && rm -rf /var/cache/apk/* \
-    && chown tor:nogroup /var/log/tor/notices.log
+    && rm -rf /var/cache/apk/*
 
 COPY torrc /etc/tor/torrc
 
