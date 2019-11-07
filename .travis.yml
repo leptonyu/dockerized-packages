@@ -29,7 +29,9 @@ env:
     #   AS_DEF: false
     # - NAME: gradle
     #   VERSION: 14
-    - NAME: tor
+    # - NAME: tor
+    #   VERSION: 3
+    - NAME: dnsmasq
       VERSION: 3
 
 script:
