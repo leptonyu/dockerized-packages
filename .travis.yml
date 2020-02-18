@@ -32,7 +32,7 @@ env:
     # - NAME: tor
     #   VERSION: 3
     - NAME: dnsmasq
-      VERSION: 3
+      VERSION: 2.80
 
 script:
   - docker build -t $DOCKER_USERNAME/$NAME:$VERSION --build-arg name=$NAME --build-arg ver=$VERSION ${DIR:-$NAME}
