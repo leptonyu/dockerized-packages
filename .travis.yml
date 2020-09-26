@@ -29,10 +29,10 @@ env:
     #   AS_DEF: false
     # - NAME: gradle
     #   VERSION: 14
-    # - NAME: tor
-    #   VERSION: 3
-    - NAME: dnsmasq
-      VERSION: 2.80
+    - NAME: tor
+      VERSION: 3.1
+    #- NAME: dnsmasq
+    #  VERSION: 2.80
 
 script:
   - docker build -t $DOCKER_USERNAME/$NAME:$VERSION --build-arg name=$NAME --build-arg ver=$VERSION ${DIR:-$NAME}
