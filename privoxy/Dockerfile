@@ -8,4 +8,6 @@ RUN apk add privoxy \
  && ln -sf /usr/share/zoneinfo/${TZ} /etc/localtime \
  && echo "${TZ}" > /etc/timezone
 
-ENTRYPOINT ["privoxy"]
+COPY config /etc/privoxy/config
+
+ENTRYPOINT ["privoxy", "--no-daemon", "/etc/privoxy/config"]
