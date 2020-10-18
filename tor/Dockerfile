@@ -1,15 +1,13 @@
-FROM alpine:3.10
+FROM alpine:3.12
 
 ARG TZ='Asia/Shanghai'
 
 ENV TZ ${TZ}
 
-RUN apk upgrade --update \
-    && apk add tor privoxy bash tzdata su-exec \
-    && ln -sf /dev/stdout /var/log/tor/notices.log \
-    && ln -sf /usr/share/zoneinfo/${TZ} /etc/localtime \
-    && echo "${TZ}" > /etc/timezone \
-    && rm -rf /var/cache/apk/*
+RUN apk add --no-cache tor privoxy bash tzdata su-exec \
+ && ln -sf /dev/stdout /var/log/tor/notices.log \
+ && ln -sf /usr/share/zoneinfo/${TZ} /etc/localtime \
+ && echo "${TZ}" > /etc/timezone
 
 COPY torrc /etc/tor/torrc
 
