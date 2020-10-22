@@ -12,6 +12,6 @@ RUN apt update \
  && cd / \
  && git clone https://github.com/bpftools/linux-observability-with-bpf.git \
  && mv /linux-observability-with-bpf /code \
- && echo 'mount -t debugfs none /sys/kernel/debug > /code/mount.sh
+ && echo 'mount -t debugfs none /sys/kernel/debug' > /code/mount.sh
 
 WORKDIR /code
