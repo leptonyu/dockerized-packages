@@ -6,7 +6,6 @@ RUN apt update \
  && mv /linux-5.0.9 /kernel-src \
  && cd /kernel-src/tools/lib/bpf \
  && make && make install prefix=/ \
- && cd /linux-observability-with-bpf \
  && cp /lib64/libbpf.* /lib/x86_64-linux-gnu/ \
  && rm -rf /kernel-src \
  && apt autoremove \
