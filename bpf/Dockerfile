@@ -9,9 +9,9 @@ RUN apt update \
  && cp /lib64/libbpf.* /lib/x86_64-linux-gnu/ \
  && rm -rf /kernel-src \
  && apt autoremove \
- && mount -t debugfs none /sys/kernel/debug \
  && cd / \
  && git clone https://github.com/bpftools/linux-observability-with-bpf.git \
- && mv /linux-observability-with-bpf /code
+ && mv /linux-observability-with-bpf /code \
+ && echo 'mount -t debugfs none /sys/kernel/debug > /code/mount.sh
 
 WORKDIR /code
