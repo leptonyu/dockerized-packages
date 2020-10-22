@@ -32,9 +32,9 @@ env:
     - NAME: tor
       VERSION: 0.4.3.5-r0
     - NAME: dnsmasq
-     VERSION: 2.81-r0
+      VERSION: 2.81-r0
     - NAME: privoxy
-     VERSION: 3.0.28
+      VERSION: 3.0.28
 
 script:
   - docker build -t $DOCKER_USERNAME/$NAME:$VERSION --build-arg name=$NAME --build-arg ver=$VERSION ${DIR:-$NAME}
