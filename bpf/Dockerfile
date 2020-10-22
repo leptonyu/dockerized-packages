@@ -7,7 +7,6 @@ RUN apt update \
  && cd /kernel-src/tools/lib/bpf \
  && make && make install prefix=/ \
  && cp /lib64/libbpf.* /lib/x86_64-linux-gnu/ \
- && rm -rf /kernel-src \
  && apt autoremove \
  && cd / \
  && git clone https://github.com/bpftools/linux-observability-with-bpf.git \
