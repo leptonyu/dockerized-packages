@@ -12,11 +12,14 @@ jobs:
 
     steps:
     - uses: actions/checkout@v2
+    - name: Login to DockerHub
+      uses: docker/login-action@v1 
+      with:
+        username: icymint
+        password: ${{ secrets.DOCKER_PASS }}
     - name: Build and Push
       uses: docker/build-push-action@v2
       with:
         push: true
         tags: icymint/dnsmasq:2.82-r0
         context: dnsmasq
-        username: icymint
-        password: ${{ secrets.DOCKER_PASS }}
