@@ -31,12 +31,12 @@ env:
     #   VERSION: 14
     # - NAME: tor
     #   VERSION: 0.4.3.5-r0
-    # - NAME: dnsmasq
-    #   VERSION: 2.81-r0
+    - NAME: dnsmasq
+      VERSION: 2.82-r0
     # - NAME: privoxy
     #   VERSION: 3.0.28
-    - NAME: bpf
-      VERSION: 1.0
+    #- NAME: bpf
+    #  VERSION: 1.0
 
 script:
   - docker build -t $DOCKER_USERNAME/$NAME:$VERSION --build-arg name=$NAME --build-arg ver=$VERSION ${DIR:-$NAME}
