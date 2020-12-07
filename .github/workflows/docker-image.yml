@@ -9,7 +9,6 @@ on:
 jobs:
   build:
     runs-on: ubuntu-20.04
-
     steps:
     - uses: actions/checkout@v2
     - name: Login to DockerHub
@@ -22,4 +21,4 @@ jobs:
       with:
         push: true
         tags: icymint/dnsmasq:2.82-r0
-        context: dnsmasq
+        file: ./dnsmasq/Dockerfile
