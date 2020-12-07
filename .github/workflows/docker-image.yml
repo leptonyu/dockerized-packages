@@ -1,0 +1,25 @@
+name: Docker Image CI
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+
+jobs:
+
+  build:
+
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        name: ['dnsmasq']
+        version: ['2.82-r0']
+    env:
+      NAME: ${{ matrix.name }}
+      VERSION: ${{ matrix.version }}
+
+    steps:
+    - uses: actions/checkout@v2
+    - name: Build the Docker image
+      run: docker build -t icymint/$NAME:$VERSION --build-arg name=$NAME --build-arg ver=$VERSION ${DIR:-$NAME}
