@@ -7,19 +7,16 @@ on:
     branches: [ master ]
 
 jobs:
-
   build:
-
     runs-on: ubuntu-20.04
-    strategy:
-      matrix:
-        name: ['dnsmasq']
-        version: ['2.82-r0']
-    env:
-      NAME: ${{ matrix.name }}
-      VERSION: ${{ matrix.version }}
 
     steps:
     - uses: actions/checkout@v2
-    - name: Build the Docker image
-      run: docker build -t icymint/$NAME:$VERSION --build-arg name=$NAME --build-arg ver=$VERSION ${DIR:-$NAME}
+    - name: Build and Push
+      uses: docker/build-push-action@v2
+      with:
+        push: true
+        tags: icymint/dnsmasq:2.82-r0
+        context: dnsmasq
+        username: icymint
+        password: ${{ secrets.DOCKER_PASS }}
