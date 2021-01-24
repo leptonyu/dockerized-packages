@@ -1,0 +1,7 @@
+export HADOOP_VERSION=3.2.2
+export HADOOP_HOME=/opt/hadoop-$HADOOP_VERSION
+export PATH=$PATH:$HADOOP_HOME/bin:$HADOOP_HOME/sbin
+export HDFS_NAMENODE_USER=root
+export HDFS_DATANODE_USER=root
+export HDFS_SECONDARYNAMENODE_USER=root
+export HADOOP_OS_TYPE=${HADOOP_OS_TYPE:-$(uname -s)}

@@ -21,9 +21,12 @@ jobs:
         username: icymint
         password: ${{ secrets.DOCKER_PASS }}
     - name: Build and Push
-      uses: docker/build-push-action@v2
+      uses: mr-smithers-excellent/docker-build-push@v5
       with:
-        tags: icymint/dnsmasq:2.82-r0
-        file: ./dnsmasq/Dockerfile
-    - name: Push
-      run: docker push icymint/dnsmasq:2.82-r0
+        image: icymint/hadoop
+        tags: latest, 3.2.2
+        directory: ./hadoop
+      #        tags: icymint/dnsmasq:2.82-r0
+      #        file: ./dnsmasq/Dockerfile
+      #    - name: Push
+      #      run: docker push icymint/dnsmasq:2.82-r0
