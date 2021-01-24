@@ -25,7 +25,7 @@ jobs:
       with:
         image: icymint/hadoop
         tags: latest, 3.2.2
-        directory: ./hadoop
+        directory: hadoop
         registry: docker.io
       #        tags: icymint/dnsmasq:2.82-r0
       #        file: ./dnsmasq/Dockerfile
