@@ -17,9 +17,7 @@ RUN apk add --no-cache curl ca-certificates openssh-client pdsh bash \
 COPY ./etc/* $HADOOP_HOME/etc/hadoop/
 COPY ./ssh/config /root/.ssh/
 
-RUN echo "export JAVA_HOME=$JAVA_HOME" >> $HADOOP_HOME/etc/hadoop/hadoop-env.sh \
- && chmod 700 /root/.ssh \
- && chmod 600 /root/.ssh/*
+RUN echo "export JAVA_HOME=$JAVA_HOME" >> $HADOOP_HOME/etc/hadoop/hadoop-env.sh
 
 VOLUME $HADOOP_HOME/logs
 
