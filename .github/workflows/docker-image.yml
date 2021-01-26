@@ -24,7 +24,7 @@ jobs:
       uses: mr-smithers-excellent/docker-build-push@v5
       with:
         image: icymint/hadoop
-        tags: latest, 3.2.2
+        tags: latest, 3.3.0
         directory: hadoop
         registry: docker.io
         dockerfile: hadoop/Dockerfile

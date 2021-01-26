@@ -2,7 +2,7 @@ FROM adoptopenjdk/openjdk11-openj9:jdk-11.0.9_11_openj9-0.23.0-alpine-slim
 
 MAINTAINER Daniel Yu <leptonyu@gmail.com>
 
-ENV HADOOP_VERSION=3.2.2
+ENV HADOOP_VERSION=3.3.0
 ENV HADOOP_URL=https://mirrors.bfsu.edu.cn/apache/hadoop/common/hadoop-$HADOOP_VERSION/hadoop-$HADOOP_VERSION.tar.gz
 
 RUN apk add --no-cache curl ca-certificates openssh-client pdsh bash \
