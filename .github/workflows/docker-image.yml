@@ -28,7 +28,3 @@ jobs:
         directory: hadoop
         registry: docker.io
         dockerfile: hadoop/Dockerfile
-      #        tags: icymint/dnsmasq:2.82-r0
-      #        file: ./dnsmasq/Dockerfile
-      #    - name: Push
-      #      run: docker push icymint/dnsmasq:2.82-r0

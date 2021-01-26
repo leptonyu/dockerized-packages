@@ -1,5 +1,7 @@
 #!/bin/bash
 
+set -e
+
 export CORE_CONF_fs_defaultFS=${CORE_CONF_fs_defaultFS:-hdfs://$(hostname)}
 
 add_property () {
