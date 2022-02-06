@@ -23,8 +23,8 @@ jobs:
     - name: Build and Push
       uses: mr-smithers-excellent/docker-build-push@v5
       with:
-        image: icymint/hadoop
-        tags: latest, 3.3.0
-        directory: hadoop
+        image: icymint/code
+        tags: latest, 4.0.2
+        directory: code
         registry: docker.io
-        dockerfile: hadoop/Dockerfile
+        dockerfile: code/Dockerfile
