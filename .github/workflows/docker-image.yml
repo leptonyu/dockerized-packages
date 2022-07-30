@@ -24,7 +24,7 @@ jobs:
       uses: mr-smithers-excellent/docker-build-push@v5
       with:
         image: icymint/code
-        tags: latest, 4.5.1
+        tags: latest, 4.5.1-v2
         directory: code
         registry: docker.io
         dockerfile: code/Dockerfile
