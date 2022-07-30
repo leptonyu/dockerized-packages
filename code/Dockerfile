@@ -1,4 +1,4 @@
-FROM linuxserver/code-server:4.1.0
+FROM codecom/code-server:4.5.1
 
 RUN apt update \
  && apt install -y --no-install-recommends git gcc make gcc-multilib \
