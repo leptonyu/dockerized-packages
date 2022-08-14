@@ -19,7 +19,7 @@ jobs:
         password: ${{ secrets.DOCKER_PASS }}
     - name: Extract metadata (tags, labels) for Docker
       id: meta
-      uses: docker/metadata-action@98669ae865ea3cffbcbaa878cf57c20bbf1c6c38
+      uses: docker/metadata-action@ee266832e57cb510bc6060ce5129df0529f119df
       with:
         images: icymint/code
     - name: Build and Push
