@@ -2,9 +2,8 @@ name: Docker Image CI
 
 on:
   push:
-    branches: [ main ]
-  pull_request:
-    branches: [ main ]
+    tags:
+    - '[a-z]+-v[0-9]+.[0-9]+.[0-9]+'
 
 jobs:
   build:
@@ -17,15 +16,22 @@ jobs:
       with:
         username: icymint
         password: ${{ secrets.DOCKER_PASS }}
+    - name: Set env
+      run: |
+        _NAME=${GITHUB_REF#refs/*/}
+        echo "RELEASE_NAME=${_NAME%-*}" >> $GITHUB_ENV
+        echo "RELEASE_VERSION=${_NAME#*-}" >> $GITHUB_ENV
     - name: Extract metadata (tags, labels) for Docker
       id: meta
       uses: docker/metadata-action@ee266832e57cb510bc6060ce5129df0529f119df
       with:
-        images: icymint/code
+        images: icymint/${{ env.RELEASE_NAME }}
+        tags: |
+          type=match,pattern=.*-(.*),group=1=
     - name: Build and Push
       uses: docker/build-push-action@1527803881d0d3d1073ef4278b1168264ce2f779
       with:
-        context: code
+        context: ${{ env.RELEASE_NAME }}
         push: true
         tags: ${{ steps.meta.outputs.tags }}
         labels: ${{ steps.meta.outputs.labels }}
