@@ -1,4 +1,4 @@
-FROM docker:19.03.15-dind
+FROM docker:20.10.17-dind
 
 ENV JAVA_HOME /opt/openjdk-14
 ENV PATH $JAVA_HOME/bin:$PATH
