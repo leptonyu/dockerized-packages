@@ -4,34 +4,60 @@ on:
   push:
     tags:
     - '[a-z]+-v[0-9]+.[0-9]+.[0-9]+'
-
+    branches:
+    - main
 jobs:
+  changes:
+    name: Get changes
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: "{\"container\": ${{ steps.reduce.outputs.containers }} }"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+      - uses: dorny/paths-filter@v2
+        id: filter
+        with:
+          list-files: json
+          base: main
+          filters: |
+            changed:
+              - 'code/**'
+              - 'tor/**'
+      - id: reduce
+        run: |
+          echo '${{ toJson(steps.filter.outputs) }}' | tee changes.json
+          CONTAINERS=$(jq --raw-output '.changed_files | fromjson | .[] |= sub("(?<filepath>(?<first_directory>(?<root1>[/]?)[^/]+/)(?<second_directory>(?<root2>[/]?)[^/]+)(?<extra_paths>.+))"; "\(.second_directory)") | unique' changes.json)
+          echo ::set-output name=containers::${CONTAINERS}
   build:
     runs-on: ubuntu-latest
+    needs:
+      - changes
     steps:
     - name: Check out the repo
       uses: actions/checkout@v3
-    - name: Login to DockerHub
-      uses: docker/login-action@v2
-      with:
-        username: icymint
-        password: ${{ secrets.DOCKER_PASS }}
     - name: Set env
       run: |
-        _NAME=${GITHUB_REF#refs/*/}
-        echo "RELEASE_NAME=${_NAME%-*}" >> $GITHUB_ENV
-        echo "RELEASE_VERSION=${_NAME#*-}" >> $GITHUB_ENV
-    - name: Extract metadata (tags, labels) for Docker
-      id: meta
-      uses: docker/metadata-action@ee266832e57cb510bc6060ce5129df0529f119df
-      with:
-        images: icymint/${{ env.RELEASE_NAME }}
-        tags: |
-          type=match,pattern={{env.RELEASE_NAME}}-(.*),group=1=
-    - name: Build and Push
-      uses: docker/build-push-action@1527803881d0d3d1073ef4278b1168264ce2f779
-      with:
-        context: ${{ env.RELEASE_NAME }}
-        push: true
-        tags: ${{ steps.meta.outputs.tags }}
-        labels: ${{ steps.meta.outputs.labels }}
+       echo "${{ needs.changes.outputs.matrix }}"
+    #     _NAME=${GITHUB_REF#refs/*/}
+    #     echo "RELEASE_NAME=${_NAME%-*}" >> $GITHUB_ENV
+    #     echo "RELEASE_VERSION=${_NAME#*-}" >> $GITHUB_ENV
+    # - name: Login to DockerHub
+    #   uses: docker/login-action@v2
+    #   with:
+    #     username: icymint
+    #     password: ${{ secrets.DOCKER_PASS }}
+    # - name: Extract metadata (tags, labels) for Docker
+    #   id: meta
+    #   uses: docker/metadata-action@ee266832e57cb510bc6060ce5129df0529f119df
+    #   with:
+    #     images: icymint/${{ env.RELEASE_NAME }}
+    #     tags: |
+    #       type=match,pattern=.*-(.*),group=1=
+    # - name: Build and Push
+    #   uses: docker/build-push-action@1527803881d0d3d1073ef4278b1168264ce2f779
+    #   with:
+    #     context: ${{ env.RELEASE_NAME }}
+    #     push: true
+    #     tags: ${{ steps.meta.outputs.tags }}
+    #     labels: ${{ steps.meta.outputs.labels }}
