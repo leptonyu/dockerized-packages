@@ -1,4 +1,4 @@
-FROM alpine:3.12.1
+FROM alpine:3.16.2
 RUN apk --no-cache add dnsmasq-dnssec
 VOLUME /etc/dnsmasq
 EXPOSE 53 53/udp
