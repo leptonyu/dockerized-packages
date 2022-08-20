@@ -71,5 +71,6 @@ jobs:
         context: ${{ matrix.container }}
         push: ${{ github.event_name != 'pull_request' }}
         tags: |
+          icymint/${{matrix.container}}:v${{ steps.get_ver.outputs.ver }}
           icymint/${{matrix.container}}:${{ steps.get_ver.outputs.ver }}
           icymint/${{matrix.container}}:latest
