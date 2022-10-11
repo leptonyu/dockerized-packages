@@ -6,6 +6,7 @@ RUN sudo apt update \
   make \
   gcc-multilib \
   build-essential \
+  musl-tools \
   curl \
   netcat \
   libffi-dev \
