@@ -16,4 +16,3 @@ RUN sudo apt update \
   libncurses-dev \
   libncurses5 \
   libtinfo5
-
