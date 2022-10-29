@@ -7,6 +7,7 @@ RUN sudo apt update \
   gcc-multilib \
   build-essential \
   musl-tools \
+  protobuf-compiler \
   curl \
   netcat \
   libffi-dev \
