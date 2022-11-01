@@ -6,6 +6,7 @@ RUN sudo apt update \
   make \
   gcc-multilib \
   build-essential \
+  net-tools \
   musl-tools \
   protobuf-compiler \
   curl \
