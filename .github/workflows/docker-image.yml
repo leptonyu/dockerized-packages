@@ -61,7 +61,7 @@ jobs:
         echo ::set-output name=ver::$RELEASE_VERSION
     - name: Login to DockerHub
       if: github.event_name != 'pull_request'
-      uses: docker/login-action@v2
+      uses: docker/login-action@v3
       with:
         username: icymint
         password: ${{ secrets.DOCKER_PASS }}
