@@ -66,7 +66,7 @@ jobs:
         username: icymint
         password: ${{ secrets.DOCKER_PASS }}
     - name: Build and Push
-      uses: docker/build-push-action@0f847266c302569530c95bfa228489494c43b002
+      uses: docker/build-push-action@8d2cf95286e3dd3d016d478187b93b57af29fd2d
       with:
         context: ${{ matrix.container }}
         push: ${{ github.event_name != 'pull_request' }}
