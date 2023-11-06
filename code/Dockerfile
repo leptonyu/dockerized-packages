@@ -5,6 +5,7 @@ RUN sudo apt update \
   gcc \
   cmake \
   make \
+  clang \
   gcc-multilib \
   build-essential \
   net-tools \
