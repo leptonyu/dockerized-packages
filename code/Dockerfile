@@ -4,6 +4,7 @@ RUN sudo apt update \
  && sudo apt install -y --no-install-recommends \
   gcc \
   make \
+  cmake \
   gcc-multilib \
   build-essential \
   net-tools \
