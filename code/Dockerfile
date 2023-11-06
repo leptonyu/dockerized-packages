@@ -3,8 +3,8 @@ FROM ghcr.io/coder/code-server:4.18.0
 RUN sudo apt update \
  && sudo apt install -y --no-install-recommends \
   gcc \
-  make \
   cmake \
+  make \
   gcc-multilib \
   build-essential \
   net-tools \
