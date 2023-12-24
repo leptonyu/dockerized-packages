@@ -12,7 +12,7 @@ RUN sudo apt update \
   musl-tools \
   protobuf-compiler \
   curl \
-  netcat \
+  netcat-openbsd \
   libffi-dev \
   libffi7 \
   libgmp-dev \
