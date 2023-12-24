@@ -14,7 +14,6 @@ RUN sudo apt update \
   curl \
   netcat-openbsd \
   libffi-dev \
-  libffi7 \
   libgmp-dev \
   libgmp10 \
   libncurses-dev \
