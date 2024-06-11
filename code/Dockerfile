@@ -1,4 +1,4 @@
-FROM ghcr.io/coder/code-server:4.89.1
+FROM ghcr.io/coder/code-server:4.90.0
 
 RUN sudo apt update \
  && sudo apt install -y --no-install-recommends \
