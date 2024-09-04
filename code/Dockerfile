@@ -7,6 +7,7 @@ RUN sudo apt update \
   make \
   clang \
   pkg-config \
+  libssl-dev \
   gcc-multilib \
   build-essential \
   net-tools \
