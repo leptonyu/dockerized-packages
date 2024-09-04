@@ -6,6 +6,7 @@ RUN sudo apt update \
   cmake \
   make \
   clang \
+  pkg-config \
   gcc-multilib \
   build-essential \
   net-tools \
