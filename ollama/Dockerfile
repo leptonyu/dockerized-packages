@@ -7,6 +7,6 @@ RUN apt update \
  && curl -fsSL https://repositories.intel.com/gpu/intel-graphics.key | gpg --dearmor | tee /usr/share/keyrings/intel-graphics-archive-keyring.gpg \
  && echo "deb [signed-by=/usr/share/keyrings/intel-graphics-archive-keyring.gpg arch=amd64] https://repositories.intel.com/gpu/ubuntu jammy/lts/2350 unified" > /etc/apt/sources.list.d/intel-graphics.list \
  && apt update \
- && apt install -y intel-basekit intel-opencl-icd intel-level-zero-gpu level-zero level-zero-dev \
+ && apt install -y intel-opencl-icd intel-level-zero-gpu level-zero level-zero-dev \
  && rm -rf /var/lib/apt/lists/*
 
