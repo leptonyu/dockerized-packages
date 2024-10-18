@@ -7,12 +7,14 @@ on:
     paths:
       - 'code/**'
       - 'tor/**'
+      - 'ollama/**'
   pull_request:
     branches-ignore:
     - main
     paths:
       - 'code/**'
       - 'tor/**'
+      - 'ollama/**'
 
 jobs:
   changes:
@@ -33,6 +35,7 @@ jobs:
             - added|modified:
               - 'code/**'
               - 'tor/**'
+              - 'ollama/**'
       - id: reduce
         run: |
           echo '${{ toJson(steps.filter.outputs) }}' | tee changes.json
