@@ -1,0 +1,22 @@
+name: Generate Adguard
+
+on:
+  schedule:
+  - cron: "55 * * * *"
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - name: Get current date
+        id: date
+        run: echo "::set-output name=date::$(date +'%Y%m%d')"
+      - name: Run Generate
+        run: |
+          git clone --depth 1 https://github.com/felixonmars/dnsmasq-china-list.git
+          ./gen.sh ${{ steps.date.outputs.date }}
+      - name: Upload a Build Artifact
+        uses: softprops/action-gh-release@v1
+        with:
+          files: upstream-${{ steps.date.outputs.date }}.tar.gz
