@@ -17,6 +17,6 @@ jobs:
           git clone --depth 1 https://github.com/felixonmars/dnsmasq-china-list.git
           ./gen.sh ${{ steps.date.outputs.date }}
       - name: Upload a Build Artifact
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           files: upstream-${{ steps.date.outputs.date }}.tar.gz
