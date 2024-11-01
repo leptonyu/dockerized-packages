@@ -32,4 +32,5 @@ jobs:
       - name: Upload a Build Artifact
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: v${{ steps.date.outputs.date }}
           files: upstream-${{ steps.date.outputs.date }}.tar.gz
