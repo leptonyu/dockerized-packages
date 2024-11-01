@@ -19,6 +19,14 @@ jobs:
         run: |
           git clone --depth 1 https://github.com/felixonmars/dnsmasq-china-list.git
           ./gen.sh ${{ steps.date.outputs.date }}
+      - name: Tag the repository
+        id: tag
+        run: |
+          # See https://docs.github.com/en/get-started/using-git/dealing-with-special-characters-in-branch-and-tag-names
+          TAG=v${{ steps.date.outputs.date }}
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          git tag -a $TAG -m "Published version $TAG" ${GITHUB_SHA}
+          git push origin $TAG
       - name: Upload a Build Artifact
         uses: softprops/action-gh-release@v2
         with:
