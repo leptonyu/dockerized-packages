@@ -28,7 +28,7 @@ jobs:
           git config --global user.email "ci@example.org"
           git config --global user.name "GitHubCI"
           git tag -a $TAG -m "Published version $TAG" ${GITHUB_SHA}
-          git push origin $TAG
+          git push origin $TAG -f
       - name: Upload a Build Artifact
         uses: softprops/action-gh-release@v2
         with:
