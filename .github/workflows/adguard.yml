@@ -25,6 +25,8 @@ jobs:
           # See https://docs.github.com/en/get-started/using-git/dealing-with-special-characters-in-branch-and-tag-names
           TAG=v${{ steps.date.outputs.date }}
           echo "tag=$TAG" >> $GITHUB_OUTPUT
+          git config --global user.email "ci@example.org"
+          git config --global user.name "GitHubCI"
           git tag -a $TAG -m "Published version $TAG" ${GITHUB_SHA}
           git push origin $TAG
       - name: Upload a Build Artifact
