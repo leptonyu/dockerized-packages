@@ -21,4 +21,4 @@ gen > upstream.conf
 
 DAT=${1:?date not set}
 
-tar -zcf upstream-$DAT.tar.gz upstream.conf
+tar -Jcf upstream-$DAT.tar.xz upstream.conf
