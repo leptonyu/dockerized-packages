@@ -2,7 +2,7 @@ name: Generate Adguard
 
 on:
   schedule:
-  - cron: "0 17 * * *" # Asia/Shanghai 23:00
+  - cron: "30 17 * * *" # Asia/Shanghai 23:30
   push:
     branches:
     - main
