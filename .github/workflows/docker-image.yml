@@ -54,7 +54,7 @@ jobs:
     - name: Get Version
       id: get_ver
       run: |
-        if [ "${{ matrix.container }}" = "code" ]; then
+        if [ "${{ matrix.container }}" != "tor" ]; then
           RELEASE_VERSION="$(awk -F: '/FROM/{print $2}' ${{ matrix.container }}/Dockerfile)"
         fi
         if [ -z "$RELEASE_VERSION" ]; then
