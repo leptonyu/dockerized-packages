@@ -6,12 +6,14 @@ on:
     - main
     paths:
       - 'code/**'
+      - 'restic/**'
       - 'tor/**'
   pull_request:
     branches-ignore:
     - main
     paths:
       - 'code/**'
+      - 'restic/**'
       - 'tor/**'
 
 jobs:
@@ -32,6 +34,7 @@ jobs:
             changed:
             - added|modified:
               - 'code/**'
+              - 'restic/**'
               - 'tor/**'
       - id: reduce
         run: |
