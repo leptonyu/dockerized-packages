@@ -35,4 +35,6 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ steps.date.outputs.date }}
-          files: upstream-${{ steps.date.outputs.date }}.tar.xz
+          files: |
+            upstream.tar.xz
+            upstream.tar.xz.sha256sum

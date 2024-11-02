@@ -19,6 +19,5 @@ awk '-F[/]' -v dns="$DNS_CN" '{print "[/"$2"/]"dns}' \
 
 gen > upstream.conf
 
-DAT=${1:?date not set}
-
-tar -Jcf upstream-$DAT.tar.xz upstream.conf
+tar -Jcf upstream.tar.xz upstream.conf
+sha256sum upstream.tar.xz > upstream.tar.xz.sha256sum
