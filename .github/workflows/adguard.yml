@@ -2,7 +2,7 @@ name: Generate Adguard
 
 on:
   schedule:
-  - cron: "1 18 * * *" # Asia/Shanghai 00:01
+  - cron: "0 17 * * *" # Asia/Shanghai 23:00
   push:
     branches:
     - main
@@ -16,7 +16,7 @@ jobs:
         id: date
         run: |
           export TZ=Asia/Shanghai
-          echo "::set-output name=date::$(date +'%Y%m%d')"
+          echo "::set-output name=date::$(date -d next-hour +'%Y%m%d')"
       - name: Run Generate
         run: |
           git clone --depth 1 https://github.com/felixonmars/dnsmasq-china-list.git
