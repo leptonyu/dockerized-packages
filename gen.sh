@@ -21,4 +21,4 @@ awk '-F[/]' -v dns="$DNS_CN" '{print "[/"$2"/]"dns}' \
 gen > upstream.conf
 
 tar -Jcf upstream.tar.xz upstream.conf
-sha256sum upstream.tar.xz > upstream.tar.xz.sha256sum
+sha256sum upstream.conf > upstream.conf.sha256sum
