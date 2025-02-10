@@ -19,5 +19,4 @@ RUN sudo apt update \
   libgmp10 \
   libncurses-dev \
   libncurses5 \
-  libtinfo5 \
-  jq
+  libtinfo5
