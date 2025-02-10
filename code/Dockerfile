@@ -1,13 +1,14 @@
 FROM ghcr.io/coder/code-server:4.96.4
 
-RUN sudo apt update \
- && sudo apt install -y --no-install-recommends \
+USER root
+
+RUN apt update \
+ && apt install -y --no-install-recommends \
   gcc \
   cmake \
   make \
   clang \
   pkg-config \
-  gcc-multilib \
   build-essential \
   net-tools \
   musl-tools \
