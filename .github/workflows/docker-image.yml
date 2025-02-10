@@ -71,6 +71,9 @@ jobs:
     - name: Build and Push
       uses: docker/build-push-action@ca877d9245402d1537745e0e356eab47c3520991
       with:
+        platforms:
+           - linux/amd64
+           - linux/arm64
         context: ${{ matrix.container }}
         push: ${{ github.event_name != 'pull_request' }}
         tags: |
