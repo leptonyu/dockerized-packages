@@ -1,0 +1,13 @@
+FROM alpine:3.21
+
+ARG TZ='Asia/Shanghai'
+
+ENV TZ=${TZ}
+
+RUN apk add --no-cache bash tzdata curl jq \
+ && ln -sf /usr/share/zoneinfo/${TZ} /etc/localtime \
+ && echo "${TZ}" > /etc/timezone
+RUN uname -r \
+ && curl -L -o /usr/local/bin/kubectl "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/$TARGETARCH/kubectl" \
+ && chmod +x /usr/local/bin/kubectl
+
