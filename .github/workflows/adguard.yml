@@ -37,4 +37,4 @@ jobs:
           tag_name: v${{ steps.date.outputs.date }}
           files: |
             upstream.tar.xz
-            upstream.tar.xz.sha256sum
+            upstream.conf.sha256sum
