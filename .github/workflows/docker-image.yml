@@ -8,6 +8,7 @@ on:
       - 'code/**'
       - 'restic/**'
       - 'tor/**'
+      - 'kubectl/**'
   pull_request:
     branches-ignore:
     - main
@@ -15,6 +16,7 @@ on:
       - 'code/**'
       - 'restic/**'
       - 'tor/**'
+      - 'kubectl/**'
 
 jobs:
   changes:
@@ -36,6 +38,7 @@ jobs:
               - 'code/**'
               - 'restic/**'
               - 'tor/**'
+              - 'kubectl/**'
       - id: reduce
         run: |
           echo '${{ toJson(steps.filter.outputs) }}' | tee changes.json
@@ -49,6 +52,16 @@ jobs:
       matrix: ${{ fromJson(needs.changes.outputs.matrix) }}
       fail-fast: false
     steps:
+    - name: Set up Docker
+      uses: docker/setup-docker-action@v4
+      with:
+        daemon-config: |
+          {
+            "debug": true,
+            "features": {
+              "containerd-snapshotter": true
+            }
+          }
     - name: Check out the repo
       uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
     - name: Get Version
@@ -68,13 +81,13 @@ jobs:
       with:
         username: icymint
         password: ${{ secrets.DOCKER_PASS }}
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
     - name: Build and Push
-      uses: docker/build-push-action@ca877d9245402d1537745e0e356eab47c3520991
+      uses: docker/build-push-action@v6
       with:
-        platforms:
-           - linux/amd64
-           - linux/arm64
         context: ${{ matrix.container }}
+        platforms: linux/amd64,linux/arm64
         push: ${{ github.event_name != 'pull_request' }}
         tags: |
           icymint/${{matrix.container}}:v${{ steps.get_ver.outputs.ver }}

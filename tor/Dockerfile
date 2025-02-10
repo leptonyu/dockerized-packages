@@ -2,7 +2,7 @@ FROM alpine:3.21
 
 ARG TZ='Asia/Shanghai'
 
-ENV TZ ${TZ}
+ENV TZ=${TZ}
 
 RUN apk add --no-cache tor privoxy bash tzdata su-exec \
  && ln -sf /dev/stdout /var/log/tor/notices.log \
