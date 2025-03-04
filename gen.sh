@@ -18,7 +18,14 @@ awk '-F[/]' -v dns="$DNS_CN" '{print "[/"$2"/]"dns}' \
   | grep -v linkedin 
 }
 
-gen > upstream.conf
+gen_apple(){
+  awk -F/ '{print $2}' dnsmasq-china-list/apple.china.conf
+}
 
-tar -Jcf upstream.tar.xz upstream.conf
+gen > upstream.conf
+tar -Jcf upstream.tar.xz upstream.conf 
 sha256sum upstream.conf > upstream.conf.sha256sum
+
+gen_apple > apple.conf
+tar -Jcf apple.tar.xz apple.conf
+sha256sum apple.conf > apple.conf.sha256sum

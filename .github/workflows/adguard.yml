@@ -38,3 +38,5 @@ jobs:
           files: |
             upstream.tar.xz
             upstream.conf.sha256sum
+            apple.tar.xz
+            apple.conf.sha256sum
