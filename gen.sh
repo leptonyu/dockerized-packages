@@ -11,8 +11,8 @@ cat <<-EOF
 $DNS
 [/cluster.local/]10.96.0.10
 [/gacjie.cn/]$DNS
-[/github.com/]$DNS_FAKE
 EOF
+awk '-F[/]' -v dns="$DNS_FAKE" '{print "[/"$1"/]"dns}' domain.txt
 awk '-F[/]' -v dns="$DNS_CN" '{print "[/"$2"/]"dns}' \
   dnsmasq-china-list/accelerated-domains.china.conf \
   dnsmasq-china-list/google.china.conf \
