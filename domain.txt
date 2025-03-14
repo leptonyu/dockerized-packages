@@ -59,6 +59,9 @@ spring.io
 gradle.org
 gradle.com
 rust-lang.org
+digicert.com
+gateway.icloud.com
+m.hotmail.com
 tw
 kr
 hk
