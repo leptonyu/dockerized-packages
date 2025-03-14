@@ -37,6 +37,7 @@ jobs:
           filters: |
             changed:
             - added|modified:
+              - 'dns/**'
               - 'code/**'
               - 'restic/**'
               - 'tor/**'
