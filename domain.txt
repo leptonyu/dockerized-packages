@@ -61,7 +61,12 @@ gradle.com
 rust-lang.org
 digicert.com
 gateway.icloud.com
+gdmf.apple.com
+gdmf-ados.apple.com
+ls.apple.com
+smoot.apple.com
 m.hotmail.com
+office.com
 tw
 kr
 hk
