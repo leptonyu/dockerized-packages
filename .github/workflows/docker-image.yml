@@ -67,11 +67,14 @@ jobs:
     - name: Get Version
       id: get_ver
       run: |
-        if [ "${{ matrix.container }}" != "tor" ]; then
-          RELEASE_VERSION="$(awk -F: '/FROM/{print $2}' ${{ matrix.container }}/Dockerfile)"
-        fi
-        if [ -z "$RELEASE_VERSION" ]; then
+        if [ "${{ matrix.container }}" == "tor" ]; then
           RELEASE_VERSION=$(date +%Y%m%d)
+        elif [ "${{ matrix.container }}" == "dns" ]; then
+          cd ${{ matrix.container }}
+          ./gen.sh
+          RELEASE_VERSION=$(date +%y%m%d%H%M%S)
+        else
+          RELEASE_VERSION="$(awk -F: '/FROM/{print $2}' ${{ matrix.container }}/Dockerfile)"
         fi
         echo $RELEASE_VERSION
         echo ::set-output name=ver::$RELEASE_VERSION
