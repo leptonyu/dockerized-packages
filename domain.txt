@@ -243,13 +243,32 @@ lastpass.com
 globalsign.com
 fastmail.com
 brex.com
+# Telegram
+cdn-telegram.org
+comments.app
+contest.com
+fragment.com
+graph.org
+quiz.directory
+t.me
+tdesktop.com
+telega.one
+telegra.ph
+telegram-cdn.org
+telegram.dog
+telegram.me
+telegram.org
+telegram.space
+telesco.pe
+tg.dev
+tx.me
+usercontent.dev
 
 hostloc.com
 gcore.com
 yahoo.com
 twitch.tv
 ttvnw.net
-telegram.org
 resend.com
 nowe.com
 jwplayer.com
