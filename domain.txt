@@ -13,6 +13,7 @@ twitter.com
 twimg.com
 x.com
 x.ai
+groq.com
 pscp.tv
 wikipedia.org
 wikimedia.org
