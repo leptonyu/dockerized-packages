@@ -1,16 +1,15 @@
 #!/bin/bash
 
-DNS_FAKE="192.168.5.5:5333"
-DNS_US="8.8.8.8 8.8.4.4"
+DNS_FAKE="192.168.5.5:5333 8.8.4.4"
+DNS_US="8.8.8.8"
 DNS_CN="tcp://223.5.5.5:53 119.29.29.29"
 
 gen(){
 cat <<-EOF
-$DNS_FAKE
+$DNS_US
 [/cluster.local/]10.96.0.10
-[/arpa/]$DNS_US
 EOF
-# awk '-F[/]' -v dns="$DNS_FAKE" '{print "[/"$1"/]"dns}' domain.txt
+awk '-F[/]' -v dns="$DNS_FAKE" '{print "[/"$1"/]"dns}' domain.txt
 awk '-F[/]' -v dns="$DNS_CN" '{print "[/"$2"/]"dns}' \
   dnsmasq-china-list/accelerated-domains.china.conf \
   dnsmasq-china-list/google.china.conf \
