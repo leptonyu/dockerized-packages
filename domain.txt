@@ -239,7 +239,6 @@ formula1.com
 pulselive.com
 bloomreach.com
 privacy-mgmt.com
-d2n9h2wits23hf.cloudfront.net
 # Telegram
 cdn-telegram.org
 comments.app
