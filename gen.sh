@@ -7,7 +7,7 @@ DNS_US="tls://dns.google:853"
 # DNS-over-HTTPS  https://dns.alidns.com/dns-query  添加到 AdGuard，添加到 AdGuard VPN
 # DNS-over-TLS  tls://dns.alidns.com  添加到 AdGuard，添加到 AdGuard VPN
 # DNS-over-QUIC quic://dns.alidns.com:853 添加到 AdGuard, 添加到 AdGuard VPN
-DNS_CN="quic://dns.alidns.com:853 2400:3200:baba::1 119.29.29.29"
+DNS_CN="quic://dns.alidns.com:853 tls://dot.pub"
 
 gen(){
 cat <<-EOF
