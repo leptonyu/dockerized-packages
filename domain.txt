@@ -291,7 +291,6 @@ smoot.apple.com
 m.hotmail.com
 office.com
 api.apple-cloudkit.com
-autonavi.com
 gdmf.v.aaplimg.com
 push.apple.com
 asia
