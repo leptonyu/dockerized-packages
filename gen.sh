@@ -13,7 +13,6 @@ gen(){
 cat <<-EOF
 $DNS_US
 [/cluster.local/]10.96.0.10
-[/ls.apple.com/]$DNS_CN
 EOF
 awk -v dns="$DNS_FAKE" '/^[a-z]/{print "[/"$1"/]"dns}' domain.txt | sort -u
 awk '-F[/]' -v dns="$DNS_CN" '{print "[/"$2"/]"dns}' \
