@@ -283,6 +283,8 @@ gradle.org
 gradle.com
 rust-lang.org
 digicert.com
+# Apple
+xp-cdn.apple.com
 gateway.icloud.com
 gdmf.apple.com
 gdmf-ados.apple.com
