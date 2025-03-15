@@ -216,17 +216,6 @@ redditspace.com
 redditstatic.com
 redditstatus.com
 reddit.map.fastly.net
-
-raz-kids.com
-ansys.com
-max.com
-warnermediacdn.com
-formula1.com
-pulselive.com
-usestoryteller.com
-tiktokv.com
-tiktok.com
-us.weibo.com
 # 1paaword
 agilebits.com
 app-updates.us.svc.1infra.net
@@ -243,6 +232,9 @@ lastpass.com
 globalsign.com
 fastmail.com
 brex.com
+# F1
+usestoryteller.com
+formula1.com
 # Telegram
 cdn-telegram.org
 comments.app
@@ -264,6 +256,15 @@ tg.dev
 tx.me
 usercontent.dev
 
+raz-kids.com
+ansys.com
+max.com
+warnermediacdn.com
+pulselive.com
+usestoryteller.com
+tiktokv.com
+tiktok.com
+us.weibo.com
 hostloc.com
 gcore.com
 yahoo.com
