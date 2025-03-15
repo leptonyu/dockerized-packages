@@ -300,6 +300,9 @@ push.apple.com
 # Microsoft
 office365.com
 office.com
+# IPTV
+cdns.jp-primehome.com
+doubleclicktv.live
 asia
 ae
 ai
