@@ -295,10 +295,12 @@ gdmf.apple.com
 gdmf-ados.apple.com
 smoot.apple.com
 m.hotmail.com
-office.com
 api.apple-cloudkit.com
 gdmf.v.aaplimg.com
 push.apple.com
+# Microsoft
+office365.com
+office.com
 asia
 ae
 ai
