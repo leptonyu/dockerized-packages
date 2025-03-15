@@ -2,6 +2,7 @@ google.com
 googlecode.com
 googleapis.com
 goog
+gmail.com
 ## Youtube
 youtube
 ggpht.com
@@ -411,6 +412,5 @@ us
 uy
 ve
 vn
-youtube
 za
 zw
