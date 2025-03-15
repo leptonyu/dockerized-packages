@@ -287,12 +287,10 @@ gradle.org
 gradle.com
 rust-lang.org
 digicert.com
-# Apple
-m.hotmail.com
-api.apple-cloudkit.com
 # Microsoft
 office365.com
 office.com
+m.hotmail.com
 # IPTV
 cdns.jp-primehome.com
 doubleclicktv.live
