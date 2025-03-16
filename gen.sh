@@ -1,7 +1,7 @@
 #!/bin/bash
 
 DNS_US="tls://dns.google:853"
-DNS_FAKE="198.18.0.0:5333 $DNS_US"
+DNS_FAKE="198.18.0.0:5333"
 # DNS, IPv4 223.5.5.5 和 223.6.6.6 添加到 AdGuard，添加到 AdGuard VPN
 # DNS, IPv6 2400:3200::1 和 2400:3200:baba::1  添加到 AdGuard，添加到 AdGuard VPN
 # DNS-over-HTTPS  https://dns.alidns.com/dns-query  添加到 AdGuard，添加到 AdGuard VPN
