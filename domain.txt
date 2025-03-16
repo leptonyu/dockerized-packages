@@ -361,6 +361,11 @@ heads4-ak-spotify-com.akamaized.net
 spotify.com.edgesuite.net
 spotify.map.fastly.net
 spotify.map.fastlylb.net
+# AIA
+ipapi.co
+adobedtm.com
+b2clogin.com
+
 asia
 blog
 cat
