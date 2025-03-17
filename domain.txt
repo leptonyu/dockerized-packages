@@ -365,6 +365,14 @@ spotify.map.fastlylb.net
 ipapi.co
 adobedtm.com
 b2clogin.com
+# JetBrains
+intellij.com
+intellij.net
+intellij.org
+jetbrains.com
+jetbrains.net
+datalore.io
+kotlinlang.org
 
 asia
 blog
@@ -380,7 +388,9 @@ mil
 new
 solutions
 soy
+space
 store
+team
 tools
 wtf
 ac
