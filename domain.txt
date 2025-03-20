@@ -1,4 +1,5 @@
 yimg.com
+gateway.icloud.com
 # Amazon
 amazonaws.com
 # 1paaword
