@@ -33,7 +33,7 @@ gen_fake_includes(){
       echo $line
       awk -F: '/^include:/{if ($2 !~ /-cn$/) print $2}' $FILE
     fi
-  done
+  done | sort -u
 }
 
 gen_fake_expand(){
