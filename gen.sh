@@ -70,9 +70,17 @@ tvb
 twitter
 wikimedia
 wise
+x
 youtube
 category-ai-chat-!cn
+category-anticensorship
+category-communication
+category-cryptocurrency
+category-dev
+category-forums
 category-scholar-!cn
+category-social-media-!cn
+category-vpnservices
 EOF
 grep -v '^\(regexp:\|include:\|..*@cn\|#\|$\)' domain.txt
 }
