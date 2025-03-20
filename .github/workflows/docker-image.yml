@@ -5,7 +5,6 @@ on:
     branches-ignore:
     - main
     paths:
-      - 'dns/**'
       - 'code/**'
       - 'restic/**'
       - 'tor/**'
@@ -14,7 +13,6 @@ on:
     branches-ignore:
     - main
     paths:
-      - 'dns/**'
       - 'code/**'
       - 'restic/**'
       - 'tor/**'
@@ -37,7 +35,6 @@ jobs:
           filters: |
             changed:
             - added|modified:
-              - 'dns/**'
               - 'code/**'
               - 'restic/**'
               - 'tor/**'
@@ -72,11 +69,6 @@ jobs:
       run: |
         if [ "${{ matrix.container }}" == "tor" ]; then
           RELEASE_VERSION=$(date +%Y%m%d)
-        elif [ "${{ matrix.container }}" == "dns" ]; then
-          cd ${{ matrix.container }}
-          git clone --depth 1 https://github.com/felixonmars/dnsmasq-china-list.git
-          ./gen.sh
-          RELEASE_VERSION=$(date +%y%m%d%H%M%S)
         else
           RELEASE_VERSION="$(awk -F: '/FROM/{print $2}' ${{ matrix.container }}/Dockerfile)"
         fi
