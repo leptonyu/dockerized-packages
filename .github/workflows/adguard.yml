@@ -20,7 +20,8 @@ jobs:
       - name: Run Generate
         run: |
           git clone --depth 1 https://github.com/felixonmars/dnsmasq-china-list.git
-          ./gen.sh ${{ steps.date.outputs.date }}
+          git clone --depth 1 https://github.com/v2fly/domain-list-community.git
+          ./gen.sh
       - name: Tag the repository
         id: tag
         run: |

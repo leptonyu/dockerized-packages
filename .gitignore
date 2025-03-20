@@ -1,1 +1,6 @@
 .DS_Store
+domain-list-community
+dnsmasq-china-list
+upstream.conf*
+*.tar.xz
+apple.conf*

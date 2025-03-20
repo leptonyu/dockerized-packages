@@ -14,7 +14,7 @@ cat <<-EOF
 $DNS_US
 [/cluster.local/]10.96.0.10
 EOF
-awk -v dns="$DNS_FAKE" '/^[a-z]/{print "[/"$1"/]"dns}' domain.txt | sort -u
+gen_fake | sort -u | awk -v dns="$DNS_FAKE" '/^[a-z]/{print "[/"$1"/]"dns}'
 awk '-F[/]' -v dns="$DNS_CN" '{print "[/"$2"/]"dns}' \
   dnsmasq-china-list/accelerated-domains.china.conf \
   dnsmasq-china-list/google.china.conf \
@@ -24,6 +24,55 @@ awk '-F[/]' -v dns="$DNS_CN" '{print "[/"$2"/]"dns}' \
 
 gen_apple(){
   awk -F/ '{print $2}' dnsmasq-china-list/apple.china.conf
+}
+
+gen_fake_includes(){
+  while read line; do
+    FILE=domain-list-community/data/$line
+    if [ -e "$FILE" ]; then
+      echo $line
+      awk -F: '/^include:/{if ($2 !~ /-cn$/) print $2}' $FILE
+    fi
+  done
+}
+
+gen_fake_expand(){
+  while read line; do
+    FILE=domain-list-community/data/$line
+    if [ -e "$FILE" ]; then
+      grep -v '^\(regexp:\|include:\|..*@cn\|#\|$\)' $FILE | sed s/^full://g
+    fi
+  done
+}
+
+gen_fake(){
+  cat <<EOF | gen_fake_includes | gen_fake_expand
+discord
+disney
+github
+hbo
+hsbc
+jetbrains
+jetbrains-ai
+linkedin
+linux
+netflix
+nintendo
+openai
+oreilly
+reddit
+spotify
+stripe
+telegram
+tvb
+twitter
+wikimedia
+wise
+youtube
+category-ai-chat-!cn
+category-scholar-!cn
+EOF
+grep -v '^\(regexp:\|include:\|..*@cn\|#\|$\)' domain.txt
 }
 
 gen > upstream.conf
