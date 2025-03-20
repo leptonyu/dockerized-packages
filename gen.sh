@@ -19,7 +19,7 @@ awk '-F[/]' -v dns="$DNS_CN" '{print "[/"$2"/]"dns}' \
   dnsmasq-china-list/accelerated-domains.china.conf \
   dnsmasq-china-list/google.china.conf \
   dnsmasq-china-list/apple.china.conf \
-  | grep -v linkedin 
+  | grep -v linkedin | sort -u
 }
 
 gen_apple(){
@@ -50,6 +50,7 @@ gen_fake(){
 discord
 disney
 github
+google
 hbo
 hsbc
 jetbrains
