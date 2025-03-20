@@ -1,8 +1,4 @@
-google.com
-googlecode.com
-googleapis.com
-goog
-gmail.com
+yimg.com
 # Amazon
 amazonaws.com
 # 1paaword
