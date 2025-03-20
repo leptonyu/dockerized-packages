@@ -57,10 +57,12 @@ jetbrains
 jetbrains-ai
 linkedin
 linux
+medium
 netflix
 nintendo
 openai
 oreilly
+paypal
 pccw
 reddit
 spotify
