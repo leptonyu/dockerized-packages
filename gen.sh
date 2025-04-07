@@ -47,6 +47,7 @@ gen_fake_expand(){
 
 gen_fake(){
   cat <<EOF | gen_fake_includes | gen_fake_expand
+apple-intelligence
 discord
 disney
 github

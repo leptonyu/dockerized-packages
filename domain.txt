@@ -12,6 +12,8 @@ in
 jp
 kr
 sg
+plex.tv
+plex.direct
 adobedtm.com
 agilebits.com
 ansys.com
