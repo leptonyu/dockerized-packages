@@ -1,4 +1,4 @@
-FROM ghcr.io/coder/code-server:4.98.2
+FROM ghcr.io/coder/code-server:4.99.2
 
 USER root
 
