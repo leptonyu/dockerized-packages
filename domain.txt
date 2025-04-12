@@ -14,6 +14,9 @@ kr
 sg
 plex.tv
 plex.direct
+claspws.tv
+wurl.com
+amagi.tv
 alphaxiv.org
 adobedtm.com
 agilebits.com
