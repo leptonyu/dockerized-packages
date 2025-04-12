@@ -13,7 +13,6 @@ jp
 kr
 sg
 plex.tv
-plex.direct
 sentry.io
 claspws.tv
 wurl.com
@@ -21,6 +20,7 @@ wurl.tv
 amagi.tv
 frequency.stream
 otteravision.com
+xumo.com
 alphaxiv.org
 adobedtm.com
 agilebits.com
