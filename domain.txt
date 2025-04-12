@@ -16,7 +16,10 @@ plex.tv
 plex.direct
 claspws.tv
 wurl.com
+wurl.tv
 amagi.tv
+frequency.stream
+otteravision.com
 alphaxiv.org
 adobedtm.com
 agilebits.com
