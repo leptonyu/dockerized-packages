@@ -37,6 +37,9 @@ events.goldcast.io
 fastmail.com
 formula1.com
 gateway.icloud.com
+aaplimg.com
+weatherkit.apple.com
+ls.apple.com
 gcore.com
 globalsign.com
 gradle.com
