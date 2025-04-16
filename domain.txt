@@ -41,9 +41,7 @@ formula1.com
 ## --> Apple
 gateway.icloud.com
 gdmf.apple.com
-usw2-register-appattest-prod-aws-prod.apple.com
-apse1-wps-prod.apple.com
-euc1-wps-prod.apple.com
+appattest.apple.com
 ess.apple.com
 ## --< Apple
 gcore.com
