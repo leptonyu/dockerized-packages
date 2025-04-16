@@ -40,10 +40,7 @@ fastmail.com
 formula1.com
 ## --> Apple
 gateway.icloud.com
-gdmf.apple.com
-usw2-register-appattest-prod-aws-prod.apple.com
-apse1-wps-prod.apple.com
-euc1-wps-prod.apple.com
+apple.com
 ## --< Apple
 gcore.com
 globalsign.com
