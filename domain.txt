@@ -38,6 +38,11 @@ doubleclicktv.live
 events.goldcast.io
 fastmail.com
 formula1.com
+## --> Microsoft
+m.hotmail.com
+office.com
+office365.com
+microsoftonline.com
 ## --> Apple
 gateway.icloud.com
 gdmf.apple.com
@@ -54,9 +59,6 @@ hostloc.com
 ipapi.co
 jwplayer.com
 lastpass.com
-m.hotmail.com
-office.com
-office365.com
 privacy-mgmt.com
 privacy.com
 pulselive.com
