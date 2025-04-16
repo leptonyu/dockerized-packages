@@ -43,6 +43,8 @@ gateway.icloud.com
 gdmf.apple.com
 appattest.apple.com
 ess.apple.com
+ls.apple.com
+apple.com
 ## --< Apple
 gcore.com
 globalsign.com
