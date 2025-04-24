@@ -24,6 +24,7 @@ frequency.stream
 otteravision.com
 xumo.com
 ## --< Plex
+archive.org
 alphaxiv.org
 adobedtm.com
 agilebits.com
