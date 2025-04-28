@@ -34,6 +34,7 @@ b2clogin.com
 bloomreach.com
 brex.com
 cdns.jp-primehome.com
+claw.cloud
 cookielaw.org
 digicert.com
 doubleclicktv.live
