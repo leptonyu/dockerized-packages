@@ -78,3 +78,5 @@ usestoryteller.com
 warnermediacdn.com
 yahoo.com
 yimg.com
+## VictorOps
+victorops.com
