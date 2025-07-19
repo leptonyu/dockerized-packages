@@ -81,4 +81,4 @@ yimg.com
 ## VictorOps
 victorops.com
 app-measurement.com
-bestvm.com
+bestvm.cloud
