@@ -85,6 +85,7 @@ category-forums
 category-scholar-!cn
 category-social-media-!cn
 category-vpnservices
+cloudflare
 EOF
 grep -v '^\(regexp:\|include:\|..*@cn\|#\|$\)' domain.txt
 }
