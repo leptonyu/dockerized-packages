@@ -66,6 +66,7 @@ openai
 oreilly
 paypal
 pccw
+pixiv
 reddit
 spotify
 stripe
