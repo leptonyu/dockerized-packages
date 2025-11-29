@@ -13,6 +13,7 @@ jp
 kr
 sg
 edu
+dev
 ## --> Plex
 plex.tv
 sentry.io
