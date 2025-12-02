@@ -90,3 +90,5 @@ app.northflank.com
 ripe.net
 ###
 gemini.google.com
+globalshares.io
+jpmorgan.com
