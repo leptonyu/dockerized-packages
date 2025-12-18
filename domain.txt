@@ -16,7 +16,6 @@ edu
 dev
 ## --> Plex
 plex.tv
-sentry.io
 claspws.tv
 wurl.com
 wurl.tv
@@ -25,10 +24,8 @@ frequency.stream
 otteravision.com
 xumo.com
 ## --< Plex
-archive.org
 alphaxiv.org
 adobedtm.com
-agilebits.com
 ansys.com
 app-updates.us.svc.1infra.net
 b2clogin.com
@@ -70,10 +67,6 @@ raz-kids.com
 resend.com
 securepubads.g.doubleclick.net
 spring.io
-tiktok.com
-tiktokv.com
-ttvnw.net
-twitch.tv
 us.weibo.com
 usestoryteller.com
 warnermediacdn.com

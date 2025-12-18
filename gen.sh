@@ -48,7 +48,9 @@ gen_fake_expand(){
 
 gen_fake(){
   cat <<EOF | gen_fake_includes | gen_fake_expand
+agilebits
 apple-intelligence
+archive
 discord
 disney
 github
@@ -68,10 +70,13 @@ paypal
 pccw
 pixiv
 reddit
+sentry
 spotify
 stripe
 telegram
+tiktok
 tvb
+twitch
 twitter
 wikimedia
 wise
