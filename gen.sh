@@ -74,6 +74,7 @@ sentry
 spotify
 stripe
 telegram
+tesla
 tiktok
 tvb
 twitch
