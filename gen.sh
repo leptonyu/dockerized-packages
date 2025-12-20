@@ -15,7 +15,8 @@ $DNS_US
 [/cluster.local/]10.96.0.10
 [/sdxpass.com/]$DNS_CN
 EOF
-gen_fake | sort -u | awk '-F[ \r]' -v dns="$DNS_FAKE" '/^[a-z0-9]/{print "[/"$1"/]"dns}'
+gen_fake "!cn" | sort -u | awk '-F[ \r]' -v dns="$DNS_FAKE" '/^[a-z0-9]/{print "[/"$1"/]"dns}'
+gen_fake "cn" | sort -u | awk '-F[ \r]' -v dns="$DNS_CN" '/^[a-z0-9]/{print "[/"$1"/]"dns}'
 awk '-F[/]' -v dns="$DNS_CN" '{print "[/"$2"/]"dns}' \
   dnsmasq-china-list/accelerated-domains.china.conf \
   dnsmasq-china-list/google.china.conf \
@@ -41,13 +42,17 @@ gen_fake_expand(){
   while read line; do
     FILE=domain-list-community/data/$line
     if [ -e "$FILE" ]; then
-      grep -v '^\(regexp:\|include:\|..*@cn\|#\|$\)' $FILE | sed s/^full://g
+      grep -v '^\(regexp:\|include:\|#\|$\)' $FILE | grep ${1} '..*@cn' | sed s/^full://g | sed 's/\s\+@cn$//g'
     fi
   done
 }
 
 gen_fake(){
-  cat <<EOF | gen_fake_includes | gen_fake_expand
+  local OPT="-v"
+  if [ "$1" = "cn" ]; then
+    OPT=""
+  fi
+  cat <<EOF | gen_fake_includes | gen_fake_expand "$OPT"
 agilebits
 apple-intelligence
 archive
@@ -94,7 +99,7 @@ category-social-media-!cn
 category-vpnservices
 cloudflare
 EOF
-grep -v '^\(regexp:\|include:\|..*@cn\|#\|$\)' domain.txt
+grep -v '^\(regexp:\|include:\|#\|$\)' domain.txt | grep $OPT '..*@cn'
 }
 
 gen > upstream.conf
