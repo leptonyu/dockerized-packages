@@ -62,6 +62,7 @@ github
 google
 hbo
 hsbc
+huggingface
 jetbrains
 jetbrains-ai
 linkedin
