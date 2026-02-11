@@ -86,3 +86,4 @@ gemini.google.com
 globalshares.io
 jpmorgan.com
 models.inference.ai.azure.com
+anythingllm.com
