@@ -87,3 +87,4 @@ globalshares.io
 jpmorgan.com
 models.inference.ai.azure.com
 anythingllm.com
+amazon.com
