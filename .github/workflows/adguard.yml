@@ -33,7 +33,7 @@ jobs:
           git tag -a $TAG -m "Published version $TAG" ${GITHUB_SHA}
           git push origin $TAG -f
       - name: Upload a Build Artifact
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: v${{ steps.date.outputs.date }}
           files: |
