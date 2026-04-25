@@ -56,6 +56,7 @@ gen_fake(){
 agilebits
 apple-intelligence
 archive
+claude
 discord
 disney
 github
