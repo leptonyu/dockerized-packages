@@ -19,6 +19,6 @@ RUN apt update \
   libgmp-dev \
   libgmp10 \
   libncurses-dev \
-  libncurses5 \
-  libtinfo5 \
+  libncurses6 \
+  libtinfo6 \
   jq
