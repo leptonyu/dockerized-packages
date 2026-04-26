@@ -54,9 +54,9 @@ gen_fake(){
   fi
   cat <<EOF | gen_fake_includes | gen_fake_expand "$OPT"
 agilebits
+anthropic
 apple-intelligence
 archive
-claude
 discord
 disney
 github
