@@ -8,20 +8,47 @@ DNS_FAKE="198.18.0.0:5333"
 # DNS-over-TLS  tls://dns.alidns.com  添加到 AdGuard，添加到 AdGuard VPN
 # DNS-over-QUIC quic://dns.alidns.com:853 添加到 AdGuard, 添加到 AdGuard VPN
 DNS_CN="223.5.5.5"
+DNS_INTERNAL="10.96.0.10"
+OUT="${1:-adguard}"
 
-gen(){
-cat <<-EOF
+gen_adguard(){
+	cat <<-EOF
 $DNS_US
-[/cluster.local/]10.96.0.10
+[/cluster.local/]$DNS_INTERNAL
 [/sdxpass.com/]$DNS_CN
 EOF
-gen_fake "!cn" | sort -u | awk '-F[ \r]' -v dns="$DNS_FAKE" '/^[a-z0-9]/{print "[/"$1"/]"dns}'
-gen_fake "cn" | sort -u | awk '-F[ \r]' -v dns="$DNS_CN" '/^[a-z0-9]/{print "[/"$1"/]"dns}'
-awk '-F[/]' -v dns="$DNS_CN" '{print "[/"$2"/]"dns}' \
-  dnsmasq-china-list/accelerated-domains.china.conf \
-  dnsmasq-china-list/google.china.conf \
-  dnsmasq-china-list/apple.china.conf \
-  | grep -v linkedin | sort -u
+	gen_fake "!cn" | sort -u | awk '-F[ \r]' -v dns="$DNS_FAKE" '/^[a-z0-9]/{print "[/"$1"/]"dns}'
+	gen_fake "cn" | sort -u | awk '-F[ \r]' -v dns="$DNS_CN" '/^[a-z0-9]/{print "[/"$1"/]"dns}'
+	awk '-F[/]' -v dns="$DNS_CN" '{print "[/"$2"/]"dns}' \
+	  dnsmasq-china-list/accelerated-domains.china.conf \
+	  dnsmasq-china-list/google.china.conf \
+	  dnsmasq-china-list/apple.china.conf \
+	  | grep -v linkedin | sort -u
+}
+
+gen_smartdns(){
+	cat <<-EOF
+bind [::]:53
+bind-tcp [::]:53
+cache-size 4096
+
+server $DNS_US
+
+server $DNS_INTERNAL -group internal
+server $DNS_CN -group cn
+server $DNS_FAKE -group proxy
+
+domain-rules cluster.local --server-group internal
+domain-rules sdxpass.com --server-group cn
+
+EOF
+	gen_fake "!cn" | sort -u | awk '-F[ \r]' '/^[a-z0-9]/{print "domain-rules "$1" --server-group proxy"}'
+	gen_fake "cn" | sort -u | awk '-F[ \r]' '/^[a-z0-9]/{print "domain-rules "$1" --server-group cn"}'
+	awk '-F[/]' '{print "domain-rules "$2" --server-group cn"}' \
+	  dnsmasq-china-list/accelerated-domains.china.conf \
+	  dnsmasq-china-list/google.china.conf \
+	  dnsmasq-china-list/apple.china.conf \
+	  | grep -v linkedin | sort -u
 }
 
 gen_apple(){
@@ -101,12 +128,30 @@ category-social-media-!cn
 category-vpnservices
 cloudflare
 EOF
-grep -v '^\(regexp:\|include:\|#\|$\)' domain.txt | grep $OPT '..*@cn'
+	grep -v '^\(regexp:\|include:\|#\|$\)' domain.txt | grep $OPT '..*@cn'
 }
 
-gen > upstream.conf
-tar -Jcf upstream.tar.xz upstream.conf 
-sha256sum upstream.conf > upstream.conf.sha256sum
+case "$OUT" in
+  smartdns|smartdns.conf)
+    gen_smartdns > smartdns.conf
+    tar -Jcf smartdns.tar.xz smartdns.conf
+    sha256sum smartdns.conf > smartdns.conf.sha256sum
+    ;;
+  adguard|upstream.conf|'')
+    gen_adguard > upstream.conf
+    tar -Jcf upstream.tar.xz upstream.conf
+    sha256sum upstream.conf > upstream.conf.sha256sum
+    ;;
+  all)
+    gen_adguard > upstream.conf
+    tar -Jcf upstream.tar.xz upstream.conf
+    sha256sum upstream.conf > upstream.conf.sha256sum
+
+    gen_smartdns > smartdns.conf
+    tar -Jcf smartdns.tar.xz smartdns.conf
+    sha256sum smartdns.conf > smartdns.conf.sha256sum
+    ;;
+esac
 
 gen_apple > apple.conf
 tar -Jcf apple.tar.xz apple.conf

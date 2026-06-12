@@ -21,7 +21,7 @@ jobs:
         run: |
           git clone --depth 1 https://github.com/felixonmars/dnsmasq-china-list.git
           git clone --depth 1 https://github.com/v2fly/domain-list-community.git
-          ./gen.sh
+          ./gen.sh all
       - name: Tag the repository
         id: tag
         run: |
@@ -39,5 +39,7 @@ jobs:
           files: |
             upstream.tar.xz
             upstream.conf.sha256sum
+            smartdns.tar.xz
+            smartdns.conf.sha256sum
             apple.tar.xz
             apple.conf.sha256sum
