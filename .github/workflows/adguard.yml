@@ -41,5 +41,6 @@ jobs:
             upstream.conf.sha256sum
             smartdns.tar.xz
             smartdns.conf.sha256sum
+            smartdns-block-domains.txt
             apple.tar.xz
             apple.conf.sha256sum

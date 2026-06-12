@@ -28,9 +28,11 @@ EOF
 
 gen_smartdns(){
 	cat <<-EOF
-bind [::]:53
-bind-tcp [::]:53
+bind [::]:5334
+bind-tcp [::]:5334
 cache-size 4096
+force-qtype-SOA 65
+log-level info
 
 server $DNS_US
 
@@ -38,13 +40,16 @@ server $DNS_INTERNAL -group internal
 server $DNS_CN -group cn
 server $DNS_FAKE -group proxy
 
-domain-rules cluster.local --server-group internal
-domain-rules sdxpass.com --server-group cn
+nameserver /cluster.local/internal
+nameserver /sdxpass.com/cn
+
+domain-set -name blocklist -file smartdns-block-domains.txt
+address /domain-set:blocklist/#
 
 EOF
-	gen_fake "!cn" | sort -u | awk '-F[ \r]' '/^[a-z0-9]/{print "domain-rules "$1" --server-group proxy"}'
-	gen_fake "cn" | sort -u | awk '-F[ \r]' '/^[a-z0-9]/{print "domain-rules "$1" --server-group cn"}'
-	awk '-F[/]' '{print "domain-rules "$2" --server-group cn"}' \
+	gen_fake "!cn" | sort -u | awk '-F[ \r]' '/^[a-z0-9]/{print "nameserver /"$1"/proxy"}'
+	gen_fake "cn" | sort -u | awk '-F[ \r]' '/^[a-z0-9]/{print "nameserver /"$1"/cn"}'
+	awk '-F[/]' '{print "nameserver /"$2"/cn"}' \
 	  dnsmasq-china-list/accelerated-domains.china.conf \
 	  dnsmasq-china-list/google.china.conf \
 	  dnsmasq-china-list/apple.china.conf \
@@ -131,10 +136,31 @@ EOF
 	grep -v '^\(regexp:\|include:\|#\|$\)' domain.txt | grep $OPT '..*@cn'
 }
 
+gen_blocklist(){
+	local urls=(
+		"https://adguardteam.github.io/AdGuardSDNSFilter/Filters/filter.txt"
+		"https://anti-ad.net/easylist.txt"
+		"https://adguardteam.github.io/HostlistsRegistry/assets/filter_29.txt"
+		"https://adguardteam.github.io/HostlistsRegistry/assets/filter_44.txt"
+	)
+	local names=(
+		"adguard-sdns-filter"
+		"anti-ad-easylist"
+		"filter_29"
+		"filter_44"
+	)
+	for i in "${!urls[@]}"; do
+		curl -sL "${urls[$i]}" | grep '^\|\|' | grep -v '^@@' | sed 's/^||//;s/\^.*$//' | grep -E '^[a-z0-9]' | grep -v '[/]' | grep -F '.' | sort -u > "/tmp/blocklist-${names[$i]}.txt"
+	done
+	cat /tmp/blocklist-*.txt | sort -u > smartdns-block-domains.txt
+	rm -f /tmp/blocklist-*.txt
+}
+
 case "$OUT" in
   smartdns|smartdns.conf)
+    gen_blocklist
     gen_smartdns > smartdns.conf
-    tar -Jcf smartdns.tar.xz smartdns.conf
+    tar -Jcf smartdns.tar.xz smartdns.conf smartdns-block-domains.txt
     sha256sum smartdns.conf > smartdns.conf.sha256sum
     ;;
   adguard|upstream.conf|'')
@@ -147,8 +173,9 @@ case "$OUT" in
     tar -Jcf upstream.tar.xz upstream.conf
     sha256sum upstream.conf > upstream.conf.sha256sum
 
+    gen_blocklist
     gen_smartdns > smartdns.conf
-    tar -Jcf smartdns.tar.xz smartdns.conf
+    tar -Jcf smartdns.tar.xz smartdns.conf smartdns-block-domains.txt
     sha256sum smartdns.conf > smartdns.conf.sha256sum
     ;;
 esac

@@ -3,5 +3,6 @@ domain-list-community
 dnsmasq-china-list
 upstream.conf*
 smartdns.conf*
+smartdns-block-domains.txt
 *.tar.xz
 apple.conf*
