@@ -3,8 +3,9 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -12,16 +13,16 @@ import (
 )
 
 const (
-	port      = "8191"
+	port       = "8191"
 	obscuraBin = "/obscura"
 )
 
 // --- FlareSolverr-compatible API types ---
 
 type v1Request struct {
-	Cmd        string   `json:"cmd"`
-	URL        string   `json:"url"`
-	MaxTimeout int      `json:"maxTimeout"`
+	Cmd        string `json:"cmd"`
+	URL        string `json:"url"`
+	MaxTimeout int    `json:"maxTimeout"`
 }
 
 type v1Response struct {
@@ -47,6 +48,7 @@ func handleV1(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
 	if r.Method != http.MethodPost {
+		slog.Warn("method not allowed", "method", r.Method, "remote", r.RemoteAddr)
 		writeJSON(w, v1Response{
 			Status:  "error",
 			Message: fmt.Sprintf("Method %s not allowed, use POST", r.Method),
@@ -56,6 +58,7 @@ func handleV1(w http.ResponseWriter, r *http.Request) {
 
 	var req v1Request
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		slog.Warn("invalid json", "remote", r.RemoteAddr, "error", err)
 		writeJSON(w, v1Response{
 			Status:  "error",
 			Message: fmt.Sprintf("Invalid JSON: %v", err),
@@ -64,6 +67,7 @@ func handleV1(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.URL == "" {
+		slog.Warn("missing url", "remote", r.RemoteAddr, "cmd", req.Cmd)
 		writeJSON(w, v1Response{
 			Status:  "error",
 			Message: "Missing 'url' field",
@@ -71,12 +75,19 @@ func handleV1(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	logger := slog.With("cmd", req.Cmd, "url", req.URL, "timeout", req.MaxTimeout)
+
 	switch req.Cmd {
 	case "request.get":
-		handleRequestGet(w, &req)
+		handleRequestGet(w, &req, logger)
 	case "sessions.create":
-		handleSessionsCreate(w)
+		logger.Info("session create ignored")
+		writeJSON(w, v1Response{
+			Status:  "ok",
+			Message: "session create ignored",
+		})
 	default:
+		logger.Warn("unknown command")
 		writeJSON(w, v1Response{
 			Status:  "error",
 			Message: fmt.Sprintf("Unsupported command: %s", req.Cmd),
@@ -84,7 +95,7 @@ func handleV1(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func handleRequestGet(w http.ResponseWriter, req *v1Request) {
+func handleRequestGet(w http.ResponseWriter, req *v1Request, logger *slog.Logger) {
 	start := time.Now()
 
 	timeout := req.MaxTimeout
@@ -109,18 +120,23 @@ func handleRequestGet(w http.ResponseWriter, req *v1Request) {
 	}
 
 	cmd := exec.Command(obscuraBin, args...)
+	logger.Info("fetching", "args", strings.Join(args, " "))
 	output, err := cmd.Output()
+	elapsed := time.Since(start)
+
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			errMsg := strings.TrimSpace(string(exitErr.Stderr))
 			if errMsg == "" {
 				errMsg = err.Error()
 			}
+			logger.Error("obscura failed", "error", errMsg, "elapsed", elapsed.String())
 			writeJSON(w, v1Response{
 				Status:  "error",
 				Message: fmt.Sprintf("Obscura error: %s", errMsg),
 			})
 		} else {
+			logger.Error("obscura exec error", "error", err, "elapsed", elapsed.String())
 			writeJSON(w, v1Response{
 				Status:  "error",
 				Message: fmt.Sprintf("Obscura exec error: %v", err),
@@ -128,6 +144,8 @@ func handleRequestGet(w http.ResponseWriter, req *v1Request) {
 		}
 		return
 	}
+
+	logger.Info("fetched ok", "bytes", len(output), "elapsed", elapsed.String())
 
 	writeJSON(w, v1Response{
 		Status:         "ok",
@@ -145,13 +163,6 @@ func handleRequestGet(w http.ResponseWriter, req *v1Request) {
 	})
 }
 
-func handleSessionsCreate(w http.ResponseWriter) {
-	writeJSON(w, v1Response{
-		Status:  "ok",
-		Message: "session create ignored",
-	})
-}
-
 func writeJSON(w http.ResponseWriter, resp v1Response) {
 	data, _ := json.Marshal(resp)
 	w.Write(data)
@@ -160,6 +171,10 @@ func writeJSON(w http.ResponseWriter, resp v1Response) {
 // --- main ---
 
 func main() {
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+		Level: slog.LevelInfo,
+	})))
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1", handleV1)
 
@@ -171,8 +186,9 @@ func main() {
 		IdleTimeout:  120 * time.Second,
 	}
 
-	log.Printf("Obscura bridge listening on :%s", port)
+	slog.Info("listening", "port", port)
 	if err := server.ListenAndServe(); err != nil {
-		log.Fatalf("Server error: %v", err)
+		slog.Error("server error", "error", err)
+		os.Exit(1)
 	}
 }
