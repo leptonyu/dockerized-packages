@@ -6,7 +6,7 @@ RUN CGO_ENABLED=0 go build -a -ldflags '-s -w' -o /bridge . \
  && apk add upx \
  && upx /bridge
 
-FROM h4ckf0r0day/obscura:0.1.8
+FROM h4ckf0r0day/obscura:0.1.9
 
 COPY --from=builder /bridge /bridge
 
