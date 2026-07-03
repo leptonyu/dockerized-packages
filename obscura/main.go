@@ -34,12 +34,21 @@ type v1Response struct {
 	Solution       *v1Solution `json:"solution,omitempty"`
 }
 
+type v1Cookie struct {
+	Name     string `json:"name"`
+	Value    string `json:"value"`
+	Domain   string `json:"domain,omitempty"`
+	Path     string `json:"path,omitempty"`
+	HTTPOnly bool   `json:"httpOnly,omitempty"`
+	Secure   bool   `json:"secure,omitempty"`
+}
+
 type v1Solution struct {
 	URL       string            `json:"url"`
 	Status    int               `json:"status"`
 	Headers   map[string]string `json:"headers"`
 	Response  string            `json:"response"`
-	Cookies   map[string]string `json:"cookies"`
+	Cookies   []v1Cookie        `json:"cookies"`
 	UserAgent string            `json:"userAgent"`
 }
 
@@ -168,7 +177,7 @@ func handleRequestGet(w http.ResponseWriter, req *v1Request, logger *slog.Logger
 			URL:       req.URL,
 			Status:    200,
 			Headers:   map[string]string{"Content-Type": "text/html"},
-			Cookies:   make(map[string]string),
+			Cookies:   []v1Cookie{},
 			Response:  string(output),
 			UserAgent: "Obscura/1.0",
 		},
