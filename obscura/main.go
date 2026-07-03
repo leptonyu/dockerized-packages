@@ -44,6 +44,16 @@ type v1Solution struct {
 
 // --- handlers ---
 
+func handleRoot(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/" {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("ok"))
+}
+
 func handleV1(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
@@ -176,6 +186,7 @@ func main() {
 	})))
 
 	mux := http.NewServeMux()
+	mux.HandleFunc("/", handleRoot)
 	mux.HandleFunc("/v1", handleV1)
 
 	server := &http.Server{
