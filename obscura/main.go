@@ -39,6 +39,7 @@ type v1Solution struct {
 	Status    int               `json:"status"`
 	Headers   map[string]string `json:"headers"`
 	Response  string            `json:"response"`
+	Cookies   map[string]string `json:"cookies"`
 	UserAgent string            `json:"userAgent"`
 }
 
@@ -167,6 +168,7 @@ func handleRequestGet(w http.ResponseWriter, req *v1Request, logger *slog.Logger
 			URL:       req.URL,
 			Status:    200,
 			Headers:   map[string]string{"Content-Type": "text/html"},
+			Cookies:   make(map[string]string),
 			Response:  string(output),
 			UserAgent: "Obscura/1.0",
 		},
