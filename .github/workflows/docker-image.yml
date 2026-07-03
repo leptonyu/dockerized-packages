@@ -6,6 +6,7 @@ on:
     - main
     paths:
       - 'code/**'
+      - 'obscura/**'
       - 'restic/**'
       - 'tor/**'
       - 'kubectl/**'
@@ -14,6 +15,7 @@ on:
     - main
     paths:
       - 'code/**'
+      - 'obscura/**'
       - 'restic/**'
       - 'tor/**'
       - 'kubectl/**'
@@ -36,6 +38,7 @@ jobs:
             changed:
             - added|modified:
               - 'code/**'
+              - 'obscura/**'
               - 'restic/**'
               - 'tor/**'
               - 'kubectl/**'
@@ -70,7 +73,7 @@ jobs:
         if [ "${{ matrix.container }}" == "tor" ]; then
           RELEASE_VERSION=$(date +%Y%m%d)
         else
-          RELEASE_VERSION="$(awk -F: '/FROM/{print $2}' ${{ matrix.container }}/Dockerfile)"
+          RELEASE_VERSION="$(awk -F: '/^FROM /{ver=$2} END{print ver}' ${{ matrix.container }}/Dockerfile)"
         fi
         echo $RELEASE_VERSION
         echo ::set-output name=ver::$RELEASE_VERSION
