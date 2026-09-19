@@ -26,8 +26,13 @@ on:
       dry-run:
         description: 只打印将要删除的 Release，不真正删除
         required: false
-        type: boolean
-        default: false
+        # 刻意不用 type: boolean：boolean 输入未勾选时可能不注入 env，
+        # 配合 shell 的 set -u 会直接报 "unbound variable"。choice 一定是字符串。
+        type: choice
+        options:
+          - "false"
+          - "true"
+        default: "false"
 
 permissions:
   contents: write # 删除 Release / Tag 需要写权限
@@ -52,6 +57,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
+          # 所有变量都在脚本内兜底，避免 workflow_dispatch / schedule 下 env 缺失直接崩
+          RETENTION_DAYS="${RETENTION_DAYS:-3}"
+          MONTHLY_RETENTION_YEARS="${MONTHLY_RETENTION_YEARS:-1}"
+          MONTHLY_DAY="${MONTHLY_DAY:-1}"
+          KEEP_MINIMUM="${KEEP_MINIMUM:-1}"
+          DRY_RUN=$(printf '%s' "${DRY_RUN:-false}" | tr '[:upper:]' '[:lower:]')
+          SUMMARY="${GITHUB_STEP_SUMMARY:-/dev/null}"
 
           daily_cutoff=$(date -d "-${RETENTION_DAYS} days" +%s)
           monthly_cutoff=$(date -d "-${MONTHLY_RETENTION_YEARS} year" +%s)
@@ -126,4 +139,4 @@ jobs:
             echo "| 其他 | 删除 Release 及其 Tag |"
             echo ""
             echo "本次：保留 ${kept} 个（月度快照 ${kept_monthly} 个）/ 删除 ${removed} 个${suffix}"
-          } >> "${GITHUB_STEP_SUMMARY}"
+          } >> "${SUMMARY}"
