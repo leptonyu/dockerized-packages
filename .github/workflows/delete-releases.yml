@@ -1,0 +1,129 @@
+name: Delete Old Releases
+
+# 保留策略（自己实现，按 Release 的 publishedAt 判断，时区 Asia/Shanghai）：
+#   1. 最近 3 天发布的 Release —— 始终保留；
+#   2. 每月 1 日发布的 Release（月度快照）—— 保留，但最多保留 1 年，超过 1 年的删除；
+#   3. 其余 Release —— 连同对应的 Git Tag 一起删除。
+#   兜底：无论多旧，至少保留最新的 1 个 Release。
+#
+# 本仓库的 Release 由 adguard.yml 每天 23:30 (Asia/Shanghai) 生成（tag: vYYYYMMDD），
+# 所以清理任务排在每天 01:00 (Asia/Shanghai)，先保留新包、再清旧包。
+# 另可在 Actions 页面手动触发（workflow_dispatch），并可先 DRY-RUN 预演。
+
+on:
+  schedule:
+    - cron: "0 17 * * *" # 01:00 Asia/Shanghai（前一天 UTC 17:00）
+  workflow_dispatch:
+    inputs:
+      retention-days:
+        description: 保留最近多少天内发布的 Release
+        required: false
+        default: "3"
+      monthly-retention-years:
+        description: 每月 1 日的 Release 最多保留多少年
+        required: false
+        default: "1"
+      dry-run:
+        description: 只打印将要删除的 Release，不真正删除
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write # 删除 Release / Tag 需要写权限
+
+concurrency:
+  group: delete-old-releases
+  cancel-in-progress: false
+
+jobs:
+  delete-old-releases:
+    runs-on: ubuntu-latest
+    env:
+      TZ: Asia/Shanghai # 判断"每月 1 日"用本地时区
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+      RETENTION_DAYS: ${{ inputs.retention-days || '3' }}
+      MONTHLY_RETENTION_YEARS: ${{ inputs.monthly-retention-years || '1' }}
+      MONTHLY_DAY: "1" # 每月第几天算月度快照
+      KEEP_MINIMUM: "1" # 兜底：至少保留最新的 1 个 Release
+    steps:
+      - name: Delete releases outside the retention policy
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          daily_cutoff=$(date -d "-${RETENTION_DAYS} days" +%s)
+          monthly_cutoff=$(date -d "-${MONTHLY_RETENTION_YEARS} year" +%s)
+          echo "策略 A: 保留最近 ${RETENTION_DAYS} 天 (publishedAt >= $(date -d "@${daily_cutoff}" +%Y-%m-%dT%H:%M:%S%z))"
+          echo "策略 B: 保留每月 ${MONTHLY_DAY} 日、且未满 ${MONTHLY_RETENTION_YEARS} 年的 Release (publishedAt >= $(date -d "@${monthly_cutoff}" +%Y-%m-%dT%H:%M:%S%z))"
+          echo "兜底:   至少保留最新 ${KEEP_MINIMUM} 个 Release; DRY_RUN=${DRY_RUN}"
+
+          # gh release list 按创建时间倒序输出（最新在前）
+          releases=$(gh release list --limit 1000 --exclude-drafts \
+            --json tagName,publishedAt \
+            --jq '.[] | "\(.tagName)\t\(.publishedAt)"')
+
+          kept=0
+          kept_monthly=0
+          removed=0
+          index=0
+
+          while IFS=$'\t' read -r tag published; do
+            if [[ -z "${tag}" ]]; then
+              continue
+            fi
+            index=$((index + 1))
+            published_ts=$(date -d "${published}" +%s)
+            published_day=$(date -d "${published}" +%d) # 形如 01
+
+            if (( index <= KEEP_MINIMUM )); then
+              keep=true
+              reason="兜底保留最新"
+            elif (( published_ts >= daily_cutoff )); then
+              keep=true
+              reason="最近 ${RETENTION_DAYS} 天"
+            elif (( 10#${published_day} == ${MONTHLY_DAY} )) && (( published_ts >= monthly_cutoff )); then
+              keep=true
+              kept_monthly=$((kept_monthly + 1))
+              reason="每月 ${MONTHLY_DAY} 日快照，未满 ${MONTHLY_RETENTION_YEARS} 年"
+            elif (( 10#${published_day} == ${MONTHLY_DAY} )); then
+              keep=false
+              reason="每月 ${MONTHLY_DAY} 日快照，已超 ${MONTHLY_RETENTION_YEARS} 年"
+            else
+              keep=false
+              reason="超过 ${RETENTION_DAYS} 天"
+            fi
+
+            if [[ "${keep}" == "true" ]]; then
+              echo "保留(${reason}): ${tag}  ${published}"
+              kept=$((kept + 1))
+            elif [[ "${DRY_RUN}" == "true" ]]; then
+              echo "DRY-RUN 将删除(${reason}): ${tag}  ${published}"
+              removed=$((removed + 1))
+            else
+              echo "删除(${reason}): ${tag}  ${published}"
+              # --cleanup-tag 同时删除对应的 Git Tag；Tag 缺失时退化为只删 Release
+              gh release delete "${tag}" --yes --cleanup-tag || gh release delete "${tag}" --yes
+              removed=$((removed + 1))
+            fi
+          done <<< "${releases}"
+
+          echo "完成: 保留 ${kept} 个(其中月度快照 ${kept_monthly} 个), 删除 ${removed} 个"
+
+          if [[ "${DRY_RUN}" == "true" ]]; then
+            suffix="（DRY-RUN，未实际删除）"
+          else
+            suffix=""
+          fi
+          {
+            echo "### Delete Old Releases"
+            echo ""
+            echo "| 规则 | 处理 |"
+            echo "| --- | --- |"
+            echo "| 最近 ${RETENTION_DAYS} 天 | 保留 |"
+            echo "| 每月 ${MONTHLY_DAY} 日 | 保留不超过 ${MONTHLY_RETENTION_YEARS} 年 |"
+            echo "| 其他 | 删除 Release 及其 Tag |"
+            echo ""
+            echo "本次：保留 ${kept} 个（月度快照 ${kept_monthly} 个）/ 删除 ${removed} 个${suffix}"
+          } >> "${GITHUB_STEP_SUMMARY}"
