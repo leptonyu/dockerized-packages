@@ -39,6 +39,7 @@ jobs:
           files: |
             upstream.tar.xz
             upstream.conf.sha256sum
+            upstream.tar.xz.sha256sum
             smartdns.tar.xz
             smartdns.conf.sha256sum
             apple.tar.xz

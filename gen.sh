@@ -166,11 +166,13 @@ case "$OUT" in
     gen_adguard > upstream.conf
     tar -Jcf upstream.tar.xz upstream.conf
     sha256sum upstream.conf > upstream.conf.sha256sum
+    sha256sum upstream.tar.xz > upstream.tar.xz.sha256sum
     ;;
   all)
     gen_adguard > upstream.conf
     tar -Jcf upstream.tar.xz upstream.conf
     sha256sum upstream.conf > upstream.conf.sha256sum
+    sha256sum upstream.tar.xz > upstream.tar.xz.sha256sum
 
     gen_blocklist
     gen_smartdns > smartdns.conf
