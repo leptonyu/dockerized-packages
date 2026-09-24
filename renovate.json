@@ -4,6 +4,34 @@
     "config:recommended",
     ":dependencyDashboard"
   ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "The dsh image version is the DeepSeek Harness release tag without its `dsh-v` prefix",
+      "managerFilePatterns": [
+        "**/dsh/Dockerfile"
+      ],
+      "matchStrings": [
+        "ARG DSH_VERSION=(?<currentValue>\\S+)"
+      ],
+      "depNameTemplate": "deepseek-ai/deepseek-harness",
+      "datasourceTemplate": "github-tags",
+      "versioningTemplate": "semver",
+      "extractVersionTemplate": "^dsh-v(?<version>.+)$"
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "dsh: release candidates are releasable, alpha pre-releases are not",
+      "matchDatasources": [
+        "github-tags"
+      ],
+      "matchPackageNames": [
+        "deepseek-ai/deepseek-harness"
+      ],
+      "allowedVersions": "/^\\d+\\.\\d+\\.\\d+(?:-rc\\.\\d+)?$/"
+    }
+  ],
   "lockFileMaintenance": {
     "enabled": true,
     "automerge": true

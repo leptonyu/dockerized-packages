@@ -1,0 +1,19 @@
+# Container overlay for the shipped `web` profile, applied by the image's
+# ENTRYPOINT as `dsh web --patch /usr/local/share/dsh/container.patch.yml`.
+#
+# `dsh web` composes its Web server on `127.0.0.1` and rejects `--host 0.0.0.0`
+# on the command line, which no published container port can reach. A patch
+# replaces the targeted row's whole `config`, so this restates every key the
+# bundle sets and only changes the bind address.
+#
+# The `/api` browser-trust fence is untouched: it admits loopback and the LAN
+# literals derived from this bind, and refuses every other Host authority unless
+# `--trusted-host` names it. Publishing the port therefore does not hand the API
+# to arbitrary clients — the startup URL's token still gates the GUI.
+- id: webserver
+  config:
+    host: 0.0.0.0
+    port: !!js ctx.webStartup.port ?? 3080
+    compression: gzip
+    compressionLevel: 1
+    compressionThresholdBytes: 1024
