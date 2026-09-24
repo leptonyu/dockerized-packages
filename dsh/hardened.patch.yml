@@ -1,0 +1,48 @@
+# Opt-in sandbox-lockdown overlay, applied after the container overlay:
+#
+#   docker run --rm -it \
+#     -p 127.0.0.1:3080:3080 -v "$PWD:/workspace" -v "$HOME/.dsh:/home/node/.dsh" \
+#     icymint/dsh:v0.1.7-rc.1 \
+#     --patch /usr/local/share/dsh/hardened.patch.yml --no-open
+#
+# The shipped `web` composition lets a session widen its own file policy in two
+# ways, and this overlay closes both. Neither is a kernel escape; both are
+# deliberate policy paths the composition offers.
+#
+#   1. The Permissions selector offers `danger-full-access`. `permission-presets`
+#      is the ONLY caller of the sandbox-mode write path (`setSandboxMode`), and
+#      it resolves the requested name against this table, throwing on a name the
+#      table does not contain — so dropping the entry removes that path for good
+#      rather than hiding it in the UI.
+#   2. A denied bash call or fs `write`/`edit` can ask for a one-shot wider retry
+#      through `sandbox_permissions`, and the plugin manager asks before every
+#      install. All of them resolve through `ctx.approval`; `never` answers each
+#      ask `rejected` deterministically, without dispatching any answerer, so no
+#      grant can ever be issued.
+#
+# Ordinary work inside the standing mode asks for nothing, so nothing else
+# changes. `workspace-write` is pinned here rather than read from
+# `DSH_PERMISSION_MODE`, so no environment value can widen it; the selector
+# still offers the narrower `read-only`.
+#
+# This bounds FILE EFFECTS only. Reads, network use, and process visibility are
+# outside the sandbox vocabulary (`SandboxMode` governs filesystem effects), so
+# they remain the container's job — see the hardening section of README.md.
+- id: sandbox-policy
+  config:
+    mode: workspace-write
+    workspaceRoot: !!js process.cwd()
+
+- id: approval
+  config:
+    policy: never
+
+- id: permission
+  config:
+    presets:
+      read-only:
+        sandbox: read-only
+        approval: never
+      workspace-write:
+        sandbox: workspace-write
+        approval: never
