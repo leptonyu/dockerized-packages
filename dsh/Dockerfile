@@ -52,9 +52,11 @@ COPY --from=installer /opt/dsh /opt/dsh
 COPY --from=rust /usr/local/rustup /usr/local/rustup
 COPY --from=rust /usr/local/cargo /usr/local/cargo
 
-# `dsh web` composes the Web server on 127.0.0.1 and refuses `--host 0.0.0.0`;
-# this overlay rebinds that one row so a published container port reaches the GUI.
-COPY container.patch.yml /usr/local/share/dsh/container.patch.yml
+# Overlays the ENTRYPOINT (container.patch.yml) and an operator (hardened.patch.yml)
+# can apply. `dsh web` composes the Web server on 127.0.0.1 and refuses
+# `--host 0.0.0.0`; the first rebinds that one row so a published container port
+# reaches the GUI. The second locks the file policy against widening.
+COPY container.patch.yml hardened.patch.yml /usr/local/share/dsh/
 
 ENV DSH_VERSION=${DSH_VERSION}
 ENV DSH_HOME=/home/node/.dsh
