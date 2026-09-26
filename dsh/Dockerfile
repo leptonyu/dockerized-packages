@@ -3,7 +3,7 @@
 # This line is the image version's single source of truth: a dsh release tag
 # without its `dsh-v` prefix. Renovate reads it (see ../renovate.json) and takes
 # `dsh-v0.1.7-rc.1` while refusing `dsh-v0.1.7-alpha.2`.
-ARG DSH_VERSION=0.1.7-rc.1
+ARG DSH_VERSION=0.1.7-rc.2
 
 FROM node:24-trixie-slim AS installer
 
