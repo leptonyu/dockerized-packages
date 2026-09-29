@@ -9,15 +9,10 @@ DNS_FAKE="198.18.0.0:5333"
 # DNS-over-QUIC quic://dns.alidns.com:853 添加到 AdGuard, 添加到 AdGuard VPN
 DNS_CN="223.5.5.5"
 DNS_INTERNAL="10.96.0.10"
-OUT="${1:-adguard}"
+OUT="${1:-all}"
 
-gen_adguard(){
-	cat <<-EOF
-$DNS_US
-[/cluster.local/]$DNS_INTERNAL
-[/sdxpass.com/]$DNS_CN
-EOF
-	gen_fake "!cn" | sort -u | awk '-F[ \r]' -v dns="$DNS_FAKE" '/^[a-z0-9]/{print "[/"$1"/]"dns}'
+# cn 域名统一走 DNS_CN，upstream / xndns 共用
+gen_cn_rules(){
 	gen_fake "cn" | sort -u | awk '-F[ \r]' -v dns="$DNS_CN" '/^[a-z0-9]/{print "[/"$1"/]"dns}'
 	awk '-F[/]' -v dns="$DNS_CN" '{print "[/"$2"/]"dns}' \
 	  dnsmasq-china-list/accelerated-domains.china.conf \
@@ -26,34 +21,24 @@ EOF
 	  | grep -v linkedin | sort -u
 }
 
-gen_smartdns(){
+gen_upstream(){
 	cat <<-EOF
-bind [::]:5334
-bind-tcp [::]:5334
-cache-size 4096
-force-qtype-SOA 65
-log-level info
-
-server $DNS_US
-
-server $DNS_INTERNAL -group internal
-server $DNS_CN -group cn
-server $DNS_FAKE -group proxy
-
-nameserver /cluster.local/internal
-nameserver /sdxpass.com/cn
-
-domain-set -name blocklist -file smartdns-block-domains.txt
-address /domain-set:blocklist/#
-
+$DNS_US
+[/cluster.local/]$DNS_INTERNAL
+[/sdxpass.com/]$DNS_CN
 EOF
-	gen_fake "!cn" | sort -u | awk '-F[ \r]' '/^[a-z0-9]/{print "nameserver /"$1"/proxy"}'
-	gen_fake "cn" | sort -u | awk '-F[ \r]' '/^[a-z0-9]/{print "nameserver /"$1"/cn"}'
-	awk '-F[/]' '{print "nameserver /"$2"/cn"}' \
-	  dnsmasq-china-list/accelerated-domains.china.conf \
-	  dnsmasq-china-list/google.china.conf \
-	  dnsmasq-china-list/apple.china.conf \
-	  | grep -v linkedin | sort -u
+	gen_fake "!cn" | sort -u | awk '-F[ \r]' -v dns="$DNS_FAKE" '/^[a-z0-9]/{print "[/"$1"/]"dns}'
+	gen_cn_rules
+}
+
+# 与 upstream 相同，区别：默认上游是 fake，且不再单独列出 !cn→FAKE 的域名组
+gen_xndns(){
+	cat <<-EOF
+$DNS_FAKE
+[/cluster.local/]$DNS_INTERNAL
+[/sdxpass.com/]$DNS_CN
+EOF
+	gen_cn_rules
 }
 
 gen_apple(){
@@ -136,51 +121,67 @@ EOF
 }
 
 gen_blocklist(){
+	# 原样保留 filter.txt 的格式（AdGuard 过滤规则）
 	local urls=(
-		"https://adguardteam.github.io/AdGuardSDNSFilter/Filters/filter.txt"
-		"https://anti-ad.net/easylist.txt"
-		"https://adguardteam.github.io/HostlistsRegistry/assets/filter_29.txt"
-		"https://adguardteam.github.io/HostlistsRegistry/assets/filter_44.txt"
+		"https://adguardteam.github.io/HostlistsRegistry/assets/filter_49.txt"
 	)
 	local names=(
-		"adguard-sdns-filter"
-		"anti-ad-easylist"
-		"filter_29"
-		"filter_44"
+		"filter_49"
 	)
 	for i in "${!urls[@]}"; do
-		curl -sL "${urls[$i]}" | grep '^\|\|' | grep -v '^@@' | sed 's/^||//;s/\^.*$//' | grep -E '^[a-z0-9]' | grep -v '[/]' | grep -F '.' | sort -u > "/tmp/blocklist-${names[$i]}.txt"
+		local name="${names[$i]}"
+		curl -fsSL "${urls[$i]}" -o "${name}.txt" || { echo "failed to download ${urls[$i]}" >&2; exit 1; }
+		[ -s "${name}.txt" ] || { echo "empty blocklist ${name}.txt" >&2; exit 1; }
+		tar -Jcf "${name}.tar.xz" "${name}.txt"
+		sha256sum "${name}.tar.xz" > "${name}.tar.xz.sha256sum"
 	done
-	cat /tmp/blocklist-*.txt | sort -u > smartdns-block-domains.txt
-	rm -f /tmp/blocklist-*.txt
+}
+
+emit_upstream(){
+	gen_upstream > upstream.conf
+	tar -Jcf upstream.tar.xz upstream.conf
+	sha256sum upstream.conf > upstream.conf.sha256sum
+	sha256sum upstream.tar.xz > upstream.tar.xz.sha256sum
+}
+
+emit_xndns(){
+	gen_xndns > xndns.conf
+	tar -Jcf xndns.tar.xz xndns.conf
+	sha256sum xndns.conf > xndns.conf.sha256sum
+	sha256sum xndns.tar.xz > xndns.tar.xz.sha256sum
+}
+
+emit_apple(){
+	gen_apple > apple.conf
+	tar -Jcf apple.tar.xz apple.conf
+	sha256sum apple.conf > apple.conf.sha256sum
+}
+
+emit_block(){
+	gen_blocklist
 }
 
 case "$OUT" in
-  smartdns|smartdns.conf)
-    gen_blocklist
-    gen_smartdns > smartdns.conf
-    tar -Jcf smartdns.tar.xz smartdns.conf smartdns-block-domains.txt
-    sha256sum smartdns.conf > smartdns.conf.sha256sum
-    ;;
-  adguard|upstream.conf|'')
-    gen_adguard > upstream.conf
-    tar -Jcf upstream.tar.xz upstream.conf
-    sha256sum upstream.conf > upstream.conf.sha256sum
-    sha256sum upstream.tar.xz > upstream.tar.xz.sha256sum
-    ;;
   all)
-    gen_adguard > upstream.conf
-    tar -Jcf upstream.tar.xz upstream.conf
-    sha256sum upstream.conf > upstream.conf.sha256sum
-    sha256sum upstream.tar.xz > upstream.tar.xz.sha256sum
-
-    gen_blocklist
-    gen_smartdns > smartdns.conf
-    tar -Jcf smartdns.tar.xz smartdns.conf smartdns-block-domains.txt
-    sha256sum smartdns.conf > smartdns.conf.sha256sum
+    emit_upstream
+    emit_xndns
+    emit_apple
+    emit_block
+    ;;
+  upstream|upstream.conf|adguard)
+    emit_upstream
+    ;;
+  xndns|xndns.conf)
+    emit_xndns
+    ;;
+  apple|apple.conf)
+    emit_apple
+    ;;
+  block|blocklist)
+    emit_block
+    ;;
+  *)
+    echo "usage: $0 [all|upstream|xndns|apple|block]" >&2
+    exit 1
     ;;
 esac
-
-gen_apple > apple.conf
-tar -Jcf apple.tar.xz apple.conf
-sha256sum apple.conf > apple.conf.sha256sum

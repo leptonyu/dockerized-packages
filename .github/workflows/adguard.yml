@@ -40,7 +40,10 @@ jobs:
             upstream.tar.xz
             upstream.conf.sha256sum
             upstream.tar.xz.sha256sum
-            smartdns.tar.xz
-            smartdns.conf.sha256sum
+            xndns.tar.xz
+            xndns.conf.sha256sum
+            xndns.tar.xz.sha256sum
+            filter_49.tar.xz
+            filter_49.tar.xz.sha256sum
             apple.tar.xz
             apple.conf.sha256sum

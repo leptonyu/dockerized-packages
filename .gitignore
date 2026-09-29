@@ -2,7 +2,8 @@
 domain-list-community
 dnsmasq-china-list
 upstream.conf*
-smartdns.conf*
-smartdns-block-domains.txt
+xndns.conf*
 *.tar.xz
+*.tar.xz.sha256sum
 apple.conf*
+filter_49.txt
