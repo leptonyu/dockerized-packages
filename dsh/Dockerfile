@@ -17,7 +17,7 @@ RUN npm install --global --prefix /opt/dsh --no-fund --no-audit \
  && npm cache clean --force
 
 # Renovate tracks this tag like every other base image in this repository.
-FROM rust:1.98.1-slim-trixie AS rust
+FROM rust:1.99.0-slim-trixie AS rust
 
 FROM node:24-trixie-slim
 
