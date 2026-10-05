@@ -50,7 +50,7 @@ gen_cn_domains(){
 			gen_fake "cn"
 			# linkedin 系域名（accelerated-domains 里有，如 linkedin-event.com）强制走 fake，
 			# 与 data/linkedin 的非 @cn 部分保持一致
-			awk '-F[/]' '{print $2}' \
+			awk '-F[/]' 'NF { print $2 }' \
 			  dnsmasq-china-list/accelerated-domains.china.conf \
 			  dnsmasq-china-list/google.china.conf \
 			  dnsmasq-china-list/apple.china.conf \
@@ -133,7 +133,7 @@ gen_fake_expand(){
   grep -h -v '^\(regexp:\|include:\|#\|$\)' $files \
     | grep ${1} '..*@cn' \
     | sed 's/^full://g' \
-    | awk '{print $1}'
+    | awk 'NF { print $1 }'
 }
 
 # 境外域名：剔除所有国内域名（gen_cn_domains 见文件开头）。
@@ -246,7 +246,7 @@ gen_fake(){
     gen_fake_lists | gen_fake_expand "$OPT"
     # CN-only 列表只在 cn 侧生效
     [ -n "$OPT" ] || gen_cn_only_lists | gen_fake_expand ""
-    grep -v '^\(regexp:\|include:\|#\|$\)' domain.txt | grep $OPT '..*@cn' | sed 's/^full://g' | awk '{print $1}'
+    grep -v '^\(regexp:\|include:\|#\|$\)' domain.txt | grep $OPT '..*@cn' | sed 's/^full://g' | awk 'NF { print $1 }'
   }
 }
 
@@ -291,7 +291,7 @@ gen_blocked_domains(){
 	cat "$cache"
 }
 
-# dlc 的全部条目 -> "域名|优先级|标签"，优先级 ads(0) < cn(1) < fake(2)。
+# dlc 的全部条目 -> "域名|有@ads|有@cn"，按域名合并，保留 dlc 自己的标签。
 # 整个 domain-list-community/data 都算 dlc 的内容，一条不丢
 gen_dlc_tagged(){
 	grep -rh -v '^\(regexp:\|include:\|#\|$\)' domain-list-community/data/ \
@@ -299,45 +299,66 @@ gen_dlc_tagged(){
 	      sub(/^full:/, "")
 	      d = $1
 	      if (d == "" || d ~ /[:|^\/]/) next
-	      tag = "fake"; prio = 2
+	      D[d] = 1
 	      for (i = 2; i <= NF; i++) {
-	        if ($i ~ /@ads([,]|$)/) { tag = "ads"; prio = 0; break }
-	        if ($i ~ /@cn([,]|$)/)  { tag = "cn";  prio = 1 }
+	        if ($i ~ /@ads([,]|$)/) A[d] = 1
+	        if ($i ~ /@cn([,]|$)/)  C[d] = 1
 	      }
-	      print d "|" prio "|" tag
-	    }'
+	    }
+	    END { for (d in D) printf "%s|%d|%d\n", d, (d in A), (d in C) }' \
+	  | LC_ALL=C sort
 }
 
-# dlc 里没有的域名：按 ads / cn / fake 三类分别取自已有的三个来源
-gen_dlc_extra(){
-	gen_blocked_domains | awk 'NF { print $1"|0|ads" }'
-	gen_cn_domains      | awk 'NF { print $1"|1|cn" }'
-	for d in $CN_FORCED; do printf '%s|1|cn\n' "$d"; done
-	gen_fake_not_cn     | awk 'NF { print $1"|2|fake" }'
-}
-
-# dlc 清单：保留 dlc 全部条目并给它追加 @ads/@cn/@fake 标签；
-# dlc 里没有的域名按类别追加到 ads / cn / fake 三个区块。
-# 一个域名只出现一次，优先级 blocked > cn > fake（与线上现状一致：
-# 同时命中 @ads 与 @cn 的域名现在是 0.0.0.0）
+# dlc 清单：
+#   1. dlc 的条目原样保留，命中 filter_49 / 国内列表的就地补上 @ads / @cn 标签
+#   2. dlc 里没有的域名，按类别追加到 ads / cn / fake 三个区块
+# 一个域名只出现一次；同时带 @ads 与 @cn 时按 @ads 处理（与线上现状一致：
+# 这类域名现在解析为 0.0.0.0）
 gen_dlc(){
-	local blocked="$CACHE_DIR/blocked" rows="$CACHE_DIR/dlc-rows"
+	local blocked="$CACHE_DIR/blocked" cndom="$CACHE_DIR/cn-domains.txt" tags="$CACHE_DIR/dlc-tags"
 	gen_blocked_domains > /dev/null    # 先落缓存文件
 	[ -s "$blocked" ] || { echo "gen.sh: 拦截列表为空，中止 dlc 生成" >&2; exit 1; }
-	{ gen_dlc_tagged; gen_dlc_extra; } \
-	  | LC_ALL=C sort -t'|' -k1,1 -k2,2n \
-	  | awk -F'|' '!seen[$1]++' > "$rows"
+	gen_dlc_tagged > "$tags"
+	{ gen_cn_domains; for d in $CN_FORCED; do echo "$d"; done; } | LC_ALL=C sort -u > "$cndom"
+
 	printf '# gen.sh 生成，勿手改\n'
-	printf '# 标签：@ads = 拦截；@cn = 国内 DNS（上游在加载时指定）；@fake = 走代理\n'
-	printf '# dlc 的全部条目都保留在下面三个区块里，dlc 里没有的域名也按类别追加进对应区块\n'
-	printf '# 每个域名只有一条，优先级 @ads > @cn > @fake；匹配按后缀、最长优先\n'
+	printf '# 标签：@ads = 拦截；@cn = 国内 DNS（上游在加载时指定）；无标签 = 默认（fake/代理）\n'
+	printf '# 上面是 dlc 的全部条目，命中拦截/国内列表的就地补了标签\n'
+	printf '# 下面三个区块是 dlc 里没有、需要额外指定的域名\n'
+	printf '# 同时带 @ads @cn 时按 @ads 处理；匹配按后缀、最长优先\n'
 	printf '# 注：cluster.local -> %s 是内部上游，不在本清单内\n' "$DNS_INTERNAL"
-	printf '#\n# ===================== ads =====================\n'
-	awk -F'|' '$3 == "ads"  { print $1" @ads" }' "$rows"
-	printf '#\n# ===================== cn ======================\n'
-	awk -F'|' '$3 == "cn"   { print $1" @cn" }' "$rows"
-	printf '#\n# ===================== fake ====================\n'
-	awk -F'|' '$3 == "fake" { print $1" @fake" }' "$rows"
+
+	printf '#\n# ==================== dlc ======================\n'
+	awk -F'|' '
+	  FILENAME == ARGV[1] { if ($1 != "") ads[$1] = 1; next }
+	  FILENAME == ARGV[2] { if ($1 != "") cn[$1]  = 1; next }
+	  NF == 0 { next }
+	  {
+	    tag = ""
+	    if ($2 == 1 || ($1 in ads)) tag = " @ads"
+	    if ($3 == 1 || ($1 in cn))  tag = tag " @cn"
+	    print $1 tag
+	  }' "$blocked" "$cndom" "$tags"
+
+	printf '#\n# ============== ads（dlc 没有的）==============\n'
+	awk -F'|' 'NR==FNR { d[$1] = 1; next } !($1 in d)' "$tags" "$blocked" \
+	  | LC_ALL=C sort -u | awk 'NF { print $1" @ads" }'
+
+	# cn / fake 区块同样要让位给 @ads（优先级 @ads > @cn > @fake）
+	printf '#\n# =============== cn（dlc 没有的）===============\n'
+	awk -F'|' '
+	  FILENAME == ARGV[1] { d[$1] = 1; next }
+	  FILENAME == ARGV[2] { d[$1] = 1; next }
+	  !($1 in d)' "$tags" "$blocked" "$cndom" \
+	  | LC_ALL=C sort -u | awk 'NF { print $1" @cn" }'
+
+	printf '#\n# ============= fake（dlc 没有的）==============\n'
+	gen_fake_not_cn \
+	  | awk -F'|' '
+	      FILENAME == ARGV[1] { d[$1] = 1; next }
+	      FILENAME == ARGV[2] { d[$1] = 1; next }
+	      !($1 in d)' "$tags" "$blocked" - \
+	  | LC_ALL=C sort -u | awk 'NF { print $1" @fake" }'
 }
 
 emit_upstream(){
