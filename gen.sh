@@ -291,21 +291,23 @@ gen_blocked_domains(){
 	cat "$cache"
 }
 
-# dlc 清单：domain @cn / domain @ads，无标签 = fake（走代理）
+# dlc 清单：只追加两类例外 domain @ads / domain @cn
+# 没有出现在清单里的域名 = fake（走代理），所以 fake 不在这里体现；
+# fake 的 tag 集合（要加载哪些上游列表）由加载方在加载时指定。
 # 优先级 blocked > cn > fake，与线上现状一致（被拦截的域名现为 0.0.0.0）
 gen_dlc(){
 	local blocked="$CACHE_DIR/blocked"
 	gen_blocked_domains > /dev/null    # 先落缓存文件
 	[ -s "$blocked" ] || { echo "gen.sh: 拦截列表为空，中止 dlc 生成" >&2; exit 1; }
 	printf '# gen.sh 生成，勿手改\n'
-	printf '# @ads = 拦截；@cn = %s；无标签 = fake（默认上游）\n' "$DNS_CN"
+	printf '# @ads = 拦截；@cn = 国内 DNS（具体上游在加载时指定）\n'
+	printf '# 未出现在本清单里的域名 = fake（走代理）；fake 的 tag 集合在加载时指定\n'
 	printf '# 注：cluster.local -> %s 是内部上游，不在本清单内\n' "$DNS_INTERNAL"
 	{
 		awk 'NF { print $1" @ads" }' "$blocked"
 		for d in $CN_FORCED; do printf '%s @cn\n' "$d"; done
 		awk 'NR==FNR { ads[$0]=1; next } NF && !($0 in ads) { print $0" @cn" }' \
 		  "$blocked" <(gen_cn_domains)
-		gen_fake_not_cn | awk 'NR==FNR { ads[$0]=1; next } NF && !($0 in ads)' "$blocked" -
 	} | LC_ALL=C sort -u
 }
 
