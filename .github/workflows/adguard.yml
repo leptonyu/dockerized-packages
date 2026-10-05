@@ -45,5 +45,8 @@ jobs:
             xndns.tar.xz.sha256sum
             filter_49.tar.xz
             filter_49.tar.xz.sha256sum
+            dlc.tar.xz
+            dlc.txt.sha256sum
+            dlc.tar.xz.sha256sum
             apple.tar.xz
             apple.conf.sha256sum

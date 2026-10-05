@@ -9,6 +9,8 @@ DNS_FAKE="198.18.0.0:5333"
 # DNS-over-QUIC quic://dns.alidns.com:853 添加到 AdGuard, 添加到 AdGuard VPN
 DNS_CN="223.5.5.5"
 DNS_INTERNAL="10.96.0.10"
+# 固定走国内 DNS 的自有域名（不在 dnsmasq / v2fly 任何列表里）
+CN_FORCED="sdxpass.com"
 OUT="${1:-all}"
 
 # 临时缓存目录：存放展开后的列表集合 / 国内域名全集。
@@ -67,8 +69,8 @@ gen_upstream(){
 	cat <<-EOF
 $DNS_US
 [/cluster.local/]$DNS_INTERNAL
-[/sdxpass.com/]$DNS_CN
 EOF
+	for d in $CN_FORCED; do echo "[/$d/]$DNS_CN"; done
 	gen_fake_not_cn | sort -u | awk '-F[ \r]' -v dns="$DNS_FAKE" '/^[a-z0-9]/{print "[/"$1"/]"dns}'
 	gen_cn_rules
 }
@@ -78,8 +80,8 @@ gen_xndns(){
 	cat <<-EOF
 $DNS_FAKE
 [/cluster.local/]$DNS_INTERNAL
-[/sdxpass.com/]$DNS_CN
 EOF
+	for d in $CN_FORCED; do echo "[/$d/]$DNS_CN"; done
 	gen_cn_rules
 }
 
@@ -265,6 +267,48 @@ gen_blocklist(){
 	done
 }
 
+# 需要拦截的域名：filter_49.txt 里的 ||domain^ + data 列表里标了 @ads 的条目
+gen_blocked_domains(){
+	local cache="$CACHE_DIR/blocked"
+	if [ ! -s "$cache" ]; then
+		{
+			# AdGuard 规则 -> 纯域名。filter_49 全是 ||domain^ 形式，且末行没有换行符，
+			# 所以用 awk 而不是 sed —— sed 会把末行跟下一段输出粘连成一个假域名
+			awk '/^\|\|/ { d = $0; sub(/^\|\|/, "", d); sub(/\^?[ \t]*$/, "", d); if (d != "") print d }' \
+			  filter_49.txt
+			# v2fly 自带 @ads 标签的条目：去掉行内注释后要求 @ads 出现在标签位，
+			# 并跳过 regexp: / include: / keyword: 这类不是域名的行
+			grep -rh '@ads' domain-list-community/data/ \
+				| awk '{ sub(/#.*/, "") }
+				       /@ads/ {
+				         sub(/^full:/, "")
+				         n = split($0, a, /[ \t]+/)
+				         if (a[1] == "" || a[1] ~ /[:|^\/]/) next
+				         for (i = 2; i <= n; i++) if (a[i] ~ /@ads([,]|$)/) { print a[1]; break }
+				       }'
+		} | sort -u > "$cache"
+	fi
+	cat "$cache"
+}
+
+# dlc 清单：domain @cn / domain @ads，无标签 = fake（走代理）
+# 优先级 blocked > cn > fake，与线上现状一致（被拦截的域名现为 0.0.0.0）
+gen_dlc(){
+	local blocked="$CACHE_DIR/blocked"
+	gen_blocked_domains > /dev/null    # 先落缓存文件
+	[ -s "$blocked" ] || { echo "gen.sh: 拦截列表为空，中止 dlc 生成" >&2; exit 1; }
+	printf '# gen.sh 生成，勿手改\n'
+	printf '# @ads = 拦截；@cn = %s；无标签 = fake（默认上游）\n' "$DNS_CN"
+	printf '# 注：cluster.local -> %s 是内部上游，不在本清单内\n' "$DNS_INTERNAL"
+	{
+		awk 'NF { print $1" @ads" }' "$blocked"
+		for d in $CN_FORCED; do printf '%s @cn\n' "$d"; done
+		awk 'NR==FNR { ads[$0]=1; next } NF && !($0 in ads) { print $0" @cn" }' \
+		  "$blocked" <(gen_cn_domains)
+		gen_fake_not_cn | awk 'NR==FNR { ads[$0]=1; next } NF && !($0 in ads)' "$blocked" -
+	} | LC_ALL=C sort -u
+}
+
 emit_upstream(){
 	gen_upstream > upstream.conf
 	check_output upstream.conf 50000
@@ -292,12 +336,23 @@ emit_block(){
 	gen_blocklist
 }
 
+emit_dlc(){
+	# @ads 依赖 filter_49.txt；单独跑 dlc 目标时若不存在就先下载
+	[ -s filter_49.txt ] || gen_blocklist
+	gen_dlc > dlc.txt
+	check_output dlc.txt 100000
+	tar -Jcf dlc.tar.xz dlc.txt
+	sha256sum dlc.txt > dlc.txt.sha256sum
+	sha256sum dlc.tar.xz > dlc.tar.xz.sha256sum
+}
+
 case "$OUT" in
   all)
     emit_upstream
     emit_xndns
     emit_apple
     emit_block
+    emit_dlc
     ;;
   upstream|upstream.conf|adguard)
     emit_upstream
@@ -311,8 +366,11 @@ case "$OUT" in
   block|blocklist)
     emit_block
     ;;
+  dlc|dlc.txt)
+    emit_dlc
+    ;;
   *)
-    echo "usage: $0 [all|upstream|xndns|apple|block]" >&2
+    echo "usage: $0 [all|upstream|xndns|apple|block|dlc]" >&2
     exit 1
     ;;
 esac

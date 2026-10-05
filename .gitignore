@@ -7,3 +7,4 @@ xndns.conf*
 *.tar.xz.sha256sum
 apple.conf*
 filter_49.txt
+dlc.txt*
