@@ -291,24 +291,53 @@ gen_blocked_domains(){
 	cat "$cache"
 }
 
-# dlc 清单：只追加两类例外 domain @ads / domain @cn
-# 没有出现在清单里的域名 = fake（走代理），所以 fake 不在这里体现；
-# fake 的 tag 集合（要加载哪些上游列表）由加载方在加载时指定。
-# 优先级 blocked > cn > fake，与线上现状一致（被拦截的域名现为 0.0.0.0）
+# dlc 的全部条目 -> "域名|优先级|标签"，优先级 ads(0) < cn(1) < fake(2)。
+# 整个 domain-list-community/data 都算 dlc 的内容，一条不丢
+gen_dlc_tagged(){
+	grep -rh -v '^\(regexp:\|include:\|#\|$\)' domain-list-community/data/ \
+	  | awk '{
+	      sub(/^full:/, "")
+	      d = $1
+	      if (d == "" || d ~ /[:|^\/]/) next
+	      tag = "fake"; prio = 2
+	      for (i = 2; i <= NF; i++) {
+	        if ($i ~ /@ads([,]|$)/) { tag = "ads"; prio = 0; break }
+	        if ($i ~ /@cn([,]|$)/)  { tag = "cn";  prio = 1 }
+	      }
+	      print d "|" prio "|" tag
+	    }'
+}
+
+# dlc 里没有的域名：按 ads / cn / fake 三类分别取自已有的三个来源
+gen_dlc_extra(){
+	gen_blocked_domains | awk 'NF { print $1"|0|ads" }'
+	gen_cn_domains      | awk 'NF { print $1"|1|cn" }'
+	for d in $CN_FORCED; do printf '%s|1|cn\n' "$d"; done
+	gen_fake_not_cn     | awk 'NF { print $1"|2|fake" }'
+}
+
+# dlc 清单：保留 dlc 全部条目并给它追加 @ads/@cn/@fake 标签；
+# dlc 里没有的域名按类别追加到 ads / cn / fake 三个区块。
+# 一个域名只出现一次，优先级 blocked > cn > fake（与线上现状一致：
+# 同时命中 @ads 与 @cn 的域名现在是 0.0.0.0）
 gen_dlc(){
-	local blocked="$CACHE_DIR/blocked"
+	local blocked="$CACHE_DIR/blocked" rows="$CACHE_DIR/dlc-rows"
 	gen_blocked_domains > /dev/null    # 先落缓存文件
 	[ -s "$blocked" ] || { echo "gen.sh: 拦截列表为空，中止 dlc 生成" >&2; exit 1; }
+	{ gen_dlc_tagged; gen_dlc_extra; } \
+	  | LC_ALL=C sort -t'|' -k1,1 -k2,2n \
+	  | awk -F'|' '!seen[$1]++' > "$rows"
 	printf '# gen.sh 生成，勿手改\n'
-	printf '# @ads = 拦截；@cn = 国内 DNS（具体上游在加载时指定）\n'
-	printf '# 未出现在本清单里的域名 = fake（走代理）；fake 的 tag 集合在加载时指定\n'
+	printf '# 标签：@ads = 拦截；@cn = 国内 DNS（上游在加载时指定）；@fake = 走代理\n'
+	printf '# dlc 的全部条目都保留在下面三个区块里，dlc 里没有的域名也按类别追加进对应区块\n'
+	printf '# 每个域名只有一条，优先级 @ads > @cn > @fake；匹配按后缀、最长优先\n'
 	printf '# 注：cluster.local -> %s 是内部上游，不在本清单内\n' "$DNS_INTERNAL"
-	{
-		awk 'NF { print $1" @ads" }' "$blocked"
-		for d in $CN_FORCED; do printf '%s @cn\n' "$d"; done
-		awk 'NR==FNR { ads[$0]=1; next } NF && !($0 in ads) { print $0" @cn" }' \
-		  "$blocked" <(gen_cn_domains)
-	} | LC_ALL=C sort -u
+	printf '#\n# ===================== ads =====================\n'
+	awk -F'|' '$3 == "ads"  { print $1" @ads" }' "$rows"
+	printf '#\n# ===================== cn ======================\n'
+	awk -F'|' '$3 == "cn"   { print $1" @cn" }' "$rows"
+	printf '#\n# ===================== fake ====================\n'
+	awk -F'|' '$3 == "fake" { print $1" @fake" }' "$rows"
 }
 
 emit_upstream(){
