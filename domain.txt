@@ -89,3 +89,6 @@ models.inference.ai.azure.com
 anythingllm.com
 amazon.com
 ipinfo.io
+### 带 @cn 的域名强制走国内 DNS：gen.sh 会把它从 !cn（fake）结果里剔除
+### 只放上游列表里没标 @cn、但确实该走国内 DNS 的域名
+googleapis.cn @cn

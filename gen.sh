@@ -11,14 +11,56 @@ DNS_CN="223.5.5.5"
 DNS_INTERNAL="10.96.0.10"
 OUT="${1:-all}"
 
-# cn 域名统一走 DNS_CN，upstream / xndns 共用
+# 临时缓存目录：存放展开后的列表集合 / 国内域名全集。
+# 用文件而不是变量，因为这两个函数会在管道和命令替换的子 shell 里被调用，变量缓存传不出来
+CACHE_DIR="$(mktemp -d)"
+trap 'rm -rf "${CACHE_DIR:?}"' EXIT
+
+# 前置检查：缺任何一份上游数据都直接失败，避免静默生成残缺配置
+[ -r domain.txt ] || { echo "gen.sh: 缺少 domain.txt" >&2; exit 1; }
+[ -d domain-list-community/data ] || { echo "gen.sh: 缺少 domain-list-community/data" >&2; exit 1; }
+for f in dnsmasq-china-list/accelerated-domains.china.conf \
+         dnsmasq-china-list/google.china.conf \
+         dnsmasq-china-list/apple.china.conf; do
+	[ -r "$f" ] || { echo "gen.sh: 缺少 $f" >&2; exit 1; }
+done
+
+# 产物自检：行数低于下限说明列表没读到，宁可失败也不发一份残缺配置
+check_output(){
+	local file="$1" min="$2" n
+	n="$(wc -l < "$file" | tr -d ' ')"
+	n="${n:-0}"
+	if [ "$n" -lt "$min" ]; then
+		echo "gen.sh: ${file} 只生成了 ${n} 行（下限 ${min}），疑似上游列表缺失" >&2
+		# 变量一律写成 ${x}：macOS 自带 bash 3.2 下 "$x）" 这种紧跟中文标点的写法
+		# 会丢掉展开值并吃掉该标点的首字节
+		exit 1
+	fi
+}
+
+# 全部国内域名：data 列表 / domain.txt 里 @cn 的 + dnsmasq 三份中国列表里的。
+# upstream 与 xndns 共用；同时也是 !cn 去冲突的依据，所以 dnsmasq 侧必须算进来。
+# 结果缓存：upstream + xndns 一次运行里会被调用三次
+gen_cn_domains(){
+	local cache="$CACHE_DIR/cn-domains"
+	if [ ! -s "$cache" ]; then
+		{
+			gen_fake "cn"
+			# linkedin 系域名（accelerated-domains 里有，如 linkedin-event.com）强制走 fake，
+			# 与 data/linkedin 的非 @cn 部分保持一致
+			awk '-F[/]' '{print $2}' \
+			  dnsmasq-china-list/accelerated-domains.china.conf \
+			  dnsmasq-china-list/google.china.conf \
+			  dnsmasq-china-list/apple.china.conf \
+			  | grep -v linkedin
+		} | sort -u > "$cache"
+	fi
+	cat "$cache"
+}
+
+# cn 域名统一走 DNS_CN
 gen_cn_rules(){
-	gen_fake "cn" | sort -u | awk '-F[ \r]' -v dns="$DNS_CN" '/^[a-z0-9]/{print "[/"$1"/]"dns}'
-	awk '-F[/]' -v dns="$DNS_CN" '{print "[/"$2"/]"dns}' \
-	  dnsmasq-china-list/accelerated-domains.china.conf \
-	  dnsmasq-china-list/google.china.conf \
-	  dnsmasq-china-list/apple.china.conf \
-	  | grep -v linkedin | sort -u
+	gen_cn_domains | awk '-F[ \r]' -v dns="$DNS_CN" '/^[a-z0-9]/{print "[/"$1"/]"dns}'
 }
 
 gen_upstream(){
@@ -27,7 +69,7 @@ $DNS_US
 [/cluster.local/]$DNS_INTERNAL
 [/sdxpass.com/]$DNS_CN
 EOF
-	gen_fake "!cn" | sort -u | awk '-F[ \r]' -v dns="$DNS_FAKE" '/^[a-z0-9]/{print "[/"$1"/]"dns}'
+	gen_fake_not_cn | sort -u | awk '-F[ \r]' -v dns="$DNS_FAKE" '/^[a-z0-9]/{print "[/"$1"/]"dns}'
 	gen_cn_rules
 }
 
@@ -45,32 +87,72 @@ gen_apple(){
   awk -F/ '{print $2}' dnsmasq-china-list/apple.china.conf
 }
 
+# 名单 -> 真正要读的列表集合：逐层展开 include 直到不再出现新列表
+# include 目标先剥掉 @属性 和 # 注释
+# $1 = keep-cn 时保留 *-cn 列表（CN 侧用：CN 侧的 -cn 列表本来就该读），
+#      否则排除（fake 侧用：防止 CN 列表里的无标签条目被当成境外送去代理）
+# （旧实现只展开一层，amp / cursor / bytedance-ai-!cn 这类深层列表会被整个漏掉）
 gen_fake_includes(){
-  while read line; do
-    FILE=domain-list-community/data/$line
-    if [ -e "$FILE" ]; then
-      echo $line
-      awk -F: '/^include:/{if ($2 !~ /-cn$/) print $2}' $FILE
-    fi
-  done | sort -u
-}
-
-gen_fake_expand(){
-  while read line; do
-    FILE=domain-list-community/data/$line
-    if [ -e "$FILE" ]; then
-      grep -v '^\(regexp:\|include:\|#\|$\)' $FILE | grep ${1} '..*@cn' | sed s/^full://g | sed 's/\s\+@cn$//g'
+  local keep_cn="$1" queue name files seen targets
+  seen=" "
+  queue="$(cat | tr -s '[:space:]' '\n' | sed '/^$/d')"
+  while :; do
+    files=""
+    for name in $queue; do
+      case "$seen" in *" $name "*) continue ;; esac
+      seen="$seen$name "
+      if [ -e "domain-list-community/data/$name" ]; then
+        echo "$name"
+        files="$files domain-list-community/data/$name"
+      else
+        echo "gen.sh: 警告：列表 $name 不存在，已跳过" >&2
+      fi
+    done
+    [ -n "$files" ] || break
+    # 下一层：本轮所有新列表一次性抽出 include 目标
+    targets="$(sed -n 's/^include:\([^[:space:]#]*\).*/\1/p' $files)"
+    if [ "$keep_cn" = "keep-cn" ]; then
+      queue="$targets"
+    else
+      queue="$(printf '%s\n' "$targets" | grep -v -- '-cn$')"
     fi
   done
 }
 
-gen_fake(){
-  local OPT="-v"
-  if [ "$1" = "cn" ]; then
-    OPT=""
+# 展开列表：cn 取带 @cn 的条目，!cn 取不带 @cn 的条目；统一只留域名
+# 先把列表名换成文件列表，一次 grep 处理完（逐个 spawn 会慢一个数量级）
+gen_fake_expand(){
+  local files name
+  files=""
+  while read -r name || [ -n "$name" ]; do
+    [ -e "domain-list-community/data/$name" ] && files="$files domain-list-community/data/$name"
+  done
+  [ -n "$files" ] || return 0
+  grep -h -v '^\(regexp:\|include:\|#\|$\)' $files \
+    | grep ${1} '..*@cn' \
+    | sed 's/^full://g' \
+    | awk '{print $1}'
+}
+
+# 境外域名：剔除所有国内域名（gen_cn_domains 见文件开头）。
+# 不做这一步的话，同一域名会在 upstream.conf 里同时存在 fake 和 CN 两条，
+# 最终走哪条取决于 AdGuard 对同名重复条目的覆盖顺序（实测是后写入的 CN 胜出）。
+# 用 awk 哈希查表而不是 grep -f：11 万条 pattern 的 grep 会慢两个数量级
+gen_fake_not_cn(){
+  local cn
+  cn="$(gen_cn_domains)"
+  if [ -n "$cn" ]; then
+    gen_fake "!cn" | awk 'NR==FNR { cn[$0]=1; next } !($0 in cn)' <(printf '%s\n' "$cn") -
+  else
+    gen_fake "!cn"
   fi
-  cat <<EOF | gen_fake_includes | gen_fake_expand "$OPT"
+}
+
+# 要展开的上游列表名单（v2fly/domain-list-community/data 下的名字）
+gen_fake_base(){
+  cat <<EOF
 anthropic
+apple
 apple-intelligence
 archive
 discord
@@ -108,16 +190,62 @@ x
 youtube
 category-ai-chat-!cn
 category-anticensorship
+category-antivirus
+category-cas
+category-cdn-!cn
 category-communication
+category-companies
 category-cryptocurrency
 category-dev
+category-ecommerce
 category-forums
+category-games-!cn
+category-media
 category-scholar-!cn
 category-social-media-!cn
 category-vpnservices
 cloudflare
+connectivity-check
 EOF
-	grep -v '^\(regexp:\|include:\|#\|$\)' domain.txt | grep $OPT '..*@cn'
+}
+
+# 名单 + 逐层 include 展开后的列表集合；一次生成后缓存，
+# 否则同一份展开会在 upstream / xndns 里重复算三遍
+gen_fake_lists(){
+  local cache="$CACHE_DIR/fake-lists"
+  [ -s "$cache" ] || gen_fake_base | gen_fake_includes > "$cache"
+  cat "$cache"
+}
+
+# 只参与 CN 侧的列表：这些列表里"无标签"的条目本身就是中国域名
+# （12306.cn、10086.cn、alibaba.com 之类），按 !cn 处理会把国内站点送去代理，
+# 所以只取它们带 @cn 的条目。fake 侧只吃 gen_fake_base 里那些 !cn 属性的父列表
+gen_cn_only_base(){
+  cat <<EOF
+category-cdn-cn
+category-ip-geo-detect
+geolocation-cn
+EOF
+}
+
+gen_cn_only_lists(){
+  local cache="$CACHE_DIR/cn-only-lists"
+  # CN 侧保留 *-cn 列表：cloudflare-cn / aws-cn / category-ntp-cn 就在这一层
+  [ -s "$cache" ] || gen_cn_only_base | gen_fake_includes keep-cn > "$cache"
+  cat "$cache"
+}
+
+gen_fake(){
+  local OPT="-v"
+  if [ "$1" = "cn" ]; then
+    OPT=""
+  fi
+  {
+    gen_fake_lists | gen_fake_expand "$OPT"
+    # CN-only 列表只在 cn 侧生效
+    [ -n "$OPT" ] || gen_cn_only_lists | gen_fake_expand ""
+    grep -v '^\(regexp:\|include:\|#\|$\)' domain.txt | grep $OPT '..*@cn' | sed 's/^full://g' | awk '{print $1}'
+  }
 }
 
 gen_blocklist(){
@@ -139,6 +267,7 @@ gen_blocklist(){
 
 emit_upstream(){
 	gen_upstream > upstream.conf
+	check_output upstream.conf 50000
 	tar -Jcf upstream.tar.xz upstream.conf
 	sha256sum upstream.conf > upstream.conf.sha256sum
 	sha256sum upstream.tar.xz > upstream.tar.xz.sha256sum
@@ -146,6 +275,7 @@ emit_upstream(){
 
 emit_xndns(){
 	gen_xndns > xndns.conf
+	check_output xndns.conf 50000
 	tar -Jcf xndns.tar.xz xndns.conf
 	sha256sum xndns.conf > xndns.conf.sha256sum
 	sha256sum xndns.tar.xz > xndns.tar.xz.sha256sum
@@ -153,6 +283,7 @@ emit_xndns(){
 
 emit_apple(){
 	gen_apple > apple.conf
+	check_output apple.conf 50
 	tar -Jcf apple.tar.xz apple.conf
 	sha256sum apple.conf > apple.conf.sha256sum
 }
