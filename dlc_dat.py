@@ -5,8 +5,12 @@
   1. 官方 dat 的全部列表 / 域名 / 类型 / 属性原样保留 —— dlc 的历史一条不丢
   2. 已有的条目就地追加属性：@ads（filter_49）/ @cn（国内列表）/ @fake（!cn 走代理）
      优先级 ads > cn > fake，一个域名只打最高优先级那个
-  3. dlc 里没有的域名写进对应列表：ADS / FAKE 新建，CN 追加进已有的 CN 列表
-     目标条目一律用 Domain 型（后缀匹配），与 upstream.conf 的 [/domain/] 语义一致
+  3. dlc 里没有的域名写进对应列表：ADS / FAKE 新建，CN 追加进已有的 CN 列表，
+     一律用 Domain 型（后缀匹配），与 upstream.conf 的 [/domain/] 语义一致。
+     这些新条目不再重复写属性 —— 它们的标签由列表名表达（ADS / CN / FAKE），
+     消费方"按属性或列表名"都能查到：
+       dlc 原有条目 -> 属性 @ads/@cn/@fake
+       dlc 没有的   -> 所在列表名
 
 输入是他生成的三个纯域名列表；--selfcheck 会在写盘前用官方 dat 验证编解码
 往返是否字节一致，不一致就报错退出（防止格式漂移写出坏文件）。
@@ -21,6 +25,8 @@ import sys
 # Domain    { Type type = 1; string value = 2; repeated Attribute attribute = 3 }
 # Attribute { string key = 1; oneof { bool bool_value = 2; int64 int_value = 3 } }
 DOMAIN_TYPE = 2
+TAGS = ("ads", "cn", "fake")            # 属性名
+LIST_OF = {"ADS": "ads", "CN": "cn", "FAKE": "fake"}  # 列表名 -> 标签
 
 
 def read_varint(buf, i):
@@ -204,9 +210,8 @@ def main():
     for tag, listname in (("ads", "ADS"), ("cn", "CN"), ("fake", "FAKE")):
         if not pending[tag]:
             continue
-        entries = [{"type": DOMAIN_TYPE, "value": d,
-                    "attrs": [{"key": tag, "value": 1, "is_bool": True}]}
-                   for d in pending[tag]]
+        # 列表名已经表达了标签，条目本身不再重复写属性
+        entries = [{"type": DOMAIN_TYPE, "value": d, "attrs": []} for d in pending[tag]]
         if listname in by_code:
             sites[by_code[listname]][1].extend(entries)
         else:
@@ -224,18 +229,23 @@ def main():
     for key in sorted(added):
         print("           %-16s %d" % (key, added[key]))
 
-    # 自检：解码回来，确认每个输入域名都能查到它的标签
+    # 自检：解码回来，确认每个输入域名都能查到它的标签 —— 属性或列表名任一即可
     check = decode(out)
-    tagged = collections.defaultdict(set)
+    by_attr = collections.defaultdict(set)
+    by_list = collections.defaultdict(set)
     for code, domains in check:
         for dom in domains:
             for attr in dom["attrs"]:
-                if attr["key"] in ("ads", "cn", "fake"):
-                    tagged[dom["value"]].add(attr["key"])
-    missing = [d for d in tag_of if tag_of[d] not in tagged.get(d, ())]
+                if attr["key"] in TAGS:
+                    by_attr[dom["value"]].add(attr["key"])
+            if code in LIST_OF:
+                by_list[dom["value"]].add(LIST_OF[code])
+    missing = [d for d, t in tag_of.items()
+               if t not in by_attr.get(d, ()) and t not in by_list.get(d, ())]
     if missing:
-        sys.exit("dlc_dat: 自检失败，%d 个域名没打上标签，例：%s" % (len(missing), missing[:5]))
-    print("dlc_dat: 自检通过，%d 个域名全部带上标签" % len(tag_of))
+        sys.exit("dlc_dat: 自检失败，%d 个域名既没有标签属性也不在对应列表里，例：%s"
+                 % (len(missing), missing[:5]))
+    print("dlc_dat: 自检通过，%d 个域名都能按属性或列表名查到标签" % len(tag_of))
 
 
 if __name__ == "__main__":

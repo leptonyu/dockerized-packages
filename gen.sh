@@ -310,7 +310,7 @@ gen_dlc(){
 
 	python3 dlc_dat.py --base "$base" \
 	  --ads "$sets/ads.txt" --cn "$sets/cn.txt" --fake "$sets/fake.txt" \
-	  --out dlc.dat
+	  --out dlc.dat || { echo "gen.sh: dlc_dat.py 失败，dlc.dat 不可用" >&2; exit 1; }
 }
 
 emit_upstream(){
