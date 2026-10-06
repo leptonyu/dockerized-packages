@@ -9,6 +9,8 @@ DNS_FAKE="198.18.0.0:5333"
 # DNS-over-QUIC quic://dns.alidns.com:853 添加到 AdGuard, 添加到 AdGuard VPN
 DNS_CN="223.5.5.5"
 DNS_INTERNAL="10.96.0.10"
+# 官方编译好的 dlc.dat（作为基准，保留 dlc 全部列表/域名/类型/属性）
+DLCDAT_URL="https://github.com/v2fly/domain-list-community/releases/latest/download/dlc.dat"
 # 固定走国内 DNS 的自有域名（不在 dnsmasq / v2fly 任何列表里）
 CN_FORCED="sdxpass.com"
 OUT="${1:-all}"
@@ -291,74 +293,24 @@ gen_blocked_domains(){
 	cat "$cache"
 }
 
-# dlc 的全部条目 -> "域名|有@ads|有@cn"，按域名合并，保留 dlc 自己的标签。
-# 整个 domain-list-community/data 都算 dlc 的内容，一条不丢
-gen_dlc_tagged(){
-	grep -rh -v '^\(regexp:\|include:\|#\|$\)' domain-list-community/data/ \
-	  | awk '{
-	      sub(/^full:/, "")
-	      d = $1
-	      if (d == "" || d ~ /[:|^\/]/) next
-	      D[d] = 1
-	      for (i = 2; i <= NF; i++) {
-	        if ($i ~ /@ads([,]|$)/) A[d] = 1
-	        if ($i ~ /@cn([,]|$)/)  C[d] = 1
-	      }
-	    }
-	    END { for (d in D) printf "%s|%d|%d\n", d, (d in A), (d in C) }' \
-	  | LC_ALL=C sort
-}
-
-# dlc 清单：
-#   1. dlc 的条目原样保留，命中 filter_49 / 国内列表的就地补上 @ads / @cn 标签
-#   2. dlc 里没有的域名，按类别追加到 ads / cn / fake 三个区块
-# 一个域名只出现一次；同时带 @ads 与 @cn 时按 @ads 处理（与线上现状一致：
-# 这类域名现在解析为 0.0.0.0）
+# dlc 清单：以官方 dlc.dat 为基准，保留 dlc 的全部列表 / 域名 / 类型 / 属性，
+# 只追加 @ads / @cn / @fake 三种属性（优先级 ads > cn > fake）。
+# dlc 里没有的域名：ads -> ADS 列表、cn -> 追加进已有 CN 列表、fake -> FAKE 列表，
+# 统一用 Domain 型（后缀匹配），与 upstream.conf 的 [/domain/] 语义一致。
+# 实际的编解码与自检在 dlc_dat.py 里（含官方 dat 的字节级往返校验）。
 gen_dlc(){
-	local blocked="$CACHE_DIR/blocked" cndom="$CACHE_DIR/cn-domains.txt" tags="$CACHE_DIR/dlc-tags"
-	gen_blocked_domains > /dev/null    # 先落缓存文件
-	[ -s "$blocked" ] || { echo "gen.sh: 拦截列表为空，中止 dlc 生成" >&2; exit 1; }
-	gen_dlc_tagged > "$tags"
-	{ gen_cn_domains; for d in $CN_FORCED; do echo "$d"; done; } | LC_ALL=C sort -u > "$cndom"
+	local base="dlc-official.dat" sets="$CACHE_DIR"
+	[ -s "$base" ] || curl -fsSL "$DLCDAT_URL" -o "$base" \
+	  || { echo "gen.sh: 下载 $DLCDAT_URL 失败" >&2; exit 1; }
+	[ -s "$base" ] || { echo "gen.sh: $base 为空" >&2; exit 1; }
 
-	printf '# gen.sh 生成，勿手改\n'
-	printf '# 标签：@ads = 拦截；@cn = 国内 DNS（上游在加载时指定）；无标签 = 默认（fake/代理）\n'
-	printf '# 上面是 dlc 的全部条目，命中拦截/国内列表的就地补了标签\n'
-	printf '# 下面三个区块是 dlc 里没有、需要额外指定的域名\n'
-	printf '# 同时带 @ads @cn 时按 @ads 处理；匹配按后缀、最长优先\n'
-	printf '# 注：cluster.local -> %s 是内部上游，不在本清单内\n' "$DNS_INTERNAL"
+	gen_blocked_domains > "$sets/ads.txt"
+	{ gen_cn_domains; for d in $CN_FORCED; do echo "$d"; done; } | LC_ALL=C sort -u > "$sets/cn.txt"
+	gen_fake_not_cn | LC_ALL=C sort -u > "$sets/fake.txt"
 
-	printf '#\n# ==================== dlc ======================\n'
-	awk -F'|' '
-	  FILENAME == ARGV[1] { if ($1 != "") ads[$1] = 1; next }
-	  FILENAME == ARGV[2] { if ($1 != "") cn[$1]  = 1; next }
-	  NF == 0 { next }
-	  {
-	    tag = ""
-	    if ($2 == 1 || ($1 in ads)) tag = " @ads"
-	    if ($3 == 1 || ($1 in cn))  tag = tag " @cn"
-	    print $1 tag
-	  }' "$blocked" "$cndom" "$tags"
-
-	printf '#\n# ============== ads（dlc 没有的）==============\n'
-	awk -F'|' 'NR==FNR { d[$1] = 1; next } !($1 in d)' "$tags" "$blocked" \
-	  | LC_ALL=C sort -u | awk 'NF { print $1" @ads" }'
-
-	# cn / fake 区块同样要让位给 @ads（优先级 @ads > @cn > @fake）
-	printf '#\n# =============== cn（dlc 没有的）===============\n'
-	awk -F'|' '
-	  FILENAME == ARGV[1] { d[$1] = 1; next }
-	  FILENAME == ARGV[2] { d[$1] = 1; next }
-	  !($1 in d)' "$tags" "$blocked" "$cndom" \
-	  | LC_ALL=C sort -u | awk 'NF { print $1" @cn" }'
-
-	printf '#\n# ============= fake（dlc 没有的）==============\n'
-	gen_fake_not_cn \
-	  | awk -F'|' '
-	      FILENAME == ARGV[1] { d[$1] = 1; next }
-	      FILENAME == ARGV[2] { d[$1] = 1; next }
-	      !($1 in d)' "$tags" "$blocked" - \
-	  | LC_ALL=C sort -u | awk 'NF { print $1" @fake" }'
+	python3 dlc_dat.py --base "$base" \
+	  --ads "$sets/ads.txt" --cn "$sets/cn.txt" --fake "$sets/fake.txt" \
+	  --out dlc.dat
 }
 
 emit_upstream(){
@@ -391,10 +343,11 @@ emit_block(){
 emit_dlc(){
 	# @ads 依赖 filter_49.txt；单独跑 dlc 目标时若不存在就先下载
 	[ -s filter_49.txt ] || gen_blocklist
-	gen_dlc > dlc.txt
-	check_output dlc.txt 100000
-	tar -Jcf dlc.tar.xz dlc.txt
-	sha256sum dlc.txt > dlc.txt.sha256sum
+	gen_dlc
+	size="$(wc -c < dlc.dat | tr -d ' ')"
+	[ "$size" -gt 5000000 ] || { echo "gen.sh: dlc.dat 只有 ${size} 字节，疑似生成失败" >&2; exit 1; }
+	tar -Jcf dlc.tar.xz dlc.dat
+	sha256sum dlc.dat > dlc.dat.sha256sum
 	sha256sum dlc.tar.xz > dlc.tar.xz.sha256sum
 }
 
@@ -418,7 +371,7 @@ case "$OUT" in
   block|blocklist)
     emit_block
     ;;
-  dlc|dlc.txt)
+  dlc|dlc.dat)
     emit_dlc
     ;;
   *)
