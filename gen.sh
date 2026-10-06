@@ -239,6 +239,11 @@ gen_cn_only_lists(){
   cat "$cache"
 }
 
+# domain.txt -> 纯域名：$1 为空取带 @cn 的条目，$1=-v 取不带 @cn 的条目
+gen_domain_txt(){
+  grep -v '^\(regexp:\|include:\|#\|$\)' domain.txt | grep $1 '..*@cn' | sed 's/^full://g' | awk 'NF { print $1 }'
+}
+
 gen_fake(){
   local OPT="-v"
   if [ "$1" = "cn" ]; then
@@ -248,8 +253,15 @@ gen_fake(){
     gen_fake_lists | gen_fake_expand "$OPT"
     # CN-only 列表只在 cn 侧生效
     [ -n "$OPT" ] || gen_cn_only_lists | gen_fake_expand ""
-    grep -v '^\(regexp:\|include:\|#\|$\)' domain.txt | grep $OPT '..*@cn' | sed 's/^full://g' | awk 'NF { print $1 }'
+    gen_domain_txt "$OPT"
   }
+}
+
+# 只给 dlc 补的 fake 域名：domain.txt 里手工维护的非 @cn 条目（约 80 条）。
+# !cn 全集（约 11 万条）不再进 dlc：未标注条目的 fake 语义由消费方的默认处理承担，
+# 再全量打一遍 @fake 属性只是把同一份信息写两遍。这份人工例外才是 dlc 需要额外带的。
+gen_fake_manual(){
+  gen_domain_txt "-v"
 }
 
 gen_blocklist(){
@@ -297,6 +309,7 @@ gen_blocked_domains(){
 # 只追加 @ads / @cn / @fake 三种属性（优先级 ads > cn > fake）。
 # dlc 里没有的域名：ads -> ADS 列表、cn -> 追加进已有 CN 列表、fake -> FAKE 列表，
 # 统一用 Domain 型（后缀匹配），与 upstream.conf 的 [/domain/] 语义一致。
+# fake 这一路只喂 gen_fake_manual（domain.txt 里手工维护的几条），不展开 !cn 全集。
 # 实际的编解码与自检在 dlc_dat.py 里（含官方 dat 的字节级往返校验）。
 gen_dlc(){
 	local base="dlc-official.dat" sets="$CACHE_DIR"
@@ -306,7 +319,7 @@ gen_dlc(){
 
 	gen_blocked_domains > "$sets/ads.txt"
 	{ gen_cn_domains; for d in $CN_FORCED; do echo "$d"; done; } | LC_ALL=C sort -u > "$sets/cn.txt"
-	gen_fake_not_cn | LC_ALL=C sort -u > "$sets/fake.txt"
+	gen_fake_manual | LC_ALL=C sort -u > "$sets/fake.txt"
 
 	python3 dlc_dat.py --base "$base" \
 	  --ads "$sets/ads.txt" --cn "$sets/cn.txt" --fake "$sets/fake.txt" \

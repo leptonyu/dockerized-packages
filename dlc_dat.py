@@ -3,7 +3,7 @@
 
 规则：
   1. 官方 dat 的全部列表 / 域名 / 类型 / 属性原样保留 —— dlc 的历史一条不丢
-  2. 已有的条目就地追加属性：@ads（filter_49）/ @cn（国内列表）/ @fake（!cn 走代理）
+  2. 已有的条目就地追加属性：@ads（filter_49）/ @cn（国内列表）/ @fake（手工维护的 !cn 域名）
      优先级 ads > cn > fake，一个域名只打最高优先级那个
   3. dlc 里没有的域名写进对应列表：ADS / FAKE 新建，CN 追加进已有的 CN 列表，
      一律用 Domain 型（后缀匹配），与 upstream.conf 的 [/domain/] 语义一致。
@@ -12,7 +12,9 @@
        dlc 原有条目 -> 属性 @ads/@cn/@fake
        dlc 没有的   -> 所在列表名
 
-输入是他生成的三个纯域名列表；--selfcheck 会在写盘前用官方 dat 验证编解码
+输入是他生成的三个纯域名列表（fake 只有 domain.txt 里手工维护的少量域名，
+消费方对未标注条目的默认处理已经覆盖了 !cn 全集，不必再整份写进 dlc）；
+--selfcheck 会在写盘前用官方 dat 验证编解码
 往返是否字节一致，不一致就报错退出（防止格式漂移写出坏文件）。
 """
 
@@ -167,7 +169,7 @@ def main():
     ap.add_argument("--base", required=True, help="官方 dlc.dat")
     ap.add_argument("--ads", required=True, help="filter_49 域名列表")
     ap.add_argument("--cn", required=True, help="国内域名列表")
-    ap.add_argument("--fake", required=True, help="!cn 域名列表")
+    ap.add_argument("--fake", required=True, help="手工维护的 !cn 域名列表（domain.txt 里非 @cn 的条目）")
     ap.add_argument("--out", required=True, help="输出 dlc.dat")
     args = ap.parse_args()
 
