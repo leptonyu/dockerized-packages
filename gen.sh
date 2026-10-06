@@ -346,8 +346,12 @@ emit_dlc(){
 	gen_dlc
 	size="$(wc -c < dlc.dat | tr -d ' ')"
 	[ "$size" -gt 5000000 ] || { echo "gen.sh: dlc.dat 只有 ${size} 字节，疑似生成失败" >&2; exit 1; }
+	# 两种包装：dlc.tar.xz（单成员 tar，按现有约定）
+	# 加 dlc.dat.xz（裸 xz，解压即 protobuf）—— 消费方只解 xz 不拆 tar 时用这份
 	tar -Jcf dlc.tar.xz dlc.dat
+	xz -c dlc.dat > dlc.dat.xz
 	sha256sum dlc.dat > dlc.dat.sha256sum
+	sha256sum dlc.dat.xz > dlc.dat.xz.sha256sum
 	sha256sum dlc.tar.xz > dlc.tar.xz.sha256sum
 }
 

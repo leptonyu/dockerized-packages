@@ -48,5 +48,7 @@ jobs:
             dlc.tar.xz
             dlc.dat.sha256sum
             dlc.tar.xz.sha256sum
+            dlc.dat.xz
+            dlc.dat.xz.sha256sum
             apple.tar.xz
             apple.conf.sha256sum
