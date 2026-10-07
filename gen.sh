@@ -1,14 +1,10 @@
 #!/bin/bash
 
-DNS_US="8.8.8.8"
-DNS_FAKE="198.18.0.0:5333"
 # DNS, IPv4 223.5.5.5 和 223.6.6.6 添加到 AdGuard，添加到 AdGuard VPN
 # DNS, IPv6 2400:3200::1 和 2400:3200:baba::1  添加到 AdGuard，添加到 AdGuard VPN
 # DNS-over-HTTPS  https://dns.alidns.com/dns-query  添加到 AdGuard，添加到 AdGuard VPN
 # DNS-over-TLS  tls://dns.alidns.com  添加到 AdGuard，添加到 AdGuard VPN
 # DNS-over-QUIC quic://dns.alidns.com:853 添加到 AdGuard, 添加到 AdGuard VPN
-DNS_CN="223.5.5.5"
-DNS_INTERNAL="10.96.0.10"
 # 官方编译好的 dlc.dat（作为基准，保留 dlc 全部列表/域名/类型/属性）
 DLCDAT_URL="https://github.com/v2fly/domain-list-community/releases/latest/download/dlc.dat"
 # 固定走国内 DNS 的自有域名（不在 dnsmasq / v2fly 任何列表里）
@@ -43,13 +39,13 @@ check_output(){
 }
 
 # 全部国内域名：data 列表 / domain.txt 里 @cn 的 + dnsmasq 三份中国列表里的。
-# upstream 与 xndns 共用；同时也是 !cn 去冲突的依据，所以 dnsmasq 侧必须算进来。
-# 结果缓存：upstream + xndns 一次运行里会被调用三次
+# 只给 dlc 的 CN 一路用（gen_dlc）。dnsmasq 三份必须算进来：accelerated-domains 里的
+# 域名在 v2fly data 里没有 @cn 标签，漏了它们就补不进 CN。
 gen_cn_domains(){
 	local cache="$CACHE_DIR/cn-domains"
 	if [ ! -s "$cache" ]; then
 		{
-			gen_fake "cn"
+			gen_fake
 			# linkedin 系域名（accelerated-domains 里有，如 linkedin-event.com）强制走 fake，
 			# 与 data/linkedin 的非 @cn 部分保持一致
 			awk '-F[/]' 'NF { print $2 }' \
@@ -62,39 +58,14 @@ gen_cn_domains(){
 	cat "$cache"
 }
 
-# cn 域名统一走 DNS_CN
-gen_cn_rules(){
-	gen_cn_domains | awk '-F[ \r]' -v dns="$DNS_CN" '/^[a-z0-9]/{print "[/"$1"/]"dns}'
-}
-
-gen_upstream(){
-	cat <<-EOF
-$DNS_US
-[/cluster.local/]$DNS_INTERNAL
-EOF
-	for d in $CN_FORCED; do echo "[/$d/]$DNS_CN"; done
-	gen_fake_not_cn | sort -u | awk '-F[ \r]' -v dns="$DNS_FAKE" '/^[a-z0-9]/{print "[/"$1"/]"dns}'
-	gen_cn_rules
-}
-
-# 与 upstream 相同，区别：默认上游是 fake，且不再单独列出 !cn→FAKE 的域名组
-gen_xndns(){
-	cat <<-EOF
-$DNS_FAKE
-[/cluster.local/]$DNS_INTERNAL
-EOF
-	for d in $CN_FORCED; do echo "[/$d/]$DNS_CN"; done
-	gen_cn_rules
-}
-
 gen_apple(){
   awk -F/ '{print $2}' dnsmasq-china-list/apple.china.conf
 }
 
 # 名单 -> 真正要读的列表集合：逐层展开 include 直到不再出现新列表
 # include 目标先剥掉 @属性 和 # 注释
-# $1 = keep-cn 时保留 *-cn 列表（CN 侧用：CN 侧的 -cn 列表本来就该读），
-#      否则排除（fake 侧用：防止 CN 列表里的无标签条目被当成境外送去代理）
+# $1 = keep-cn 时保留 *-cn 列表（gen_cn_only_lists 用：CN 侧的 -cn 列表本来就该读），
+#      否则排除（gen_fake_lists 用：-cn 列表交给 gen_cn_only_lists 那一遍处理）
 # （旧实现只展开一层，amp / cursor / bytedance-ai-!cn 这类深层列表会被整个漏掉）
 gen_fake_includes(){
   local keep_cn="$1" queue name files seen targets
@@ -123,7 +94,7 @@ gen_fake_includes(){
   done
 }
 
-# 展开列表：cn 取带 @cn 的条目，!cn 取不带 @cn 的条目；统一只留域名
+# 展开列表：只取带 @cn 的条目，统一只留域名
 # 先把列表名换成文件列表，一次 grep 处理完（逐个 spawn 会慢一个数量级）
 gen_fake_expand(){
   local files name
@@ -133,23 +104,9 @@ gen_fake_expand(){
   done
   [ -n "$files" ] || return 0
   grep -h -v '^\(regexp:\|include:\|#\|$\)' $files \
-    | grep ${1} '..*@cn' \
+    | grep '..*@cn' \
     | sed 's/^full://g' \
     | awk 'NF { print $1 }'
-}
-
-# 境外域名：剔除所有国内域名（gen_cn_domains 见文件开头）。
-# 不做这一步的话，同一域名会在 upstream.conf 里同时存在 fake 和 CN 两条，
-# 最终走哪条取决于 AdGuard 对同名重复条目的覆盖顺序（实测是后写入的 CN 胜出）。
-# 用 awk 哈希查表而不是 grep -f：11 万条 pattern 的 grep 会慢两个数量级
-gen_fake_not_cn(){
-  local cn
-  cn="$(gen_cn_domains)"
-  if [ -n "$cn" ]; then
-    gen_fake "!cn" | awk 'NR==FNR { cn[$0]=1; next } !($0 in cn)' <(printf '%s\n' "$cn") -
-  else
-    gen_fake "!cn"
-  fi
 }
 
 # 要展开的上游列表名单（v2fly/domain-list-community/data 下的名字）
@@ -213,8 +170,7 @@ connectivity-check
 EOF
 }
 
-# 名单 + 逐层 include 展开后的列表集合；一次生成后缓存，
-# 否则同一份展开会在 upstream / xndns 里重复算三遍
+# 名单 + 逐层 include 展开后的列表集合（结果缓存，避免同一次运行里重复展开）
 gen_fake_lists(){
   local cache="$CACHE_DIR/fake-lists"
   [ -s "$cache" ] || gen_fake_base | gen_fake_includes > "$cache"
@@ -222,8 +178,8 @@ gen_fake_lists(){
 }
 
 # 只参与 CN 侧的列表：这些列表里"无标签"的条目本身就是中国域名
-# （12306.cn、10086.cn、alibaba.com 之类），按 !cn 处理会把国内站点送去代理，
-# 所以只取它们带 @cn 的条目。fake 侧只吃 gen_fake_base 里那些 !cn 属性的父列表
+# （12306.cn、10086.cn、alibaba.com 之类），但这里只取它们带 @cn 的条目。
+# 父列表（gen_fake_base）与它们分开，靠 gen_fake_includes 的 keep-cn 区分
 gen_cn_only_base(){
   cat <<EOF
 category-cdn-cn
@@ -244,16 +200,12 @@ gen_domain_txt(){
   grep -v '^\(regexp:\|include:\|#\|$\)' domain.txt | grep $1 '..*@cn' | sed 's/^full://g' | awk 'NF { print $1 }'
 }
 
+# CN 域名：父列表里带 @cn 的条目 + CN-only 列表 + domain.txt 里带 @cn 的条目
 gen_fake(){
-  local OPT="-v"
-  if [ "$1" = "cn" ]; then
-    OPT=""
-  fi
   {
-    gen_fake_lists | gen_fake_expand "$OPT"
-    # CN-only 列表只在 cn 侧生效
-    [ -n "$OPT" ] || gen_cn_only_lists | gen_fake_expand ""
-    gen_domain_txt "$OPT"
+    gen_fake_lists | gen_fake_expand
+    gen_cn_only_lists | gen_fake_expand
+    gen_domain_txt ""
   }
 }
 
@@ -308,7 +260,7 @@ gen_blocked_domains(){
 # dlc 清单：以官方 dlc.dat 为基准，保留 dlc 的全部列表 / 域名 / 类型 / 属性，
 # 只追加 @ads / @cn / @fake 三种属性（优先级 ads > cn > fake）。
 # dlc 里没有的域名：ads -> ADS 列表、cn -> 追加进已有 CN 列表、fake -> FAKE 列表，
-# 统一用 Domain 型（后缀匹配），与 upstream.conf 的 [/domain/] 语义一致。
+# 统一用 Domain 型（后缀匹配）。
 # fake 这一路只喂 gen_fake_manual（domain.txt 里手工维护的几条），不展开 !cn 全集。
 # 实际的编解码与自检在 dlc_dat.py 里（含官方 dat 的字节级往返校验）。
 gen_dlc(){
@@ -324,22 +276,6 @@ gen_dlc(){
 	python3 dlc_dat.py --base "$base" \
 	  --ads "$sets/ads.txt" --cn "$sets/cn.txt" --fake "$sets/fake.txt" \
 	  --out dlc.dat || { echo "gen.sh: dlc_dat.py 失败，dlc.dat 不可用" >&2; exit 1; }
-}
-
-emit_upstream(){
-	gen_upstream > upstream.conf
-	check_output upstream.conf 50000
-	tar -Jcf upstream.tar.xz upstream.conf
-	sha256sum upstream.conf > upstream.conf.sha256sum
-	sha256sum upstream.tar.xz > upstream.tar.xz.sha256sum
-}
-
-emit_xndns(){
-	gen_xndns > xndns.conf
-	check_output xndns.conf 50000
-	tar -Jcf xndns.tar.xz xndns.conf
-	sha256sum xndns.conf > xndns.conf.sha256sum
-	sha256sum xndns.tar.xz > xndns.tar.xz.sha256sum
 }
 
 emit_apple(){
@@ -359,28 +295,17 @@ emit_dlc(){
 	gen_dlc
 	size="$(wc -c < dlc.dat | tr -d ' ')"
 	[ "$size" -gt 5000000 ] || { echo "gen.sh: dlc.dat 只有 ${size} 字节，疑似生成失败" >&2; exit 1; }
-	# 两种包装：dlc.tar.xz（单成员 tar，按现有约定）
-	# 加 dlc.dat.xz（裸 xz，解压即 protobuf）—— 消费方只解 xz 不拆 tar 时用这份
-	tar -Jcf dlc.tar.xz dlc.dat
+	# 只发裸 xz（解压即 protobuf）：单成员 tar 的 dlc.tar.xz 已下线
 	xz -c dlc.dat > dlc.dat.xz
 	sha256sum dlc.dat > dlc.dat.sha256sum
 	sha256sum dlc.dat.xz > dlc.dat.xz.sha256sum
-	sha256sum dlc.tar.xz > dlc.tar.xz.sha256sum
 }
 
 case "$OUT" in
   all)
-    emit_upstream
-    emit_xndns
     emit_apple
     emit_block
     emit_dlc
-    ;;
-  upstream|upstream.conf|adguard)
-    emit_upstream
-    ;;
-  xndns|xndns.conf)
-    emit_xndns
     ;;
   apple|apple.conf)
     emit_apple
@@ -392,7 +317,7 @@ case "$OUT" in
     emit_dlc
     ;;
   *)
-    echo "usage: $0 [all|upstream|xndns|apple|block|dlc]" >&2
+    echo "usage: $0 [all|apple|block|dlc]" >&2
     exit 1
     ;;
 esac

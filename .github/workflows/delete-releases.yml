@@ -50,6 +50,8 @@ jobs:
       GH_REPO: ${{ github.repository }}
       RETENTION_DAYS: ${{ inputs.retention-days || '3' }}
       MONTHLY_RETENTION_YEARS: ${{ inputs.monthly-retention-years || '1' }}
+      # 之前漏了这一行，dry-run 输入没接进环境，${DRY_RUN:-false} 永远取 false
+      DRY_RUN: ${{ inputs.dry-run || 'false' }}
       MONTHLY_DAY: "1" # 每月第几天算月度快照
       KEEP_MINIMUM: "1" # 兜底：至少保留最新的 1 个 Release
     steps:
@@ -139,4 +141,63 @@ jobs:
             echo "| 其他 | 删除 Release 及其 Tag |"
             echo ""
             echo "本次：保留 ${kept} 个（月度快照 ${kept_monthly} 个）/ 删除 ${removed} 个${suffix}"
+          } >> "${SUMMARY}"
+
+      # 上一个 step 删掉的是过期 Release；这里清理仍在保留期内的那些 Release 里的陈年资产。
+      # 2026-10 起 dlc.tar.xz / upstream / xndns 三类产物下线（dlc 只发 dlc.dat + dlc.dat.xz），
+      # 但已经发出去的旧 Release 里还挂着，删掉它们不用等 Release 自己过期。
+      - name: Prune obsolete release assets
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          DRY_RUN=$(printf '%s' "${DRY_RUN:-false}" | tr '[:upper:]' '[:lower:]')
+          SUMMARY="${GITHUB_STEP_SUMMARY:-/dev/null}"
+          if [[ "${DRY_RUN}" == "true" ]]; then
+            suffix="（DRY-RUN，未实际删除）"
+          else
+            suffix=""
+          fi
+
+          obsolete=(
+            dlc.tar.xz
+            dlc.tar.xz.sha256sum
+            upstream.tar.xz
+            upstream.tar.xz.sha256sum
+            upstream.conf.sha256sum
+            xndns.tar.xz
+            xndns.tar.xz.sha256sum
+            xndns.conf.sha256sum
+          )
+
+          # gh release list 按创建时间倒序（最新在前）；这里只列资产名，命中 obsolete 就删
+          checked=0
+          removed=0
+          while read -r tag; do
+            [[ -z "${tag}" ]] && continue
+            checked=$((checked + 1))
+            while read -r asset; do
+              [[ -z "${asset}" ]] && continue
+              if printf '%s\n' "${obsolete[@]}" | grep -qxF -- "${asset}"; then
+                if [[ "${DRY_RUN}" == "true" ]]; then
+                  echo "DRY-RUN 将删除资产(${tag}): ${asset}"
+                else
+                  echo "删除资产(${tag}): ${asset}"
+                  gh release delete-asset "${tag}" "${asset}" --yes
+                fi
+                removed=$((removed + 1))
+              fi
+            done < <(gh release view "${tag}" --json assets --jq '.assets[].name')
+          done < <(gh release list --limit 1000 --exclude-drafts --json tagName --jq '.[].tagName')
+
+          echo "完成: 检查 ${checked} 个 Release, 删除 ${removed} 个下线资产"
+
+          {
+            echo "### Prune Obsolete Release Assets"
+            echo ""
+            echo "| 项目 | 数量 |"
+            echo "| --- | --- |"
+            echo "| 检查的 Release | ${checked} |"
+            echo "| 删除的资产 | ${removed}${suffix} |"
           } >> "${SUMMARY}"

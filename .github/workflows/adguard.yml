@@ -37,17 +37,9 @@ jobs:
         with:
           tag_name: v${{ steps.date.outputs.date }}
           files: |
-            upstream.tar.xz
-            upstream.conf.sha256sum
-            upstream.tar.xz.sha256sum
-            xndns.tar.xz
-            xndns.conf.sha256sum
-            xndns.tar.xz.sha256sum
             filter_49.tar.xz
             filter_49.tar.xz.sha256sum
-            dlc.tar.xz
             dlc.dat.sha256sum
-            dlc.tar.xz.sha256sum
             dlc.dat.xz
             dlc.dat.xz.sha256sum
             apple.tar.xz
