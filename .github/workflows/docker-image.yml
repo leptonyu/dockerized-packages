@@ -5,9 +5,6 @@ on:
     branches-ignore:
     - main
     paths:
-      - 'dsh/**'
-      - 'code/**'
-      - 'obscura/**'
       - 'restic/**'
       - 'tor/**'
       - 'kubectl/**'
@@ -15,9 +12,6 @@ on:
     branches-ignore:
     - main
     paths:
-      - 'dsh/**'
-      - 'code/**'
-      - 'obscura/**'
       - 'restic/**'
       - 'tor/**'
       - 'kubectl/**'
@@ -39,9 +33,6 @@ jobs:
           filters: |
             changed:
             - added|modified:
-              - 'dsh/**'
-              - 'code/**'
-              - 'obscura/**'
               - 'restic/**'
               - 'tor/**'
               - 'kubectl/**'
@@ -76,12 +67,6 @@ jobs:
         case "${{ matrix.container }}" in
           tor)
             RELEASE_VERSION=$(date +%Y%m%d)
-            ;;
-          dsh)
-            # The dsh version is its install argument, not a base image tag: the
-            # GitHub release tag without its `dsh-v` prefix. Renovate keeps it
-            # current, accepting `-rc.N` and refusing `-alpha.N`.
-            RELEASE_VERSION="$(sed -n 's/^ARG DSH_VERSION=//p' ${{ matrix.container }}/Dockerfile | head -n1)"
             ;;
           *)
             RELEASE_VERSION="$(awk -F: '/^FROM /{ver=$2} END{print ver}' ${{ matrix.container }}/Dockerfile)"
