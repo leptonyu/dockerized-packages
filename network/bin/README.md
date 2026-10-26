@@ -1,7 +1,7 @@
 # cidr（Linux x86_64）
 
 `network/bin/cidr` 是 `rust/xn` 里 `xn-cidr-bin` 产出的 `cidr` CLI（v6.0.0，
-2026-10-26 构建，sha256 `cd5e8fb627c820fb200efb1d8c086121d6c84163f406d433bb8486d694e0a629`），
+2026-10-26 构建（`rust/xn` `ac4d8a06`），sha256 `6936f40e4ae7b8b6bfa183de4b952477393006ff85fdbfde09f5b6ae1d4442fa`），
 给 GitHub Actions 的 `ubuntu-latest` 用。它是大文件，走 Git LFS：
 
 ```bash
