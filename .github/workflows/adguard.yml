@@ -1,22 +1,36 @@
 name: Generate Adguard
 
+# 每日 release：DNS / AdGuard 制品 + network/ 的七份 CIDR 名单。
+# 两个 job 串行：dns 先建 tag/release 并上传 DNS 制品，network 再生成并追加
+# xn_* 资产。network 失败不会撤回已经发布的 DNS 制品，但整个 run 会标红。
+
 on:
   schedule:
-  - cron: "30 15 * * *" # Asia/Shanghai 23:30
+    - cron: "30 15 * * *" # Asia/Shanghai 23:30
+  workflow_dispatch:
   push:
     branches:
-    - main
+      - main
+
+permissions:
+  contents: write
+
+concurrency:
+  group: daily-release
+  cancel-in-progress: false
 
 jobs:
-  generate:
+  dns:
     runs-on: ubuntu-latest
+    outputs:
+      date: ${{ steps.date.outputs.date }}
     steps:
       - uses: actions/checkout@v7
       - name: Get current date
         id: date
         run: |
           export TZ=Asia/Shanghai
-          echo "::set-output name=date::$(date -d next-hour +'%Y%m%d')"
+          echo "date=$(date -d next-hour +'%Y%m%d')" >> "$GITHUB_OUTPUT"
       - name: Run Generate
         run: |
           git clone --depth 1 https://github.com/felixonmars/dnsmasq-china-list.git
@@ -30,9 +44,9 @@ jobs:
           echo "tag=$TAG" >> $GITHUB_OUTPUT
           git config --global user.email "ci@example.org"
           git config --global user.name "GitHubCI"
-          git tag -a $TAG -m "Published version $TAG" ${GITHUB_SHA}
+          git tag -f -a $TAG -m "Published version $TAG" ${GITHUB_SHA}
           git push origin $TAG -f
-      - name: Upload a Build Artifact
+      - name: Upload DNS artifacts
         uses: softprops/action-gh-release@v3
         with:
           tag_name: v${{ steps.date.outputs.date }}
@@ -44,3 +58,45 @@ jobs:
             dlc.dat.xz.sha256sum
             apple.tar.xz
             apple.conf.sha256sum
+
+  network:
+    needs: dns
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          lfs: true # network/bin/cidr（Linux x86_64）走 Git LFS
+      - name: Cache cidr sources
+        # cidr 的 ~/.cache/cidr：country_asn / aws / github / google / cloudflare，
+        # 24h TTL；key 按天滚动，restore-keys 命中前一天的缓存。
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/cidr
+          key: cidr-sources-${{ runner.os }}-${{ needs.dns.outputs.date }}
+          restore-keys: |
+            cidr-sources-${{ runner.os }}-
+      - name: Generate network lists
+        env:
+          IPINFO_TOKEN: ${{ secrets.IPINFO_TOKEN }}
+          # 需要 eBPF 的 16,384 上限时，在仓库 Variables 里设 XN_BLOCK_SHRINK=1
+          XN_BLOCK_SHRINK: ${{ vars.XN_BLOCK_SHRINK || '0' }}
+        run: ./network/ci.sh
+      - name: Upload network artifacts
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: v${{ needs.dns.outputs.date }}
+          files: |
+            network/xn_block.txt
+            network/xn_block.txt.sha256sum
+            network/xn_block_all.txt
+            network/xn_block_all.txt.sha256sum
+            network/xn_cn.txt
+            network/xn_cn.txt.sha256sum
+            network/xn_fake.txt
+            network/xn_fake.txt.sha256sum
+            network/xn_us.txt
+            network/xn_us.txt.sha256sum
+            network/xn_vpn.txt
+            network/xn_vpn.txt.sha256sum
+            network/xn_allow.txt
+            network/xn_allow.txt.sha256sum

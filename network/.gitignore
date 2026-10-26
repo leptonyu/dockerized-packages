@@ -1,0 +1,9 @@
+# cidr 源缓存（~/.cache 不可写时的回退目录）
+.cache/
+
+# CI 生成物，随 release 发布，不进 git
+xn_*.txt
+xn_*.txt.sha256sum
+
+# 交叉编译 cidr 的 target 目录（LFS 只保留最终二进制）
+bin/build/

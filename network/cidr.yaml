@@ -1,0 +1,359 @@
+# cidr pipeline：生成 xn_block / xn_cn / xn_fake / xn_us / xn_vpn / xn_allow
+#
+# 迁移自 machine/modules/network/cidr.yaml，输出名沿用原来的 xn_* 格式：
+#   * non_public -> 非公网源（private_ranges + IPv6 special-use），不落文件；
+#   * block_raw  -> xn_block_raw.txt（原始 block，仅给 xn_block_all 合并用）；
+#   * block      -> xn_block.txt（block_raw 精确 subtract non_public，eBPF 用）；
+#   * cn_us      -> xn_cn.txt（cn ∩ us，us 用过滤前的中间层，保持 machine 语义）；
+#   * fake       -> xn_fake.txt；
+#   * us_public  -> us 精确 subtract non_public（不落文件）；
+#   * xn_us      -> xn_us.txt（us_public + fake；先过滤中间层，fake 直接合并）；
+#   * xn_vpn    -> xn_vpn.txt（xn_us + 192.160.0.0/11 + 10.78.0.0/15）；
+#   * allow     -> xn_allow.txt（Cloudflare + CloudFront origin-facing）。
+# zone probe 不迁；本文件只负责纯 CIDR 输出。
+#
+# 内置源: country_asn, aws, github, google, cloudflare, private_ranges
+# Usage: cidr --pipeline=cidr.yaml [--pipeline-output=NAME] [--pipeline-list]
+
+pipeline:
+  - name: cn
+    input:
+      - source: country_asn
+        country_asn:
+          cc: [CN]
+      - source: private_ranges
+
+  # 非公网地址：private_ranges 覆盖 RFC1918 / loopback / link-local / CGNAT /
+  # 文档段 / benchmark / multicast / reserved / ULA / link-local v6 / multicast v6；
+  # 这里补 IANA IPv6 special-purpose 里不在 private_ranges 的部分。
+  # 用途：xn_block / us_public 的精确 subtract；不会给 xn_block_all 用。
+  - name: non_public
+    input:
+      - source: private_ranges
+      - source: inline
+        inline:
+          content: |
+            ::ffff:0:0/96
+            64:ff9b::/96
+            64:ff9b:1::/48
+            100::/64
+            2001::/32
+            2001:2::/48
+            2001:10::/28
+            2001:20::/28
+            2001:db8::/32
+            2002::/16
+            3fff::/20
+            5f00::/16
+
+  - name: us
+    input:
+      - source: country_asn
+        country_asn:
+          asn:
+            - "AS215355"  # Alice Network
+            - "AS7385"    # Allstream
+            - "AS63949"   # Akamai Connt
+            #- "AS16509"   # Amazon
+            - "AS57367"   # Amazon
+            - "AS399358"  # Anthropic
+            - "AS216183"  # Apple
+            - "AS6185"    # Apple
+            - "AS30092"   # ASSERTIVENET
+            - "AS2635"    # Automattic
+            - "AS30081"   # CacheFly
+            - "AS23352"   # CacheFly
+            - "AS7843"    # Charter
+            - "AS13335"   # Cloudflare
+            - "AS297"     # Cloudflare
+            - "AS40065"   # CNSERVERS
+            - "AS4782"    # Data
+            - "AS131660"  # Data
+            - "AS203055"  # DataCenter
+            - "AS63018"   # Dedicatied
+            - "AS14061"   # DigitalOcean
+            - "AS49544"   # Discord
+            - "AS394230"  # Discourse
+            - "AS140693"  # Disney
+            - "AS398849"  # Disney
+            - "AS8137"    # Disney
+            - "AS22604"   # Disney
+            - "AS23344"   # Disney
+            - "AS11251"   # Disney
+            - "AS399344"  # Disney
+            - "AS19679"   # Dropbox
+            - "AS10222"   # ESender
+            - "AS55002"   # F5
+            - "AS32934"   # Facebook
+            - "AS63293"   # Facebook
+            - "AS54115"   # Facebook
+            - "AS54113"   # Fastly
+            - "AS139686"  # FreeRangeClo
+            - "AS40509"   # Fly.io
+            - "AS203476"  # GANDI SAS
+            - "AS199524"  # GCore
+            - "AS36459"   # Github
+            - "AS15169"   # Google
+            - "AS19527"   # Google
+            - "AS16591"   # Google
+            - "AS24940"   # Hetzner
+            - "AS132252"  # HKTV
+            - "AS48823"   # Hosting.de
+            - "AS9221"    # HSBC
+            - "AS6939"    # Hurricane Electric LLC
+            - "AS210630"  # IncogNET
+            - "AS7941"    # Internet
+            - "AS10230"   # Internet JP
+            - "AS59692"   # IQWeb
+            - "AS134351"  # Leaseweb
+            - "AS22822"   # LimeLight
+            - "AS38631"   # LINE
+            - "AS11054"   # LivePerson
+            - "AS26380"   # Mastercard
+            - "AS8068"    # Microsoft
+            - "AS9919"    # NCentury InfoComm
+            - "AS2906"    # Netflix
+            - "AS40027"   # Netflix
+            - "AS394406"  # Netflix
+            - "AS55095"   # Netflix
+            - "AS45474"   # Nextusguard
+            - "AS4713"    # NTT Communications
+            - "AS23393"   # NuCDN
+            - "AS19745"   # Okta
+            - "AS51964"   # Orange
+            - "AS31898"   # Oracle
+            - "AS26698"   # Paramount
+            - "AS17012"   # Paypal
+            - "AS138341"  # Shopee
+            - "AS18182"   # Sony
+            - "AS50131"   # Spartan Host
+            - "AS15657"   # Speedbone
+            - "AS53831"   # Squarespace
+            - "AS20446"   # StackPath
+            - "AS62041"   # Terragram
+            - "AS62014"   # Terragram
+            - "AS59930"   # Terragram
+            - "AS44907"   # Terragram
+            - "AS211157"  # Terragram
+            - "AS46489"   # Twitch
+            - "AS397153"  # Twitch
+            - "AS15133"   # Twitter
+            - "AS13414"   # Twitter
+            - "AS63179"   # Twitter
+            - "AS54888"   # Twitter
+            - "AS35995"   # Twitter
+            - "AS23881"   # Udomain
+            - "AS14907"   # Wiki
+            - "AS198301"  # Workday
+            - "AS149641"  # XCLOUD
+            - "AS3258"    # XTom
+            - "AS24506"   # Yahoo
+            - "AS10229"   # Yahoo
+            - "AS23816"   # Yahoo
+            - "AS36040"   # Youtube
+            - "AS36561"   # Youtube
+          cc_exclude: [CN]
+      - source: aws
+        aws:
+          exclude-region: cn
+      - source: github
+      - source: cloudflare
+      - source: google
+      - source: country_asn
+        country_asn:
+          asn:
+            - "AS714"     # Apple HK
+            - "AS20940"   # Akamai HK
+            - "AS16625"   # Akamai HK
+            - "AS8075"    # Microsoft HK
+            #- "AS31898"   # Oracle
+            #- "AS16509"   # Amazon
+          cc: [HK, JP, SG]
+    ops:
+      - op: subtract_merge
+        subtract_merge:
+          source: cn
+      - op: shrink_small_nets
+
+  # xn_us 的过滤放在中间层：先把 us 里的 non_public 去掉，再直接并 fake。
+  # fake 本身是 198.18.0.0/15 / fc00::/18（非公网），必须在过滤之后相加。
+  - name: us_public
+    input:
+      - pipeline: us
+    ops:
+      # 这里必须用精确 subtract：subtract_merge 会把稀疏区间合并成更大的公网段，
+      # 对「只保留公网」是过度放行。us 的 cn 减法仍保持原 pipeline 的 subtract_merge。
+      - op: subtract
+        subtract:
+          source: non_public
+
+  - name: fake
+    input:
+      - source: inline
+        inline:
+          content: |
+            198.18.0.0/15
+            fc00::/18
+    output:
+      file: xn_fake.txt
+
+  - name: xn_us
+    input:
+      - pipeline: us_public
+      - pipeline: fake
+    output:
+      file: xn_us.txt
+
+  - name: cn_us
+    input:
+      - pipeline: cn
+    ops:
+      - op: intersect
+        intersect:
+          source: us
+    output:
+      file: xn_cn.txt
+
+  - name: xn_vpn
+    input:
+      - pipeline: xn_us
+      - source: inline
+        inline:
+          content: |
+            192.160.0.0/11
+            10.78.0.0/15
+    output:
+      file: xn_vpn.txt
+
+  - name: block_raw
+    input:
+      - source: country_asn
+        country_asn:
+          asn:
+            - "AS211298"  # MEASUREMENT
+            - "AS398324"  # Censys
+            - "AS398722"  # Censys
+            - "AS398705"  # Censys
+            - "AS267784"  # Flyservers
+            - "AS48721"   # Flyservers
+            - "AS14061"   # DigitalOcean
+            - "AS209559"  # XHOST INTERNET SOLUTIONS LP
+            - "AS394711"  # Limenet
+            - "AS49505"   # OOO Network of data-centers Selectel
+            - "AS16276"   # OVH SAS
+            - "AS202425"  # IP Volume inc
+            - "AS200391"  # KREZ 999 EOOD
+            - "AS45102"   # Ali
+            - "AS211059"  # Tribeka Web Advisors S.A.
+            - "AS52011"   # BinaryEdge
+      - source: inline
+        inline:
+          content: |
+            ## MEASUREMENT
+            87.236.176.0/24
+            185.247.137.0/24
+            193.163.125.0/24
+            45.55.151.3/32
+            45.55.153.86/32
+            45.55.158.168/32
+            45.55.185.224/32
+            45.55.186.92/32
+            64.227.99.138/32
+            64.227.108.146/32
+            64.227.109.89/32
+            64.227.110.161/32
+            107.170.65.169/32
+            128.199.8.140/32
+            157.245.243.118/32
+            157.245.245.246/32
+            159.65.216.50/32
+            159.65.219.252/32
+            162.243.114.171/32
+            162.243.116.182/32
+            162.243.208.127/32
+            167.99.234.119/32
+            192.241.179.235/32
+            2a06:4880::/30
+            2604:a880:0:202a::b41:8000/124
+            2604:a880:0:202a::b41:a000/124
+            2604:a880:0:202a::b41:b000/124
+            2604:a880:0:202a::b42:d000/124
+            2604:a880:0:202a::b42:e000/124
+            2604:a880:4:1d0::2fa6:a000/124
+            2604:a880:4:1d0::2fa6:b000/124
+            2604:a880:4:1d0::2fa6:c000/124
+            2604:a880:4:1d0::2fa6:d000/124
+            2604:a880:4:1d0::2fa6:e000/124
+            2604:a880:400:d1::91e4:a000/124
+            2604:a880:400:d1::91e4:b000/124
+            2604:a880:400:d1::91e4:c000/124
+            2604:a880:400:d1::91e4:d000/124
+            2604:a880:400:d1::91e4:e000/124
+            2604:a880:800:14::5633:8000/124
+            2604:a880:800:14::5633:9000/124
+            2604:a880:800:14::5633:a000/124
+            2604:a880:800:14::5633:b000/124
+            2604:a880:800:14::5633:c000/124
+            ## Censys
+            66.132.159.0/24
+            162.142.125.0/24
+            167.94.138.0/24
+            167.94.145.0/24
+            167.94.146.0/24
+            167.248.133.0/24
+            199.45.154.0/24
+            199.45.155.0/24
+            206.168.34.0/24
+            206.168.35.0/24
+            2602:80d:1000:b0cc:e::/80
+            2620:96:e000:b0cc:e::/80
+            2602:80d:1003::/112
+            2602:80d:1004::/112
+            ## Palo Alto Networks
+            35.203.210.0/23
+            144.86.173.0/24
+            147.185.132.0/23
+            162.216.149.0/24
+            162.216.150.0/24
+            172.105.147.0/24
+            198.235.24.0/24
+            205.210.31.0/24
+            216.25.88.0/21
+            2604:a940:300:5b6:0:0:0:0/64
+            2604:a940:301:225:0:0:0:0/64
+            2604:a940:302:118:0:0:0:0/64
+    output:
+      file: xn_block_raw.txt
+
+  # eBPF 用：block_raw 去掉 non_public（私网 / 广播 / 文档 / special-purpose 等）。
+  # xn_block_all 不用这条，保持原始 block_raw + scanner 的全量语义。
+  - name: block
+    input:
+      - pipeline: block_raw
+    ops:
+      # 精确过滤：不能用 subtract_merge，否则稀疏的 block 会被合并成大片公网段。
+      - op: subtract
+        subtract:
+          source: non_public
+    output:
+      file: xn_block.txt
+
+  # allow = Cloudflare + CloudFront origin-facing。机器上 inbound_jail 的
+  # allow_cidrs_file 就是这个并集（Terraform 的 cidr_allow.cf / .cft 再 merge），
+  # 这里直接产出合并后的一份，消费端不用再自己 union。
+  - name: cf
+    input:
+      - source: cloudflare
+
+  - name: cft
+    input:
+      - source: aws
+        aws:
+          service: CLOUDFRONT_ORIGIN_FACING
+
+  - name: allow
+    input:
+      - pipeline: cf
+      - pipeline: cft
+    output:
+      file: xn_allow.txt
