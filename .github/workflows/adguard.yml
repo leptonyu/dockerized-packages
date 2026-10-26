@@ -78,7 +78,7 @@ jobs:
       - name: Cache cidr sources
         # cidr 的 ~/.cache/cidr：country_asn / aws / github / google / cloudflare。
         # 12h TTL + 12h 桶 key；restore-keys 取最近一份（跨桶/跨天也能先恢复再判断）。
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/cidr
           key: cidr-src-${{ steps.cachekey.outputs.key }}
