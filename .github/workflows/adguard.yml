@@ -95,5 +95,17 @@ jobs:
         with:
           tag_name: v${{ needs.dns.outputs.date }}
           files: |
-            network/network.tar.xz
-            network/network.tar.xz.sha256sum
+            network/xn_block.txt.xz
+            network/xn_block.txt.xz.sha256sum
+            network/xn_block_all.txt.xz
+            network/xn_block_all.txt.xz.sha256sum
+            network/xn_cn.txt.xz
+            network/xn_cn.txt.xz.sha256sum
+            network/xn_fake.txt.xz
+            network/xn_fake.txt.xz.sha256sum
+            network/xn_us.txt.xz
+            network/xn_us.txt.xz.sha256sum
+            network/xn_vpn.txt.xz
+            network/xn_vpn.txt.xz.sha256sum
+            network/xn_allow.txt.xz
+            network/xn_allow.txt.xz.sha256sum
