@@ -1,8 +1,11 @@
-# cidr pipeline：生成 xn_block / xn_cn / xn_fake / xn_us / xn_vpn / xn_allow
+# cidr pipeline：生成 xn_block / xn_block_orig / xn_block_all / xn_cn / xn_fake / xn_us / xn_vpn / xn_allow
 #
 # 迁移自 machine/modules/network/cidr.yaml，输出名沿用原来的 xn_* 格式：
-#   * non_public -> xn_non_public.txt（内部：private_ranges + IPv6 special-use）；
-#   * block_raw  -> xn_block_raw.txt（原始 block，供 block_orig / block_all 用）；
+#   * scanners   -> source: file，读 gen.sh 准备好的 .cache/scanners/all.txt；
+#   * non_public -> 内部源（private_ranges + IPv6 special-use），不落文件；
+#   * block_raw  -> 原始 block（内部，无输出）；
+#   * block_all  -> xn_block_all.txt（block_raw + scanners，原始合并）；
+#   * block      -> xn_block.txt（block_all shrink 后 subtract non_public，eBPF 用）；
 #   * block_orig -> xn_block_orig.txt（block_raw 精确 subtract non_public，原来的 xn_block）；
 #   * cn_us      -> xn_cn.txt（cn ∩ us，us 用过滤前的中间层，保持 machine 语义）；
 #   * fake       -> xn_fake.txt；
@@ -10,8 +13,8 @@
 #   * xn_us      -> xn_us.txt（us_public + fake；先过滤中间层，fake 直接合并）；
 #   * xn_vpn    -> xn_vpn.txt（xn_us + 192.160.0.0/11 + 10.78.0.0/15）；
 #   * allow     -> xn_allow.txt（Cloudflare + CloudFront origin-facing）。
-# xn_block.txt 不在这里生成：gen.sh 先合并 xn_block_all，再 shrink，最后精确
-# subtract xn_non_public，得到 eBPF 用的 xn_block。zone probe 不迁。
+# scanner 全部通过 source: file 进入 pipeline；gen.sh 只负责下载 tarball、解压并把
+# active cidr/*.txt 拼到 .cache/scanners/all.txt。zone probe 不迁。
 #
 # 内置源: country_asn, aws, github, google, cloudflare, private_ranges
 # Usage: cidr --pipeline=cidr.yaml [--pipeline-output=NAME] [--pipeline-list]
@@ -20,6 +23,12 @@
 # ETag / If-Modified-Since；命中就完全不发请求）。12h ⇒ 每天一次的 CI 必然重下、
 # 同日/同 12h 桶重跑命中；0s = 每次必重下，24h = 更省但可能晚一天。
 cache_max_age: 12h
+
+# scanner 清单由 gen.sh 在运行前落盘；file source 每次运行全量重读、不进缓存。
+source:
+  - name: scanners
+    ty: file
+    path: .cache/scanners/all.txt
 
 pipeline:
   - name: cn
@@ -51,8 +60,6 @@ pipeline:
             2002::/16
             3fff::/20
             5f00::/16
-    output:
-      file: xn_non_public.txt
 
   - name: us
     input:
@@ -330,12 +337,29 @@ pipeline:
             2604:a940:300:5b6:0:0:0:0/64
             2604:a940:301:225:0:0:0:0/64
             2604:a940:302:118:0:0:0:0/64
-    output:
-      file: xn_block_raw.txt
 
-  # 原来的 xn_block：block_raw 去掉 non_public（私网 / 广播 / 文档 / special-purpose）。
-  # 现在的 xn_block_all 仍用原始 block_raw + scanner；eBPF 用的 xn_block 由 gen.sh
-  # 对 xn_block_all 做 shrink 后再 subtract non_public 得到。
+  # 原始版本：block_raw + 全部 active scanner 清单（source: file）
+  - name: block_all
+    input:
+      - pipeline: block_raw
+      - source: scanners
+    output:
+      file: xn_block_all.txt
+
+  # eBPF 用：先 shrink，再精确去掉 non_public
+  - name: block
+    input:
+      - pipeline: block_all
+    ops:
+      - op: shrink_small_nets
+      - op: subtract
+        subtract:
+          source: non_public
+    output:
+      file: xn_block.txt
+
+  # 原来的 xn_block：block_raw 去掉 non_public（私网 / 广播 / 文档 / special-purpose），
+  # 不含 scanner。
   - name: block_orig
     input:
       - pipeline: block_raw

@@ -4,16 +4,16 @@
 #
 #   xn_block.txt       eBPF 用：shrink(xn_block_all) 再精确去掉 non_public
 #   xn_block_orig.txt  原来的 xn_block：block_raw 去掉 non_public（不含 scanner）
-#   xn_block_all.txt   原始版本：xn_block_raw + OpenFilters/internet-scanners 的 active cidr/
+#   xn_block_all.txt   原始版本：block_raw + OpenFilters/internet-scanners 的 active cidr/
 #   xn_cn.txt          cn ∩ us（原来的 xn_cn）
 #   xn_fake.txt        fake/DNS 网段（原来的 xn_fake）
 #   xn_us.txt          us_public + fake（原来的 xn_us，eBPF split 表）
 #   xn_vpn.txt         xn_us + 192.160.0.0/11 + 10.78.0.0/15（原来的 xn_vpn）
 #   xn_allow.txt       inbound_jail 白名单 = Cloudflare + CloudFront origin-facing（新增）
 #
-# 数据源、ASN、内联网段在 cidr.yaml 里；xn_block_all 的 scanner 部分是例外：
-# 上游是一个目录（90+ 个 *_v4.txt / *_v6.txt），不是单条 URL，所以由本脚本
-# 下 tarball 后把 cidr/*.txt 与 xn_block_raw 一起喂给 cidr 的 stdin 模式合并。
+# 数据源、ASN、内联网段都在 cidr.yaml 里；scanner 列表由本脚本下载 tarball、
+# 解压并把 active cidr/*.txt 拼到 .cache/scanners/all.txt，pipeline 的
+# source: file (name: scanners) 读入后完成 block_all 合并和 block shrink。
 #
 # 用法：
 #   ./gen.sh                # 生成八份
@@ -188,6 +188,10 @@ check_file() {
 			grep -q ':' "$file" || die "$(basename "$file") 没有 IPv6 条目"
 			;;
 	esac
+
+	if [ "$(basename "$file")" = "xn_block.txt" ] && [ "$n" -gt "$XN_BLOCK_MAX" ]; then
+		die "xn_block 有 ${n} 条，超过 eBPF 的 ${XN_BLOCK_MAX} 上限"
+	fi
 }
 
 hash_file() {
@@ -205,15 +209,11 @@ write_checksums() {
 	done
 }
 
-# xn_block_all = xn_block_raw + internet-scanners/cidr/*.txt（原始，不 shrink）
-# xn_block    = shrink(xn_block_all) 再精确 subtract xn_non_public（eBPF 用）
-# 只取 active 的 cidr/；inactive/cidr 是已停用扫描器的归档快照，不并进来。
-build_block_outputs() {
-	local raw="$1" nonpublic="$2" all="$3" block="$4"
-	local archive scanner_dir files n block_n targets
+# 下载/解压 scanner tarball，把 active cidr/*.txt 拼到 <target>/.cache/scanners/all.txt。
+# cidr.yaml 的 source: scanners (ty: file) 从这里取数；文件源每次重读、不进缓存。
+prepare_scanners() {
+	local target="$1" archive scanner_dir files dest
 
-	[ -s "$raw" ] || die "缺少 $raw，无法生成 xn_block_all"
-	[ -s "$nonpublic" ] || die "缺少 $nonpublic，无法过滤 xn_block"
 	command -v tar >/dev/null 2>&1 || die "找不到 tar"
 	new_work
 	rm -rf "$WORK/scan"
@@ -236,34 +236,12 @@ build_block_outputs() {
 	files="$(find "$scanner_dir" -maxdepth 1 -type f -name '*.txt' | wc -l | tr -d ' ')"
 	[ "$files" -ge 50 ] || die "scanner cidr 只找到 ${files} 个文件，疑似上游结构变了"
 
-	block_n="$(wc -l <"$raw" | tr -d ' ')"
-	{
-		cat "$raw"
-		find "$scanner_dir" -maxdepth 1 -type f -name '*.txt' -exec cat {} +
-	} | "$CIDR" >"$WORK/xn_block_all.tmp" || die "cidr 合并 xn_block_all 失败"
-	[ -s "$WORK/xn_block_all.tmp" ] || die "xn_block_all 为空"
-
-	# xn_block_raw 里的每个网段都必须仍被 xn_block_all 覆盖（合并只会变大，不会丢）
-	targets="$(paste -sd, "$raw")"
-	"$CIDR" --test="$targets" <"$WORK/xn_block_all.tmp" >/dev/null 2>&1 \
-		|| die "xn_block_all 没有覆盖 xn_block_raw 的全部网段"
-
-	mv "$WORK/xn_block_all.tmp" "$all"
-	n="$(wc -l <"$all" | tr -d ' ')"
-	[ "$n" -gt "$block_n" ] || die "xn_block_all 没有比 xn_block_raw 多出条目（scanner 源为空？）"
-	echo "gen.sh: xn_block_all = xn_block_raw + ${files} 个 scanner cidr 文件，共 ${n} 条（原始）" >&2
-
-	# eBPF 用：先 shrink，再精确去掉 non_public
-	"$CIDR" --shrink-small-nets <"$all" >"$WORK/xn_block_shrunk.tmp" \
-		|| die "cidr shrink xn_block_all 失败"
-	"$CIDR" --subtract-path="$nonpublic" <"$WORK/xn_block_shrunk.tmp" >"$WORK/xn_block.tmp" \
-		|| die "cidr 过滤 xn_block 失败"
-	[ -s "$WORK/xn_block.tmp" ] || die "xn_block 为空"
-	mv "$WORK/xn_block.tmp" "$block"
-
-	n="$(wc -l <"$block" | tr -d ' ')"
-	[ "$n" -le "$XN_BLOCK_MAX" ] || die "xn_block 有 ${n} 条，超过 eBPF 的 ${XN_BLOCK_MAX} 上限"
-	echo "gen.sh: xn_block = shrink(xn_block_all) - non_public，共 ${n} 条（eBPF）" >&2
+	dest="$target/.cache/scanners/all.txt"
+	mkdir -p "$(dirname "$dest")"
+	find "$scanner_dir" -maxdepth 1 -type f -name '*.txt' -exec cat {} + >"$dest" \
+		|| die "拼接 scanner cidr 失败"
+	[ -s "$dest" ] || die "scanner 清单为空"
+	echo "gen.sh: scanners = ${files} 个 active cidr 文件 → $dest" >&2
 }
 
 do_check() {
@@ -273,9 +251,8 @@ do_check() {
 	mkdir -p "$out"
 
 	echo "gen.sh: 在 $out 重新生成并对比" >&2
-	run_cidr "$out" "block_raw,block_orig,non_public,cn_us,fake,xn_us,xn_vpn,allow"
-	build_block_outputs "$out/xn_block_raw.txt" "$out/xn_non_public.txt" \
-		"$out/xn_block_all.txt" "$out/xn_block.txt"
+	prepare_scanners "$out"
+	run_cidr "$out" "block_all,block_orig,block,cn_us,fake,xn_us,xn_vpn,allow"
 
 	for f in xn_block.txt xn_block_orig.txt xn_block_all.txt xn_cn.txt xn_fake.txt xn_us.txt xn_vpn.txt xn_allow.txt; do
 		check_file "$out/$f"
@@ -307,39 +284,39 @@ case "$TARGET" in
 		exit 0
 		;;
 	all)
-		OUTPUTS="block_raw,block_orig,non_public,cn_us,fake,xn_us,xn_vpn,allow"
+		OUTPUTS="block_all,block_orig,block,cn_us,fake,xn_us,xn_vpn,allow"
 		FILES=(xn_block.txt xn_block_orig.txt xn_block_all.txt xn_cn.txt xn_fake.txt xn_us.txt xn_vpn.txt xn_allow.txt)
-		NEED_BLOCK_BUILD=1
+		NEED_SCANNERS=1
 		;;
 	block | block_all)
-		OUTPUTS="block_raw,block_orig,non_public"
+		OUTPUTS="block_all,block_orig,block"
 		FILES=(xn_block.txt xn_block_orig.txt xn_block_all.txt)
-		NEED_BLOCK_BUILD=1
+		NEED_SCANNERS=1
 		;;
 	cn)
 		OUTPUTS="cn_us"
 		FILES=(xn_cn.txt)
-		NEED_BLOCK_BUILD=0
+		NEED_SCANNERS=0
 		;;
 	fake)
 		OUTPUTS="fake"
 		FILES=(xn_fake.txt)
-		NEED_BLOCK_BUILD=0
+		NEED_SCANNERS=0
 		;;
 	us)
 		OUTPUTS="xn_us"
 		FILES=(xn_us.txt)
-		NEED_BLOCK_BUILD=0
+		NEED_SCANNERS=0
 		;;
 	vpn)
 		OUTPUTS="xn_vpn"
 		FILES=(xn_vpn.txt)
-		NEED_BLOCK_BUILD=0
+		NEED_SCANNERS=0
 		;;
 	allow)
 		OUTPUTS="allow"
 		FILES=(xn_allow.txt)
-		NEED_BLOCK_BUILD=0
+		NEED_SCANNERS=0
 		;;
 	check)
 		resolve_cidr
@@ -357,13 +334,11 @@ resolve_cidr
 resolve_pipeline
 setup_cache
 
-run_cidr "$ROOT" "$OUTPUTS"
-
-if [ "$NEED_BLOCK_BUILD" -eq 1 ]; then
-	build_block_outputs "$ROOT/xn_block_raw.txt" "$ROOT/xn_non_public.txt" \
-		"$ROOT/xn_block_all.txt" "$ROOT/xn_block.txt"
-	rm -f "$ROOT/xn_block_raw.txt" "$ROOT/xn_non_public.txt"
+if [ "$NEED_SCANNERS" -eq 1 ]; then
+	prepare_scanners "$ROOT"
 fi
+
+run_cidr "$ROOT" "$OUTPUTS"
 
 for f in "${FILES[@]}"; do
 	check_file "$ROOT/$f"

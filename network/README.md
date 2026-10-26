@@ -1,9 +1,10 @@
 # network — xn 的八份 CIDR 名单
 
-从 `machine/modules/network/` 迁过来的 CIDR 生成目录。数据源、ASN、内联网段都在
-[`cidr.yaml`](cidr.yaml)；[`gen.sh`](gen.sh) 负责跑 pipeline、合并 scanner、做
-`xn_block` 的 shrink、自检并写 checksum。CI 用 Git LFS 里的
-[`bin/cidr`](bin/README.md)（Linux x86_64）生成，不再需要本地提交名单快照。
+从 `machine/modules/network/` 迁过来的 CIDR 生成目录。数据源、ASN、scanner
+（`source: file`）和全部 ops 都在 [`cidr.yaml`](cidr.yaml)；[`gen.sh`](gen.sh)
+只负责准备 `.cache/scanners/all.txt`、跑 pipeline、自检并写 checksum。CI 用
+Git LFS 里的 [`bin/cidr`](bin/README.md)（Linux x86_64）生成，不再需要本地提交
+名单快照。
 
 | 产物 | 用途（xn 配置里的落点） | 内容 |
 | --- | --- | --- |
@@ -24,10 +25,11 @@
 
 - `xn_block_orig.txt`：原来的 plain `xn_block`，`block_raw` 精确去掉 `non_public`，
   **不含** scanner。对应 machine 现有的 `xn_block.txt`。
-- `xn_block_all.txt`：`block_raw` + active scanner cidr 的**原始合并**，不 shrink、
-  不做公网过滤。
-- `xn_block.txt`：`shrink(xn_block_all)` 之后再精确 subtract `non_public`，是给
-  eBPF 的版本；当前 3,795 条，覆盖 `xn_block_all` 的全部条目。
+- `xn_block_all.txt`：pipeline `block_all` = `block_raw` + `scanners`（`source: file`）
+  的**原始合并**，不 shrink、不做公网过滤。
+- `xn_block.txt`：pipeline `block` = `block_all` 先 `shrink_small_nets`，再精确
+  `subtract non_public`，是给 eBPF 的版本；当前 3,795 条，覆盖 `xn_block_all` 的
+  全部条目。
 
 > eBPF `ebpf.firewall` 的 inline + `cidr_file` 合计上限是 **16,384 条**
 > （`docs/ebpf.md`，超限启动校验会报错）。`xn_block`（3,795）在限制内；
@@ -44,16 +46,17 @@
   benchmark、multicast、reserved、ULA、v6 link-local/multicast）+ IANA IPv6
   special-purpose（NAT64、Teredo、6to4、ORCHID、discard、documentation 等）。
 - `xn_block_orig`：`block_raw` 用 **`subtract`**（精确减法）去掉 `non_public`。
-- `xn_block`：先对 `xn_block_all` 做 shrink，再 `--subtract-path=xn_non_public.txt`；
-  过滤放在 shrink 之后，保证聚合出来的结果也不含非公网段。
+- `xn_block`：pipeline 里先对 `block_all` 做 `shrink_small_nets`，再
+  `subtract non_public`；过滤放在 shrink 之后，保证聚合结果也不含非公网段。
 - `xn_us`：过滤放在中间层 `us_public`（`us` 用 `subtract` 去掉 `non_public`），
   然后 `xn_us` 直接并 `fake`。`198.18.0.0/15` / `fc00::/18` 是 fake DNS 段，虽然
   不是公网，但必须保留，所以不能在 `xn_us` 之后再过滤。
 - `xn_block_all`：用 `block_raw` + scanner，**不做** shrink / `non_public` 过滤，
   保持原始版本。
 - `xn_cn`：仍用过滤前的 `us`，与 machine 当前 `xn_cn` 逐字节一致。
-- `block_raw` / `xn_block_raw.txt`、`non_public` / `xn_non_public.txt`、`us_public`
-  是内部中间层，不发布；`gen.sh` 用完会删掉两个临时文件。
+- `scanners` 是 `cidr.yaml` 里的 `source: file`，指向 `gen.sh` 准备好的
+  `.cache/scanners/all.txt`；`block_raw` / `non_public` / `us_public` 是内部
+  source/pipeline，不落文件、不发布。
 
 > pipeline 语义（见 `rust/xn/xn-cidr`）：`execute_output_pipeline` 会缓存 post-ops
 > 结果；`subtract_merge` 会把稀疏减法区间合并成更大的 complement 块，适合路由表，
@@ -90,6 +93,10 @@ IPINFO_TOKEN=... ./gen.sh all
 ```bash
 SCANNERS_TARBALL=/path/to/internet-scanners.tar.gz ./gen.sh block
 ```
+
+`scanners` 是 `source: file`：每次运行全量重读 `.cache/scanners/all.txt`，不参与
+`cache_max_age` 的 12h 缓存；scanner tarball 本身每次由 `gen.sh` 下载（或从
+`SCANNERS_TARBALL` 复制）。
 
 `cidr` 把源缓存在 `~/.cache/cidr/`，TTL 由 [`cidr.yaml`](cidr.yaml) 的
 `cache_max_age: 12h` 决定（只看文件 mtime，没有 ETag/If-Modified-Since）。本机
