@@ -1,16 +1,17 @@
 # cidr pipeline：生成 xn_block / xn_cn / xn_fake / xn_us / xn_vpn / xn_allow
 #
 # 迁移自 machine/modules/network/cidr.yaml，输出名沿用原来的 xn_* 格式：
-#   * non_public -> 非公网源（private_ranges + IPv6 special-use），不落文件；
-#   * block_raw  -> xn_block_raw.txt（原始 block，仅给 xn_block_all 合并用）；
-#   * block      -> xn_block.txt（block_raw 精确 subtract non_public，eBPF 用）；
+#   * non_public -> xn_non_public.txt（内部：private_ranges + IPv6 special-use）；
+#   * block_raw  -> xn_block_raw.txt（原始 block，供 block_orig / block_all 用）；
+#   * block_orig -> xn_block_orig.txt（block_raw 精确 subtract non_public，原来的 xn_block）；
 #   * cn_us      -> xn_cn.txt（cn ∩ us，us 用过滤前的中间层，保持 machine 语义）；
 #   * fake       -> xn_fake.txt；
 #   * us_public  -> us 精确 subtract non_public（不落文件）；
 #   * xn_us      -> xn_us.txt（us_public + fake；先过滤中间层，fake 直接合并）；
 #   * xn_vpn    -> xn_vpn.txt（xn_us + 192.160.0.0/11 + 10.78.0.0/15）；
 #   * allow     -> xn_allow.txt（Cloudflare + CloudFront origin-facing）。
-# zone probe 不迁；本文件只负责纯 CIDR 输出。
+# xn_block.txt 不在这里生成：gen.sh 先合并 xn_block_all，再 shrink，最后精确
+# subtract xn_non_public，得到 eBPF 用的 xn_block。zone probe 不迁。
 #
 # 内置源: country_asn, aws, github, google, cloudflare, private_ranges
 # Usage: cidr --pipeline=cidr.yaml [--pipeline-output=NAME] [--pipeline-list]
@@ -50,6 +51,8 @@ pipeline:
             2002::/16
             3fff::/20
             5f00::/16
+    output:
+      file: xn_non_public.txt
 
   - name: us
     input:
@@ -330,9 +333,10 @@ pipeline:
     output:
       file: xn_block_raw.txt
 
-  # eBPF 用：block_raw 去掉 non_public（私网 / 广播 / 文档 / special-purpose 等）。
-  # xn_block_all 不用这条，保持原始 block_raw + scanner 的全量语义。
-  - name: block
+  # 原来的 xn_block：block_raw 去掉 non_public（私网 / 广播 / 文档 / special-purpose）。
+  # 现在的 xn_block_all 仍用原始 block_raw + scanner；eBPF 用的 xn_block 由 gen.sh
+  # 对 xn_block_all 做 shrink 后再 subtract non_public 得到。
+  - name: block_orig
     input:
       - pipeline: block_raw
     ops:
@@ -341,7 +345,7 @@ pipeline:
         subtract:
           source: non_public
     output:
-      file: xn_block.txt
+      file: xn_block_orig.txt
 
   # allow = Cloudflare + CloudFront origin-facing。机器上 inbound_jail 的
   # allow_cidrs_file 就是这个并集（Terraform 的 cidr_allow.cf / .cft 再 merge），

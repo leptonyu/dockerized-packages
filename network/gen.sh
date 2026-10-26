@@ -2,7 +2,8 @@
 #
 # 生成 xn 侧的主要 CIDR 名单（从 machine/modules/network 迁移）：
 #
-#   xn_block.txt       eBPF 用：xn_block_raw 精确去掉 non_public（仅公网 IP）
+#   xn_block.txt       eBPF 用：shrink(xn_block_all) 再精确去掉 non_public
+#   xn_block_orig.txt  原来的 xn_block：block_raw 去掉 non_public（不含 scanner）
 #   xn_block_all.txt   原始版本：xn_block_raw + OpenFilters/internet-scanners 的 active cidr/
 #   xn_cn.txt          cn ∩ us（原来的 xn_cn）
 #   xn_fake.txt        fake/DNS 网段（原来的 xn_fake）
@@ -15,8 +16,8 @@
 # 下 tarball 后把 cidr/*.txt 与 xn_block_raw 一起喂给 cidr 的 stdin 模式合并。
 #
 # 用法：
-#   ./gen.sh                # 生成七份
-#   ./gen.sh block          # xn_block.txt + xn_block_all.txt
+#   ./gen.sh                # 生成八份
+#   ./gen.sh block          # xn_block.txt + xn_block_orig.txt + xn_block_all.txt
 #   ./gen.sh block_all      # 同上（block_all 依赖内部 xn_block_raw）
 #   ./gen.sh cn|fake|us|vpn|allow
 #   ./gen.sh check          # 生成到临时目录并与工作区逐字节对比
@@ -39,7 +40,9 @@ TARGET="${1:-all}"
 
 # 下限只用来发现「源没拉到 / 生成空了」这类事故，不追求贴近当前条数
 XN_BLOCK_MIN=1000
+XN_BLOCK_ORIG_MIN=1000
 XN_BLOCK_ALL_MIN=1000
+XN_BLOCK_MAX=16384
 XN_CN_MIN=1000
 XN_FAKE_MIN=2
 XN_US_MIN=1000
@@ -69,9 +72,9 @@ usage() {
 	cat <<'EOF'
 usage: ./gen.sh [all|block|block_all|cn|fake|us|vpn|allow|check]
 
-  all        生成 xn_block / xn_block_all / xn_cn / xn_fake / xn_us / xn_vpn / xn_allow（默认）
-  block      xn_block.txt + xn_block_all.txt
-  block_all  同 block（block_all 依赖 xn_block.txt）
+  all        生成 xn_block / xn_block_orig / xn_block_all / xn_cn / xn_fake / xn_us / xn_vpn / xn_allow（默认）
+  block      xn_block.txt + xn_block_orig.txt + xn_block_all.txt
+  block_all  同 block（block_all 依赖内部 xn_block_raw）
   cn         xn_cn.txt
   fake       xn_fake.txt
   us         xn_us.txt
@@ -86,7 +89,6 @@ usage: ./gen.sh [all|block|block_all|cn|fake|us|vpn|allow|check]
   XDG_CACHE_HOME    cidr 缓存根目录（默认 ~/.cache；不可写时退回 ./.cache）
   SCANNERS_URL      internet-scanners 的 tarball URL（默认 codeload 的 main）
   SCANNERS_TARBALL  本地 tarball；设置后不再下载（离线/固定快照用）
-  XN_BLOCK_SHRINK   设为 1 时对 xn_block_all 做 --shrink-small-nets（适配 eBPF 16,384 上限）
 EOF
 }
 
@@ -143,6 +145,7 @@ run_cidr() {
 min_for() {
 	case "$1" in
 		xn_block.txt) echo "$XN_BLOCK_MIN" ;;
+		xn_block_orig.txt) echo "$XN_BLOCK_ORIG_MIN" ;;
 		xn_block_all.txt) echo "$XN_BLOCK_ALL_MIN" ;;
 		xn_cn.txt) echo "$XN_CN_MIN" ;;
 		xn_fake.txt) echo "$XN_FAKE_MIN" ;;
@@ -180,7 +183,7 @@ check_file() {
 			grep -qx '198.18.0.0/15' "$file" || die "$(basename "$file") 缺少 fake 段 198.18.0.0/15"
 			grep -qx 'fc00::/18' "$file" || die "$(basename "$file") 缺少 fake 段 fc00::/18"
 			;;
-		xn_allow.txt | xn_cn.txt | xn_block.txt | xn_block_all.txt)
+		xn_allow.txt | xn_cn.txt | xn_block.txt | xn_block_orig.txt | xn_block_all.txt)
 			grep -q '\.' "$file" || die "$(basename "$file") 没有 IPv4 条目"
 			grep -q ':' "$file" || die "$(basename "$file") 没有 IPv6 条目"
 			;;
@@ -202,12 +205,15 @@ write_checksums() {
 	done
 }
 
-# xn_block_all = xn_block ∪ internet-scanners/cidr/*.txt
+# xn_block_all = xn_block_raw + internet-scanners/cidr/*.txt（原始，不 shrink）
+# xn_block    = shrink(xn_block_all) 再精确 subtract xn_non_public（eBPF 用）
 # 只取 active 的 cidr/；inactive/cidr 是已停用扫描器的归档快照，不并进来。
-merge_block() {
-	local block="$1" out="$2" archive scanner_dir files n block_n targets shrink
+build_block_outputs() {
+	local raw="$1" nonpublic="$2" all="$3" block="$4"
+	local archive scanner_dir files n block_n targets
 
-	[ -s "$block" ] || die "缺少 $block，无法生成 xn_block_all"
+	[ -s "$raw" ] || die "缺少 $raw，无法生成 xn_block_all"
+	[ -s "$nonpublic" ] || die "缺少 $nonpublic，无法过滤 xn_block"
 	command -v tar >/dev/null 2>&1 || die "找不到 tar"
 	new_work
 	rm -rf "$WORK/scan"
@@ -230,31 +236,34 @@ merge_block() {
 	files="$(find "$scanner_dir" -maxdepth 1 -type f -name '*.txt' | wc -l | tr -d ' ')"
 	[ "$files" -ge 50 ] || die "scanner cidr 只找到 ${files} 个文件，疑似上游结构变了"
 
-	# 默认只 merge；XN_BLOCK_SHRINK=1 时再做小子网聚合，用来适配 eBPF 的 16,384 上限
-	shrink=""
-	if [ "${XN_BLOCK_SHRINK:-${BLOCK_ALL_SHRINK:-0}}" = "1" ]; then
-		shrink="--shrink-small-nets"
-	fi
-	block_n="$(wc -l <"$block" | tr -d ' ')"
+	block_n="$(wc -l <"$raw" | tr -d ' ')"
 	{
-		cat "$block"
+		cat "$raw"
 		find "$scanner_dir" -maxdepth 1 -type f -name '*.txt' -exec cat {} +
-	} | "$CIDR" $shrink >"$WORK/xn_block_all.tmp" || die "cidr 合并 xn_block_all 失败"
+	} | "$CIDR" >"$WORK/xn_block_all.tmp" || die "cidr 合并 xn_block_all 失败"
 	[ -s "$WORK/xn_block_all.tmp" ] || die "xn_block_all 为空"
 
-	# xn_block 里的每个网段都必须仍被 xn_block_all 覆盖（合并只会变大，不会丢）
-	targets="$(paste -sd, "$block")"
+	# xn_block_raw 里的每个网段都必须仍被 xn_block_all 覆盖（合并只会变大，不会丢）
+	targets="$(paste -sd, "$raw")"
 	"$CIDR" --test="$targets" <"$WORK/xn_block_all.tmp" >/dev/null 2>&1 \
-		|| die "xn_block_all 没有覆盖 block_raw 的全部网段"
+		|| die "xn_block_all 没有覆盖 xn_block_raw 的全部网段"
 
-	mv "$WORK/xn_block_all.tmp" "$out"
-	n="$(wc -l <"$out" | tr -d ' ')"
-	[ "$n" -gt "$block_n" ] || die "xn_block_all 没有比 block_raw 多出条目（scanner 源为空？）"
-	echo "gen.sh: xn_block_all = xn_block_raw + ${files} 个 scanner cidr 文件，共 ${n} 条${shrink:+（已 shrink）}" >&2
-	if [ "$n" -gt 16384 ]; then
-		echo "gen.sh: 警告：xn_block_all 有 ${n} 条，超过 eBPF 的 16,384 上限；" >&2
-		echo "        eBPF 用 xn_block.txt，或 XN_BLOCK_SHRINK=1 ./gen.sh block" >&2
-	fi
+	mv "$WORK/xn_block_all.tmp" "$all"
+	n="$(wc -l <"$all" | tr -d ' ')"
+	[ "$n" -gt "$block_n" ] || die "xn_block_all 没有比 xn_block_raw 多出条目（scanner 源为空？）"
+	echo "gen.sh: xn_block_all = xn_block_raw + ${files} 个 scanner cidr 文件，共 ${n} 条（原始）" >&2
+
+	# eBPF 用：先 shrink，再精确去掉 non_public
+	"$CIDR" --shrink-small-nets <"$all" >"$WORK/xn_block_shrunk.tmp" \
+		|| die "cidr shrink xn_block_all 失败"
+	"$CIDR" --subtract-path="$nonpublic" <"$WORK/xn_block_shrunk.tmp" >"$WORK/xn_block.tmp" \
+		|| die "cidr 过滤 xn_block 失败"
+	[ -s "$WORK/xn_block.tmp" ] || die "xn_block 为空"
+	mv "$WORK/xn_block.tmp" "$block"
+
+	n="$(wc -l <"$block" | tr -d ' ')"
+	[ "$n" -le "$XN_BLOCK_MAX" ] || die "xn_block 有 ${n} 条，超过 eBPF 的 ${XN_BLOCK_MAX} 上限"
+	echo "gen.sh: xn_block = shrink(xn_block_all) - non_public，共 ${n} 条（eBPF）" >&2
 }
 
 do_check() {
@@ -264,10 +273,11 @@ do_check() {
 	mkdir -p "$out"
 
 	echo "gen.sh: 在 $out 重新生成并对比" >&2
-	run_cidr "$out" "block_raw,block,cn_us,fake,xn_us,xn_vpn,allow"
-	merge_block "$out/xn_block_raw.txt" "$out/xn_block_all.txt"
+	run_cidr "$out" "block_raw,block_orig,non_public,cn_us,fake,xn_us,xn_vpn,allow"
+	build_block_outputs "$out/xn_block_raw.txt" "$out/xn_non_public.txt" \
+		"$out/xn_block_all.txt" "$out/xn_block.txt"
 
-	for f in xn_block.txt xn_block_all.txt xn_cn.txt xn_fake.txt xn_us.txt xn_vpn.txt xn_allow.txt; do
+	for f in xn_block.txt xn_block_orig.txt xn_block_all.txt xn_cn.txt xn_fake.txt xn_us.txt xn_vpn.txt xn_allow.txt; do
 		check_file "$out/$f"
 		if [ ! -f "$ROOT/$f" ]; then
 			echo "gen.sh: 工作区缺少 $f" >&2
@@ -284,7 +294,7 @@ do_check() {
 	done
 
 	if [ "$rc" -eq 0 ]; then
-		echo "gen.sh: 七份名单与 pipeline / scanner 源一致"
+		echo "gen.sh: 八份名单与 pipeline / scanner 源一致"
 	else
 		echo "gen.sh: 名单与源不一致；跑 ./gen.sh all 重新生成并提交" >&2
 	fi
@@ -297,39 +307,39 @@ case "$TARGET" in
 		exit 0
 		;;
 	all)
-		OUTPUTS="block_raw,block,cn_us,fake,xn_us,xn_vpn,allow"
-		FILES=(xn_block.txt xn_block_all.txt xn_cn.txt xn_fake.txt xn_us.txt xn_vpn.txt xn_allow.txt)
-		NEED_BLOCK_MERGE=1
+		OUTPUTS="block_raw,block_orig,non_public,cn_us,fake,xn_us,xn_vpn,allow"
+		FILES=(xn_block.txt xn_block_orig.txt xn_block_all.txt xn_cn.txt xn_fake.txt xn_us.txt xn_vpn.txt xn_allow.txt)
+		NEED_BLOCK_BUILD=1
 		;;
 	block | block_all)
-		OUTPUTS="block_raw,block"
-		FILES=(xn_block.txt xn_block_all.txt)
-		NEED_BLOCK_MERGE=1
+		OUTPUTS="block_raw,block_orig,non_public"
+		FILES=(xn_block.txt xn_block_orig.txt xn_block_all.txt)
+		NEED_BLOCK_BUILD=1
 		;;
 	cn)
 		OUTPUTS="cn_us"
 		FILES=(xn_cn.txt)
-		NEED_BLOCK_MERGE=0
+		NEED_BLOCK_BUILD=0
 		;;
 	fake)
 		OUTPUTS="fake"
 		FILES=(xn_fake.txt)
-		NEED_BLOCK_MERGE=0
+		NEED_BLOCK_BUILD=0
 		;;
 	us)
 		OUTPUTS="xn_us"
 		FILES=(xn_us.txt)
-		NEED_BLOCK_MERGE=0
+		NEED_BLOCK_BUILD=0
 		;;
 	vpn)
 		OUTPUTS="xn_vpn"
 		FILES=(xn_vpn.txt)
-		NEED_BLOCK_MERGE=0
+		NEED_BLOCK_BUILD=0
 		;;
 	allow)
 		OUTPUTS="allow"
 		FILES=(xn_allow.txt)
-		NEED_BLOCK_MERGE=0
+		NEED_BLOCK_BUILD=0
 		;;
 	check)
 		resolve_cidr
@@ -349,9 +359,10 @@ setup_cache
 
 run_cidr "$ROOT" "$OUTPUTS"
 
-if [ "$NEED_BLOCK_MERGE" -eq 1 ]; then
-	merge_block "$ROOT/xn_block_raw.txt" "$ROOT/xn_block_all.txt"
-	rm -f "$ROOT/xn_block_raw.txt"
+if [ "$NEED_BLOCK_BUILD" -eq 1 ]; then
+	build_block_outputs "$ROOT/xn_block_raw.txt" "$ROOT/xn_non_public.txt" \
+		"$ROOT/xn_block_all.txt" "$ROOT/xn_block.txt"
+	rm -f "$ROOT/xn_block_raw.txt" "$ROOT/xn_non_public.txt"
 fi
 
 for f in "${FILES[@]}"; do

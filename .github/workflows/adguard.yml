@@ -1,6 +1,6 @@
 name: Generate Adguard
 
-# 每日 release：DNS / AdGuard 制品 + network/ 的七份 CIDR 名单。
+# 每日 release：DNS / AdGuard 制品 + network/ 的八份 CIDR 名单。
 # 两个 job 串行：dns 先建 tag/release 并上传 DNS 制品，network 再生成并追加
 # xn_* 资产。network 失败不会撤回已经发布的 DNS 制品，但整个 run 会标红。
 
@@ -87,8 +87,6 @@ jobs:
       - name: Generate network lists
         env:
           IPINFO_TOKEN: ${{ secrets.IPINFO_TOKEN }}
-          # 需要 eBPF 的 16,384 上限时，在仓库 Variables 里设 XN_BLOCK_SHRINK=1
-          XN_BLOCK_SHRINK: ${{ vars.XN_BLOCK_SHRINK || '0' }}
         run: ./network/ci.sh
       - name: Upload network artifacts
         uses: softprops/action-gh-release@v3
@@ -97,6 +95,8 @@ jobs:
           files: |
             network/xn_block.txt.xz
             network/xn_block.txt.xz.sha256sum
+            network/xn_block_orig.txt.xz
+            network/xn_block_orig.txt.xz.sha256sum
             network/xn_block_all.txt.xz
             network/xn_block_all.txt.xz.sha256sum
             network/xn_cn.txt.xz

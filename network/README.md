@@ -1,58 +1,64 @@
-# network — xn 的七份 CIDR 名单
+# network — xn 的八份 CIDR 名单
 
 从 `machine/modules/network/` 迁过来的 CIDR 生成目录。数据源、ASN、内联网段都在
-[`cidr.yaml`](cidr.yaml)；[`gen.sh`](gen.sh) 负责跑 pipeline、合并 `xn_block_all`
-的 scanner 部分、自检并写 checksum。CI 用 Git LFS 里的 [`bin/cidr`](bin/README.md)
-（Linux x86_64）生成，不再需要本地提交名单快照。
+[`cidr.yaml`](cidr.yaml)；[`gen.sh`](gen.sh) 负责跑 pipeline、合并 scanner、做
+`xn_block` 的 shrink、自检并写 checksum。CI 用 Git LFS 里的
+[`bin/cidr`](bin/README.md)（Linux x86_64）生成，不再需要本地提交名单快照。
 
 | 产物 | 用途（xn 配置里的落点） | 内容 |
 | --- | --- | --- |
-| `xn_block.txt` | `ebpf.firewall.cidr_file`：VPS 公网入口源地址 blocklist | `block_raw` 精确 subtract `non_public`，仅公网 IP（当前 1,665 条） |
-| `xn_block_all.txt` | 全量扫描器封禁（原始版本，eBPF 容量见下） | `block_raw` + OpenFilters/internet-scanners 的 active `cidr/`（当前 93 个文件，17,567 条） |
+| `xn_block.txt` | `ebpf.firewall.cidr_file`：VPS 公网入口源地址 blocklist | `shrink(xn_block_all)` 再精确 subtract `non_public`，仅公网（当前 3,795 条） |
+| `xn_block_orig.txt` | 原来的 `xn_block`（不含 scanner） | `block_raw` 精确 subtract `non_public`（当前 1,665 条） |
+| `xn_block_all.txt` | 全量扫描器封禁（原始版本） | `block_raw` + OpenFilters/internet-scanners 的 active `cidr/`（当前 93 个文件，17,567 条） |
 | `xn_cn.txt` | CN 侧路由/旧 policy 的 `xn_cn` | `cn ∩ us` |
 | `xn_fake.txt` | fake DNS / split 用 | `198.18.0.0/15`、`fc00::/18` |
 | `xn_us.txt` | `ebpf.split[].cidr_file`：eBPF split 表 | `us_public`（`us` 精确 subtract `non_public`）+ fake |
 | `xn_vpn.txt` | 旧 policy / 路由表 | `xn_us` + `192.160.0.0/11` + `10.78.0.0/15` |
 | `xn_allow.txt` | `inbound_jail.allow_cidrs_file`：入站 jail 来源白名单 | Cloudflare + CloudFront `CLOUDFRONT_ORIGIN_FACING`，已合并去重（新增） |
 
-`xn_block` / `xn_cn` / `xn_fake` / `xn_us` / `xn_vpn` 与 machine 当前同名文件逐字节
-一致（当前源里没有额外的非公网条目，所以过滤后条数不变）；`xn_allow` 与
-`cf.txt + cft.txt` 的并集一致。`xn_block_all` 是新增的、**未过滤**的原始合并结果。
+`xn_block_orig` / `xn_cn` / `xn_fake` / `xn_us` / `xn_vpn` 与 machine 当前同名文件
+逐字节一致（当前源里没有额外的非公网条目，所以过滤后条数不变）；`xn_allow` 与
+`cf.txt + cft.txt` 的并集一致。`xn_block` 和 `xn_block_all` 是新增的两种口径。
+
+## block 的三种口径
+
+- `xn_block_orig.txt`：原来的 plain `xn_block`，`block_raw` 精确去掉 `non_public`，
+  **不含** scanner。对应 machine 现有的 `xn_block.txt`。
+- `xn_block_all.txt`：`block_raw` + active scanner cidr 的**原始合并**，不 shrink、
+  不做公网过滤。
+- `xn_block.txt`：`shrink(xn_block_all)` 之后再精确 subtract `non_public`，是给
+  eBPF 的版本；当前 3,795 条，覆盖 `xn_block_all` 的全部条目。
+
+> eBPF `ebpf.firewall` 的 inline + `cidr_file` 合计上限是 **16,384 条**
+> （`docs/ebpf.md`，超限启动校验会报错）。`xn_block`（3,795）在限制内；
+> `xn_block_all`（17,567）超限，不能直接给 eBPF，用于 ipset/nftables 等更大的
+> 消费者。
+
+`shrink` 用 `cidr --shrink-small-nets` 默认阈值；它会把密集的 `/32` 聚合到
+`/24`/`/16`（v6 到 `/48`/`/32`），所以 `xn_block` 是**覆盖** scanner 网段，
+不是逐 IP 精确列表。
 
 ## 公共 IP 过滤
 
 - `non_public` = 内置 `private_ranges`（RFC1918、loopback、link-local、CGNAT、文档段、
   benchmark、multicast、reserved、ULA、v6 link-local/multicast）+ IANA IPv6
   special-purpose（NAT64、Teredo、6to4、ORCHID、discard、documentation 等）。
-- `xn_block`：`block_raw` 用 **`subtract`**（精确减法）去掉 `non_public`，所以 eBPF
-  侧只看到公网地址。
+- `xn_block_orig`：`block_raw` 用 **`subtract`**（精确减法）去掉 `non_public`。
+- `xn_block`：先对 `xn_block_all` 做 shrink，再 `--subtract-path=xn_non_public.txt`；
+  过滤放在 shrink 之后，保证聚合出来的结果也不含非公网段。
 - `xn_us`：过滤放在中间层 `us_public`（`us` 用 `subtract` 去掉 `non_public`），
   然后 `xn_us` 直接并 `fake`。`198.18.0.0/15` / `fc00::/18` 是 fake DNS 段，虽然
   不是公网，但必须保留，所以不能在 `xn_us` 之后再过滤。
-- `xn_block_all`：用 `block_raw` + scanner，**不做** `non_public` 过滤，保持原始版本。
+- `xn_block_all`：用 `block_raw` + scanner，**不做** shrink / `non_public` 过滤，
+  保持原始版本。
 - `xn_cn`：仍用过滤前的 `us`，与 machine 当前 `xn_cn` 逐字节一致。
-- `block_raw` / `xn_block_raw.txt` 和 `us_public` 是内部中间层，不发布；`gen.sh` 合并完
-  `xn_block_all` 后会删掉 `xn_block_raw.txt`。
+- `block_raw` / `xn_block_raw.txt`、`non_public` / `xn_non_public.txt`、`us_public`
+  是内部中间层，不发布；`gen.sh` 用完会删掉两个临时文件。
 
 > pipeline 语义（见 `rust/xn/xn-cidr`）：`execute_output_pipeline` 会缓存 post-ops
 > 结果；`subtract_merge` 会把稀疏减法区间合并成更大的 complement 块，适合路由表，
 > 但用于「只保留公网」会过度放行。因此过滤用 `subtract`，只有 `us` 对 `cn` 的原语义
 > 保留 `subtract_merge` + `shrink_small_nets`。
-
-## xn_block_all 与 scanner 列表
-
-- 上游：<https://github.com/OpenFilters/internet-scanners/tree/main/cidr>，只取 active
-  的 `cidr/*_v4.txt` / `*_v6.txt`（当前 93 个）；`inactive/cidr/` 是已停用扫描器的
-  归档快照，不并进来。
-- 合并：`cat xn_block_raw.txt cidr/*.txt | cidr`。默认只做 merge / 去重 / 相邻聚合，
-  **不**做 `shrink-small-nets`，所以不会把零散 `/32` 扩成整段；也不做公网过滤。
-- 当前 17,567 行（IPv4 15,570 + IPv6 1,997）。
-
-> ⚠️ eBPF `ebpf.firewall` 的 inline + `cidr_file` 合计上限是 **16,384 条**
-> （`docs/ebpf.md`，超限启动校验会报错）。`xn_block_all.txt` 不能直接当 eBPF
-> firewall 文件用：eBPF 用已过滤的 `xn_block.txt`（1,665 条）；`xn_block_all` 用于
-> ipset / nftables 等容量更大的消费者，或先 `XN_BLOCK_SHRINK=1 ./gen.sh block` 生成
-> 聚合版（当前约 3,795 行）再下发。
 
 ## 生成
 
@@ -61,8 +67,8 @@
 
 ```bash
 cd network
-./gen.sh                 # 生成七份 + 各自 .sha256sum
-./gen.sh block           # xn_block.txt + xn_block_all.txt
+./gen.sh                 # 生成八份 + 各自 .sha256sum
+./gen.sh block           # xn_block.txt + xn_block_orig.txt + xn_block_all.txt
 ./gen.sh block_all       # 同上
 ./gen.sh cn              # xn_cn.txt
 ./gen.sh fake            # xn_fake.txt
@@ -96,9 +102,9 @@ SCANNERS_TARBALL=/path/to/internet-scanners.tar.gz ./gen.sh block
 
 1. `dns`：生成 DNS/AdGuard 制品，建当天 tag/release 并上传 DNS 资产；
 2. `network`（`needs: dns`）：`checkout` 带 `lfs: true` 拿到 `network/bin/cidr`，
-   `actions/cache` 缓存 `~/.cache/cidr`，用 `secrets.IPINFO_TOKEN` 跑 [`ci.sh`](ci.sh)；
-   `ci.sh` 把每份 `.txt` 单独压成 `.xz`，release 上传七份 `.txt.xz` 和各自的
-   `.txt.xz.sha256sum`（不打包 tar）。
+   `actions/cache` 缓存 `~/.cache/cidr`，用 `secrets.IPINFO_TOKEN` 跑
+   [`ci.sh`](ci.sh)；`ci.sh` 把每份 `.txt` 单独压成 `.xz`，release 上传八份
+   `.txt.xz` 和各自的 `.txt.xz.sha256sum`（不打包 tar）。
 
 缓存和 `cidr.yaml` 的 `cache_max_age: 12h` 对齐：key 是 **UTC 日期 + 12h 桶**，
 `restore-keys: cidr-src-` 取最近一份。同桶重跑命中缓存、不重复下载；隔天/换桶
@@ -107,19 +113,17 @@ SCANNERS_TARBALL=/path/to/internet-scanners.tar.gz ./gen.sh block
 network job 失败不会撤回已经发布的 DNS 制品，但整个 run 会标红。生成、校验、LFS
 属性和忽略规则都在 `network/` 里；workflow 只是 release 编排。
 
-需要让 `xn_block_all` 直接适配 eBPF 16,384 上限时，在仓库 Variables 里加
-`XN_BLOCK_SHRINK=1`（等价于本地 `XN_BLOCK_SHRINK=1 ./gen.sh all`）。
-
 发布资产：
 
 ```text
-xn_block.txt.xz        xn_block.txt.xz.sha256sum
-xn_block_all.txt.xz    xn_block_all.txt.xz.sha256sum
-xn_cn.txt.xz           xn_cn.txt.xz.sha256sum
-xn_fake.txt.xz         xn_fake.txt.xz.sha256sum
-xn_us.txt.xz           xn_us.txt.xz.sha256sum
-xn_vpn.txt.xz          xn_vpn.txt.xz.sha256sum
-xn_allow.txt.xz        xn_allow.txt.xz.sha256sum
+xn_block.txt.xz          xn_block.txt.xz.sha256sum
+xn_block_orig.txt.xz     xn_block_orig.txt.xz.sha256sum
+xn_block_all.txt.xz      xn_block_all.txt.xz.sha256sum
+xn_cn.txt.xz             xn_cn.txt.xz.sha256sum
+xn_fake.txt.xz           xn_fake.txt.xz.sha256sum
+xn_us.txt.xz             xn_us.txt.xz.sha256sum
+xn_vpn.txt.xz            xn_vpn.txt.xz.sha256sum
+xn_allow.txt.xz          xn_allow.txt.xz.sha256sum
 ```
 
 生成物不入 git（本目录的 `.gitignore` 已挡 `xn_*.txt*` 和 `xn_*.txt.xz*`）；
@@ -134,8 +138,9 @@ xn_allow.txt.xz        xn_allow.txt.xz.sha256sum
 | machine `modules/network/` | 这里 |
 | --- | --- |
 | `block.txt`（2026-06 旧快照，1716 行） | 不再对应 |
-| `xn_block.txt`（block pipeline，1665 行） | `xn_block.txt`（逐字节一致） |
-| —（外部 scanner 列表，原来没有） | `xn_block_all.txt` |
+| `xn_block.txt`（block pipeline，1665 行） | `xn_block_orig.txt`（逐字节一致） |
+| —（外部 scanner 列表，原来没有） | `xn_block_all.txt`（原始合并） |
+| —（eBPF 用的 shrink 版，原来没有） | `xn_block.txt` |
 | `xn_cn.txt` | `xn_cn.txt` |
 | `xn_fake.txt` | `xn_fake.txt` |
 | `xn_us.txt` | `xn_us.txt` |
@@ -143,4 +148,5 @@ xn_allow.txt.xz        xn_allow.txt.xz.sha256sum
 | `cf.txt` + `cft.txt`（Ansible 合并） | `xn_allow.txt` |
 
 迁移时的取舍：`cn` 是 `us` 的减法源，`fake` 是 `xn_us` 的附加段；`us` 本身不落文件。
-`block_all` 拆成独立文件 `xn_block_all.txt`，`xn_block.txt` 保持原来的 plain 语义。
+原来的 plain block 保留为 `xn_block_orig.txt`，新的 `xn_block.txt` 是
+`shrink(xn_block_all)` 的公网版本。
