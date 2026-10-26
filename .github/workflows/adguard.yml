@@ -88,6 +88,20 @@ jobs:
         env:
           IPINFO_TOKEN: ${{ secrets.IPINFO_TOKEN }}
         run: ./network/ci.sh
+      - name: Remove obsolete plain network assets
+        # release 以后只保留 .xz；清掉旧版本 workflow 留下的 plain .txt / .txt.sha256sum，
+        # 否则用户把 release 全下下来后 `xz -d xn_block.txt.xz` 会因输出已存在而失败。
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          TAG="v${{ needs.dns.outputs.date }}"
+          for f in \
+            xn_block.txt xn_block_orig.txt xn_block_all.txt \
+            xn_cn.txt xn_fake.txt xn_us.txt xn_vpn.txt xn_allow.txt; do
+            gh release delete-asset "$TAG" "$f" --yes >/dev/null 2>&1 || true
+            gh release delete-asset "$TAG" "$f.sha256sum" --yes >/dev/null 2>&1 || true
+          done
       - name: Upload network artifacts
         uses: softprops/action-gh-release@v3
         with:

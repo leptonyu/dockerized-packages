@@ -133,6 +133,19 @@ xn_vpn.txt.xz            xn_vpn.txt.xz.sha256sum
 xn_allow.txt.xz          xn_allow.txt.xz.sha256sum
 ```
 
+解压（release 只放 `.xz`，不再放 plain `.txt`）：
+
+```bash
+xz -d xn_block.txt.xz              # 输出 xn_block.txt
+xz -dc xn_block.txt.xz > out.txt   # 不想覆盖/改名时
+xz -df xn_block.txt.xz             # 同目录已有旧 xn_block.txt 时强制覆盖
+```
+
+旧 release 里可能还留着早期 workflow 的 plain `.txt` 和 `.txt.sha256sum`；
+network job 会先用 `gh release delete-asset` 清掉它们，再上传新的 `.xz`。在清理
+生效前，把 release 全下到同一目录再 `xz -d` 会因为「输出文件已存在」失败，这不是
+压缩包损坏；用 `xz -df` 或 `xz -dc` 即可。
+
 生成物不入 git（本目录的 `.gitignore` 已挡 `xn_*.txt*` 和 `xn_*.txt.xz*`）；
 `network/` 里只放 `cidr.yaml`、`gen.sh`、`ci.sh`、`bin/cidr`、`.gitattributes`
 和文档。

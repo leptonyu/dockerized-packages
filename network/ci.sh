@@ -70,6 +70,12 @@ sha256sum -c \
 	xn_vpn.txt.xz.sha256sum \
 	xn_allow.txt.xz.sha256sum
 
+# 再验一次 xz 流本身（sha256 只能证明字节没变，不证明能被 xz 解开）
+xz -t *.txt.xz || {
+	echo "ci.sh: xz 文件损坏" >&2
+	exit 1
+}
+
 echo
 echo "network CI 产物："
 wc -l xn_block.txt xn_block_orig.txt xn_block_all.txt xn_cn.txt xn_fake.txt xn_us.txt xn_vpn.txt xn_allow.txt
