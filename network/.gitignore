@@ -7,3 +7,7 @@ xn_*.txt.sha256sum
 
 # 交叉编译 cidr 的 target 目录（LFS 只保留最终二进制）
 bin/build/
+
+# 发布压缩包
+network.tar.xz
+network.tar.xz.sha256sum

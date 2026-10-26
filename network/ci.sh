@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# network/ 的 CI 入口：用 bin/cidr（或 CIDR=...）生成七份名单并校验 checksum。
+# network/ 的 CI 入口：用 bin/cidr（或 CIDR=...）生成七份名单、校验并打包。
 # .github/workflows/adguard.yml 的 network job 负责 checkout(LFS) + 缓存 + 调本脚本 + 发布。
 #
 # 本地也可以直接跑：
@@ -41,6 +41,19 @@ sha256sum -c \
 	xn_vpn.txt.sha256sum \
 	xn_allow.txt.sha256sum
 
+# 发布用压缩包：七份 .txt 打成一个 network.tar.xz（release 只传这个）
+tar -cJf network.tar.xz \
+	xn_block.txt \
+	xn_block_all.txt \
+	xn_cn.txt \
+	xn_fake.txt \
+	xn_us.txt \
+	xn_vpn.txt \
+	xn_allow.txt
+sha256sum network.tar.xz > network.tar.xz.sha256sum
+sha256sum -c network.tar.xz.sha256sum
+
 echo
 echo "network CI 产物："
 wc -l xn_block.txt xn_block_all.txt xn_cn.txt xn_fake.txt xn_us.txt xn_vpn.txt xn_allow.txt
+ls -l network.tar.xz network.tar.xz.sha256sum

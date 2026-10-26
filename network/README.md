@@ -96,8 +96,9 @@ SCANNERS_TARBALL=/path/to/internet-scanners.tar.gz ./gen.sh block
 
 1. `dns`：生成 DNS/AdGuard 制品，建当天 tag/release 并上传 DNS 资产；
 2. `network`（`needs: dns`）：`checkout` 带 `lfs: true` 拿到 `network/bin/cidr`，
-   `actions/cache` 缓存 `~/.cache/cidr`，用 `secrets.IPINFO_TOKEN` 跑 [`ci.sh`](ci.sh)，
-   然后把七份 `.txt` + `.sha256sum` 追加到同一个 `vYYYYMMDD` release。
+   `actions/cache` 缓存 `~/.cache/cidr`，用 `secrets.IPINFO_TOKEN` 跑 [`ci.sh`](ci.sh)；
+   `ci.sh` 把七份 `.txt` 打包成 `network.tar.xz`，release 只上传这个压缩包和
+   `network.tar.xz.sha256sum`。
 
 缓存和 `cidr.yaml` 的 `cache_max_age: 12h` 对齐：key 是 **UTC 日期 + 12h 桶**，
 `restore-keys: cidr-src-` 取最近一份。同桶重跑命中缓存、不重复下载；隔天/换桶
@@ -109,8 +110,21 @@ network job 失败不会撤回已经发布的 DNS 制品，但整个 run 会标�
 需要让 `xn_block_all` 直接适配 eBPF 16,384 上限时，在仓库 Variables 里加
 `XN_BLOCK_SHRINK=1`（等价于本地 `XN_BLOCK_SHRINK=1 ./gen.sh all`）。
 
-生成物不入 git（本目录的 `.gitignore` 已挡 `xn_*.txt*`）；`network/` 里只放
-`cidr.yaml`、`gen.sh`、`ci.sh`、`bin/cidr`、`.gitattributes` 和文档。
+发布包内容（`tar -tJf network.tar.xz`）：
+
+```text
+xn_block.txt
+xn_block_all.txt
+xn_cn.txt
+xn_fake.txt
+xn_us.txt
+xn_vpn.txt
+xn_allow.txt
+```
+
+生成物不入 git（本目录的 `.gitignore` 已挡 `xn_*.txt*` 和 `network.tar.xz*`）；
+`network/` 里只放 `cidr.yaml`、`gen.sh`、`ci.sh`、`bin/cidr`、`.gitattributes`
+和文档。
 
 > CI 首次运行需要仓库 secret `IPINFO_TOKEN`；没有缓存又没有 token 时，
 > `country_asn` 源会失败。之后的运行即使 token 暂时缺失，也可以靠缓存完成。
