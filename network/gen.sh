@@ -128,7 +128,7 @@ setup_cache() {
 	export XDG_CACHE_HOME
 
 	if [ -z "${IPINFO_TOKEN:-}" ]; then
-		echo "gen.sh: 未设置 IPINFO_TOKEN；若 country_asn 缓存不存在或已超过 24h，cidr 会失败" >&2
+		echo "gen.sh: 未设置 IPINFO_TOKEN；若 country_asn 缓存不存在或已超过 12h，cidr 会失败" >&2
 	fi
 }
 

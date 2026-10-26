@@ -14,6 +14,11 @@
 #
 # 内置源: country_asn, aws, github, google, cloudflare, private_ranges
 # Usage: cidr --pipeline=cidr.yaml [--pipeline-output=NAME] [--pipeline-list]
+#
+# 源缓存 TTL：~/.cache/cidr 里文件的 mtime 年龄超过它就重下（只看 mtime，没有
+# ETag / If-Modified-Since；命中就完全不发请求）。12h ⇒ 每天一次的 CI 必然重下、
+# 同日/同 12h 桶重跑命中；0s = 每次必重下，24h = 更省但可能晚一天。
+cache_max_age: 12h
 
 pipeline:
   - name: cn

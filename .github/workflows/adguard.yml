@@ -66,15 +66,24 @@ jobs:
       - uses: actions/checkout@v7
         with:
           lfs: true # network/bin/cidr（Linux x86_64）走 Git LFS
+      - name: Get cache bucket
+        # 和 cidr.yaml 的 cache_max_age: 12h 对齐：UTC 日期 + 12h 桶。
+        # 同桶重跑命中缓存；换桶/隔天的那次会重下（保证列表每天更新）。
+        id: cachekey
+        run: |
+          day=$(date -u +%Y%m%d)
+          hour=$(date -u +%H)
+          # 10# 前缀：避免 08/09 被 bash 当八进制
+          echo "key=${day}-$((10#${hour} / 12))" >> "$GITHUB_OUTPUT"
       - name: Cache cidr sources
-        # cidr 的 ~/.cache/cidr：country_asn / aws / github / google / cloudflare，
-        # 24h TTL；key 按天滚动，restore-keys 命中前一天的缓存。
+        # cidr 的 ~/.cache/cidr：country_asn / aws / github / google / cloudflare。
+        # 12h TTL + 12h 桶 key；restore-keys 取最近一份（跨桶/跨天也能先恢复再判断）。
         uses: actions/cache@v4
         with:
           path: ~/.cache/cidr
-          key: cidr-sources-${{ runner.os }}-${{ needs.dns.outputs.date }}
+          key: cidr-src-${{ steps.cachekey.outputs.key }}
           restore-keys: |
-            cidr-sources-${{ runner.os }}-
+            cidr-src-
       - name: Generate network lists
         env:
           IPINFO_TOKEN: ${{ secrets.IPINFO_TOKEN }}

@@ -72,7 +72,8 @@ cd network
 ./gen.sh check           # 重新生成到临时目录，与工作区逐字节 + checksum diff（不落盘）
 ```
 
-`country_asn` 源来自 ipinfo，首次运行或缓存超过 24h 时需要 token：
+`country_asn` 源来自 ipinfo，首次运行或缓存超过 12h 时需要 token。
+`cidr` 直接读环境变量 `IPINFO_TOKEN`，不需要写进 `cidr.yaml`：
 
 ```bash
 IPINFO_TOKEN=... ./gen.sh all
@@ -84,9 +85,10 @@ IPINFO_TOKEN=... ./gen.sh all
 SCANNERS_TARBALL=/path/to/internet-scanners.tar.gz ./gen.sh block
 ```
 
-`cidr` 默认把源缓存在 `~/.cache/cidr/`。本机 `~/.cache` 不可写（例如沙箱）时，
-`gen.sh` 会退回 `network/.cache/`；也可以用 `XDG_CACHE_HOME` 显式指定。这个回退
-目录已在 `.gitignore` 里。
+`cidr` 把源缓存在 `~/.cache/cidr/`，TTL 由 [`cidr.yaml`](cidr.yaml) 的
+`cache_max_age: 12h` 决定（只看文件 mtime，没有 ETag/If-Modified-Since）。本机
+`~/.cache` 不可写（例如沙箱）时，`gen.sh` 会退回 `network/.cache/`；也可以用
+`XDG_CACHE_HOME` 显式指定。这个回退目录已在 `.gitignore` 里。
 
 ## CI
 
@@ -94,9 +96,12 @@ SCANNERS_TARBALL=/path/to/internet-scanners.tar.gz ./gen.sh block
 
 1. `dns`：生成 DNS/AdGuard 制品，建当天 tag/release 并上传 DNS 资产；
 2. `network`（`needs: dns`）：`checkout` 带 `lfs: true` 拿到 `network/bin/cidr`，
-   `actions/cache` 缓存 `~/.cache/cidr`（key 按天滚动、`restore-keys` 命中前一天），
-   用 `secrets.IPINFO_TOKEN` 跑 [`ci.sh`](ci.sh)，然后把七份 `.txt` + `.sha256sum`
-   追加到同一个 `vYYYYMMDD` release。
+   `actions/cache` 缓存 `~/.cache/cidr`，用 `secrets.IPINFO_TOKEN` 跑 [`ci.sh`](ci.sh)，
+   然后把七份 `.txt` + `.sha256sum` 追加到同一个 `vYYYYMMDD` release。
+
+缓存和 `cidr.yaml` 的 `cache_max_age: 12h` 对齐：key 是 **UTC 日期 + 12h 桶**，
+`restore-keys: cidr-src-` 取最近一份。同桶重跑命中缓存、不重复下载；隔天/换桶
+的那次缓存已超过 12h，会重下并刷新 mtime，所以列表每天都是新的。
 
 network job 失败不会撤回已经发布的 DNS 制品，但整个 run 会标红。生成、校验、LFS
 属性和忽略规则都在 `network/` 里；workflow 只是 release 编排。
