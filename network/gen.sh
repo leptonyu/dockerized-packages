@@ -236,6 +236,8 @@ prepare_scanners() {
 	files="$(find "$scanner_dir" -maxdepth 1 -type f -name '*.txt' | wc -l | tr -d ' ')"
 	[ "$files" -ge 50 ] || die "scanner cidr 只找到 ${files} 个文件，疑似上游结构变了"
 
+  curl -L -o $scanner_dir/ci-badguys.txt https://cinsscore.com/list/ci-badguys.txt 
+
 	dest="$target/.cache/scanners/all.txt"
 	mkdir -p "$(dirname "$dest")"
 	find "$scanner_dir" -maxdepth 1 -type f -name '*.txt' -exec cat {} + >"$dest" \
