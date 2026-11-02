@@ -230,7 +230,7 @@ jobs:
             --body "${{ needs.check.outputs.sha }}"
       - name: Upload build outputs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: xn-pgo-bolt
           # 不传 build.log：里面有 runner 的绝对路径；发布资产本身已脱敏。
