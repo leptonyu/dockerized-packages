@@ -15,9 +15,9 @@ target/x86_64-unknown-linux-gnu/release/xn
 target/x86_64-unknown-linux-gnu/release/xn.tuned.env
 ```
 
-[`build.sh`](build.sh) 只负责取源码、跑这条命令、打包，并发布到 **`leptonyu/xn` 的
-`v<Cargo.toml version>` release**。tag 直接从上游 `Cargo.toml` 的 workspace 版本读取
-（当前会得到 `v6.0.0`）；release 不存在就新建，存在就追加资产。
+[`build.sh`](build.sh) 只负责取源码、跑这条命令、打包，并发布回 **`XN_REPO`（默认
+`leptonyu/xn`）的 `v<Cargo.toml version>` release**。tag 直接从上游 `Cargo.toml` 的
+workspace 版本读取（当前会得到 `v6.0.0`）；release 不存在就新建，存在就追加资产。
 
 ## 快速开始
 
@@ -42,8 +42,9 @@ target/x86_64-unknown-linux-gnu/release/xn.tuned.env
 ./xn/build.sh --features quic --publish
 ```
 
-不给 `--src` 时，脚本把上游 clone/fetch 到 `xn/.cache/xn-src`，并按 `--ref`（默认
-`main`）checkout。`--tuned` 还没进 `main` 时用：
+不给 `--src` 时，脚本用 `git clone --depth 1 --single-branch --branch <ref>` 把上游
+放到 `xn/.cache/xn-src`，只取 `--ref`（默认 `main`）这一个提交，不拉全历史/tags；已有
+checkout 时用 `git fetch --depth 1 origin <ref>`。`--tuned` 还没进 `main` 时用：
 
 ```bash
 ./xn/build.sh --ref <分支或提交>
@@ -130,6 +131,7 @@ schedule 绑定：
   `xn-main-sha-<sha>` 标记兜底）；只在发布成功后更新，失败/取消不会记账，下一轮会重试。
 - 支持上游主动触发：`repository_dispatch`，`event_type: xn-main-updated`，
   `client_payload.sha` 可选；没有 dispatch 时最多晚一小时发现更新。
+- 默认跟踪 `main`；需要临时从别的分支构建时，用手动 `workflow_dispatch` 的 `ref` 输入。
 - 手动 `workflow_dispatch` 可覆盖 `ref`（默认 `main`）、`tag`（默认 `v<Cargo.toml version>`）、
   `event`（默认 `cpu-clock:u`）、`features`（默认空 = 不加 quic），`force=true` 可强制重编。手动指定非 `main` 的 `ref` 不会
   改写 `XN_LAST_MAIN_SHA`。
@@ -159,12 +161,12 @@ schedule 绑定：
   target == host 的 gnu 档，容器化时复用同一 `build.sh` 的打包/发布段。
 - **macOS**：只能做 PGO 的 collect/optimize（zig 交叉），BOLT 不可用；届时增加
   `--no-bolt` 分支，产物命名区分 `.pgo.`，不覆盖本模块的 `.pgo-bolt.` 资产。
-- **发布目标**：默认已是 `leptonyu/xn` 的 `v<version>` release；其他仓库用
+- **发布目标**：默认回到 `XN_REPO` / `--repo` 的 `v<version>` release；其他仓库用
   `--release-repo` 指定（不会自动在其上创建 release）。
 
 ## 注意
 
-- `--publish` 默认在 `leptonyu/xn` 上发 `v<Cargo.toml version>`：不存在就新建 release，
+- `--publish` 默认在 `XN_REPO` 上发 `v<Cargo.toml version>`：不存在就新建 release，
   存在就追加/覆盖同名资产（`--clobber`）。上游仓库的 tag 若已存在但 release 不存在，
   会在该 tag 上补建 release。
 - `--release-repo` 指向非上游仓库时，只追加到已有 release，不会在别的仓库自动建 tag。

@@ -145,7 +145,7 @@ jobs:
           ref: ${{ needs.check.outputs.sha }}
           token: ${{ secrets.XN_REPO_TOKEN }}
           path: .cache/xn-src
-          fetch-depth: 0
+          fetch-depth: 1
           persist-credentials: false
       - name: Install system dependencies
         # 与上游 tag release 同一套：LLVM 23 + bolt-23 + perf。
@@ -189,7 +189,6 @@ jobs:
           set -euo pipefail
           args=(
             --src "$GITHUB_WORKSPACE/.cache/xn-src"
-            --release-repo leptonyu/xn
             --publish
             --event "${{ inputs.event || 'cpu-clock:u' }}"
           )

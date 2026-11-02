@@ -30,7 +30,7 @@ ref="${XN_REF:-main}"
 ref_explicit=false
 src="${XN_SRC:-}"
 out_dir="${XN_OUT_DIR:-$root/dist}"
-release_repo="${XN_RELEASE_REPO:-leptonyu/xn}"
+release_repo="${XN_RELEASE_REPO:-}"
 tag="${XN_TAG:-}"
 features="${XN_FEATURES:-}"
 event="${XN_EVENT:-}"
@@ -62,7 +62,7 @@ usage() {
   --repo URL           上游仓库，默认 git@github.com:leptonyu/xn.git
   --ref REF            分支 / tag / commit，默认 main（须包含 release.sh --tuned）
   --out-dir DIR        产物目录，默认 xn/dist
-  --release-repo R     release 所在仓库，默认 leptonyu/xn
+  --release-repo R     release 所在仓库；默认 = --repo / XN_REPO 的 owner/repo
   --tag TAG            目标 release tag；默认直接读 Cargo.toml 的 v<version>
   --features LIST      cargo features，默认不加（需要时传 quic 等）
   --event EVENT        BOLT stage2 的 perf 事件，默认用 release.sh 的默认值；
@@ -205,6 +205,14 @@ repo_slug() {
 	esac
 }
 
+# 没显式给 --release-repo 时，release 推回 XN_REPO / --repo 本身（owner/repo）。
+if [[ -z "$release_repo" ]]; then
+	if ! release_repo="$(repo_slug)"; then
+		$publish && die "无法从 --repo / XN_REPO 解析 owner/repo；请显式用 --release-repo"
+		release_repo="<none>"
+	fi
+fi
+
 # 源码准备好后确定版本与默认 tag：v<workspace version>。
 prepare_version() {
 	version="$(xn_version "$src")" || die "读不到 xn 版本（$src/Cargo.toml）"
@@ -252,16 +260,6 @@ require_platform() {
 	fi
 }
 
-resolve_ref() { # $1=src $2=ref -> commit
-	local r="$1" x="$2" c
-	for c in "refs/tags/$x" "refs/remotes/origin/$x" "$x"; do
-		if c="$(git -C "$r" rev-parse --verify --quiet "$c^{commit}" 2>/dev/null)"; then
-			printf '%s\n' "$c"
-			return 0
-		fi
-	done
-	return 1
-}
 
 prepare_source() {
 	if [[ -n "$src" ]]; then
@@ -275,15 +273,28 @@ prepare_source() {
 
 	src="${XN_SRC_CACHE:-$root/.cache/xn-src}"
 	if [[ ! -d "$src/.git" ]]; then
-		note "clone $repo → $src"
+		# 只取一个 ref、depth=1：不拉全历史，也不拉 tags（版本号直接读 Cargo.toml）。
+		[[ ! -e "$src" || -z "$(ls -A "$src" 2>/dev/null)" ]] \
+			|| die "$src 已存在但不是 git 仓库；请移走或换 XN_SRC_CACHE"
+		local tmp="${src}.tmp.$$"
+		rm -rf "$tmp"
 		mkdir -p "$(dirname "$src")"
-		git clone "$repo" "$src" || die "clone 失败；CI 里可用 --src 指向 actions/checkout 的目录"
+		note "clone --depth 1 --single-branch --branch ${ref} ${repo} → ${src}"
+		if ! git clone --depth 1 --single-branch --branch "$ref" "$repo" "$tmp"; then
+			# --branch 只认分支/tag；给的是 commit 时退回 init + shallow fetch。
+			rm -rf "$tmp"
+			git init -q "$tmp" || die "git init 失败：$tmp"
+			git -C "$tmp" remote add origin "$repo" || die "git remote add 失败：$repo"
+			git -C "$tmp" fetch --depth 1 origin "$ref" || die "shallow fetch 失败：$ref"
+			git -C "$tmp" checkout --force --detach FETCH_HEAD || die "checkout 失败：$ref"
+		fi
+		rm -rf "$src"
+		mv "$tmp" "$src" || die "移动 clone 目录失败：$tmp → $src"
+	else
+		note "shallow fetch ${ref} → ${src}"
+		git -C "$src" fetch --depth 1 origin "$ref" || die "shallow fetch 失败（私有仓库需要 SSH key / token）：$ref"
+		git -C "$src" checkout --force --detach FETCH_HEAD || die "checkout 失败：$ref"
 	fi
-	note "fetch ${repo}（tags）"
-	git -C "$src" fetch --tags --force origin || die "fetch 失败（私有仓库需要 SSH key / token）"
-	commit="$(resolve_ref "$src" "$ref")" || die "在 $src 找不到 ref：$ref"
-	note "checkout ${ref}（${commit:0:12}）"
-	git -C "$src" checkout --force --detach "$commit" >/dev/null || die "checkout 失败：$commit"
 	commit="$(git -C "$src" rev-parse HEAD)"
 	ref_label="$ref"
 	have_tuned "$src" || die "$src 的 release.sh 没有 --tuned（$ref 太旧？）；用 --ref 指向含该提交的分支/tag"
@@ -306,9 +317,8 @@ print_plan() {
 
 	echo "# 需要原生 Linux x86_64；当前 $(uname -s)/$(uname -m)"
 	if [[ -z "$src" ]]; then
-		printf '+ git clone %q %q\n' "$repo" "$s"
-		printf '+ git -C %q fetch --tags --force origin\n' "$s"
-		printf '+ git -C %q checkout --force --detach %q\n' "$s" "$ref"
+		printf '+ git clone --depth 1 --single-branch --branch %q %q %q\n' "$ref" "$repo" "$s"
+		printf '+ # 若 %q 不是分支/tag：git init + git fetch --depth 1 origin %q\n' "$ref" "$ref"
 	fi
 	if $package_only; then
 		echo "# --package-only：跳过构建，直接打包"
