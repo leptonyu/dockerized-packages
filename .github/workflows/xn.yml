@@ -4,6 +4,9 @@ name: Build xn (PGO+BOLT)
 # repository_dispatch）才跑 60–90 分钟的 PGO+BOLT。构建成功后把 SHA 写进仓库变量
 # XN_LAST_MAIN_SHA；下一次看到同一个 SHA 就跳过。
 #
+# 发布目标是 leptonyu/xn 的 v<Cargo.toml version> release：不存在就新建（tag 指向本次
+# 构建的上游 commit），存在就追加资产；需要写权限的 XN_REPO_TOKEN。
+#
 # 上游想立即触发，可在自己的 workflow 里发：
 #   repository_dispatch:
 #     event_type: xn-main-updated
@@ -27,7 +30,7 @@ on:
         required: false
         default: ""
       tag:
-        description: 目标每日 release tag（留空 = 最新 vYYYYMMDD）
+        description: 目标 release tag（留空 = Cargo.toml 的 v<version>）
         required: false
         default: ""
       event:
@@ -42,7 +45,7 @@ on:
     types: [xn-main-updated]
 
 permissions:
-  contents: write # 追加资产到每日 release
+  contents: read  # 只读本仓库；xn release 用 XN_REPO_TOKEN 写
   actions: write  # gh variable set 记录已构建的 main SHA
 
 concurrency:
@@ -59,10 +62,16 @@ jobs:
     steps:
       - name: Check XN_REPO_TOKEN
         env:
-          TOKEN: ${{ secrets.XN_REPO_TOKEN }}
+          GH_TOKEN: ${{ secrets.XN_REPO_TOKEN }}
         run: |
-          if [ -z "$TOKEN" ]; then
-            echo "::error::需要仓库 secret XN_REPO_TOKEN（对 leptonyu/xn 至少 contents:read）"
+          set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::error::需要仓库 secret XN_REPO_TOKEN（对 leptonyu/xn 至少 contents:write）"
+            exit 1
+          fi
+          can_push="$(gh api repos/leptonyu/xn --jq .permissions.push)"
+          if [ "$can_push" != "true" ]; then
+            echo "::error::XN_REPO_TOKEN 对 leptonyu/xn 没有写权限；创建/更新 v<version> release 需要 contents:write"
             exit 1
           fi
       - name: Resolve upstream ref
@@ -129,25 +138,6 @@ jobs:
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v7
-      - name: Resolve daily release
-        # 先确认目标 release 存在，避免白跑 60–90 分钟后才在 gh release upload 失败。
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          INPUT_TAG: ${{ inputs.tag }}
-        run: |
-          set -euo pipefail
-          tag="${INPUT_TAG:-}"
-          if [ -z "$tag" ]; then
-            tag="$(gh release list --repo "$GITHUB_REPOSITORY" --limit 50 --json tagName \
-              --jq '.[].tagName' | grep -E '^v[0-9]{8}$' | head -n1 || true)"
-          fi
-          [ -n "$tag" ] || {
-            echo "::error::没有 vYYYYMMDD 每日 release；等 adguard.yml 建好，或手动填 tag"
-            exit 1
-          }
-          gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null
-          echo "RELEASE_TAG=$tag" >> "$GITHUB_ENV"
-          echo "目标 release：$GITHUB_REPOSITORY@$tag" >> "$GITHUB_STEP_SUMMARY"
       - name: Checkout upstream xn
         uses: actions/checkout@v7
         with:
@@ -191,18 +181,19 @@ jobs:
         uses: taiki-e/install-action@cargo-deny
       - name: Build tuned xn and publish
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.XN_REPO_TOKEN }}
           LLVM_PROFDATA: /usr/lib/llvm-23/bin/llvm-profdata
           INPUT_FEATURES: ${{ inputs.features }}
+          INPUT_TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
           args=(
             --src "$GITHUB_WORKSPACE/.cache/xn-src"
-            --release-repo "$GITHUB_REPOSITORY"
-            --tag "$RELEASE_TAG"
+            --release-repo leptonyu/xn
             --publish
             --event "${{ inputs.event || 'cpu-clock:u' }}"
           )
+          if [ -n "${INPUT_TAG:-}" ]; then args+=(--tag "$INPUT_TAG"); fi
           if [ -n "${INPUT_FEATURES:-}" ]; then args+=(--features "$INPUT_FEATURES"); fi
           ./xn/build.sh "${args[@]}"
       - name: Prepare built marker

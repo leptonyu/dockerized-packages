@@ -15,9 +15,9 @@ target/x86_64-unknown-linux-gnu/release/xn
 target/x86_64-unknown-linux-gnu/release/xn.tuned.env
 ```
 
-[`build.sh`](build.sh) 只负责取源码、跑这条命令、打包，并把资产追加到**当前的每日
-release tag**（`vYYYYMMDD`，由 [`adguard.yml`](../.github/workflows/adguard.yml) 创建）。
-不新建 tag、不新建 release；目标 release 不存在时直接报错。
+[`build.sh`](build.sh) 只负责取源码、跑这条命令、打包，并发布到 **`leptonyu/xn` 的
+`v<Cargo.toml version>` release**。tag 直接从上游 `Cargo.toml` 的 workspace 版本读取
+（当前会得到 `v6.0.0`）；release 不存在就新建，存在就追加资产。
 
 ## 快速开始
 
@@ -25,18 +25,18 @@ release tag**（`vYYYYMMDD`，由 [`adguard.yml`](../.github/workflows/adguard.y
 # 只构建 + 打包（不发布）
 ./xn/build.sh
 
-# 构建并追加到最新一个 vYYYYMMDD release
+# 构建并发布到 v<Cargo.toml version>（release 不存在会自动新建）
 ./xn/build.sh --publish
 
-# 明确指定每日 tag
-./xn/build.sh --tag v20261102 --publish
+# 明确指定 release tag
+./xn/build.sh --tag v6.1.0 --publish
 
 # 只检查工具链 / 只打印命令
 ./xn/build.sh --check
 ./xn/build.sh --dry-run
 
 # 构建成功后上传失败：不重编，直接重传
-./xn/build.sh --package-only --tag v20261102 --publish
+./xn/build.sh --package-only --tag v6.0.0 --publish
 
 # 需要 quic 时
 ./xn/build.sh --features quic --publish
@@ -121,8 +121,8 @@ xn.x86_64-unknown-linux-gnu.pgo-bolt.bolt.env         # 上游 run 目录有就�
 
 ## 独立 workflow
 
-[`xn.yml`](../.github/workflows/xn.yml) 是独立 workflow，不跟每日 release 的 schedule
-绑定：
+[`xn.yml`](../.github/workflows/xn.yml) 是独立 workflow，不与 `adguard.yml` 的每日
+schedule 绑定：
 
 - **不按天编译**：每小时（`:17`）只解析一次上游 `leptonyu/xn` 的 `main` SHA，只有 SHA
   变化才跑 PGO+BOLT；没有变化时 check job 几秒结束。
@@ -130,18 +130,19 @@ xn.x86_64-unknown-linux-gnu.pgo-bolt.bolt.env         # 上游 run 目录有就�
   `xn-main-sha-<sha>` 标记兜底）；只在发布成功后更新，失败/取消不会记账，下一轮会重试。
 - 支持上游主动触发：`repository_dispatch`，`event_type: xn-main-updated`，
   `client_payload.sha` 可选；没有 dispatch 时最多晚一小时发现更新。
-- 手动 `workflow_dispatch` 可覆盖 `ref`（默认 `main`）、`tag`（默认最新 `vYYYYMMDD`）、
+- 手动 `workflow_dispatch` 可覆盖 `ref`（默认 `main`）、`tag`（默认 `v<Cargo.toml version>`）、
   `event`（默认 `cpu-clock:u`）、`features`（默认空 = 不加 quic），`force=true` 可强制重编。手动指定非 `main` 的 `ref` 不会
   改写 `XN_LAST_MAIN_SHA`。
-- 目标 release 在构建前先校验存在，避免跑完 60–90 分钟才在 `gh release upload` 失败；
-  留空 `tag` 时取最新一个 `vYYYYMMDD`。
+- 留空 `tag` 时直接读上游 `Cargo.toml` 的版本（`v<version>`）；release 不存在时由
+  `build.sh` 新建，`--target` 是本次构建的上游 commit；存在时只追加资产。
 - `ubuntu-latest` + software event `cpu-clock:u`，不依赖 runner PMU；安装 LLVM 23 /
   `bolt-23` / perf / nextest / cargo-deny 与上游 tag release 同口径。
-- 私有上游需要仓库 secret **`XN_REPO_TOKEN`**（对 `leptonyu/xn` 至少 `contents: read`）；
-  本仓库上传用 workflow 自带的 `GITHUB_TOKEN`（`contents: write`）。
+- 私有上游需要仓库 secret **`XN_REPO_TOKEN`**（对 `leptonyu/xn` **`contents: write`**：
+  既要 checkout，也要创建/更新 release）；本仓库只用它自己的 `GITHUB_TOKEN` 更新
+  `XN_LAST_MAIN_SHA`（`actions: write`）。
 - 默认**不加** cargo features；需要时在手动触发的 `features` 输入或本地 `build.sh --features quic` 里加。
 
-`xn` workflow 失败不会影响 DNS/network 的每日 release；两个 workflow 相互独立。
+`xn` workflow 与 DNS/network 的每日 release 相互独立；它失败不会撤回其它 workflow 的资产。
 
 ## 与上游的关系
 
@@ -158,13 +159,13 @@ xn.x86_64-unknown-linux-gnu.pgo-bolt.bolt.env         # 上游 run 目录有就�
   target == host 的 gnu 档，容器化时复用同一 `build.sh` 的打包/发布段。
 - **macOS**：只能做 PGO 的 collect/optimize（zig 交叉），BOLT 不可用；届时增加
   `--no-bolt` 分支，产物命名区分 `.pgo.`，不覆盖本模块的 `.pgo-bolt.` 资产。
-- **发布目标**：`--release-repo` 已可切到 `leptonyu/xn`；等每日 tag 不再是唯一消费面时，
-  再加 xn repo 的 tag/release 创建逻辑。
+- **发布目标**：默认已是 `leptonyu/xn` 的 `v<version>` release；其他仓库用
+  `--release-repo` 指定（不会自动在其上创建 release）。
 
 ## 注意
 
-- `--publish` 只追加资产，不创建 release。目标 release 不存在时先等
-  `adguard.yml` 的 `dns` job 建好，或显式 `--tag` 指向已存在的 tag。
-- 每日 release 会被 [`delete-releases.yml`](../.github/workflows/delete-releases.yml)
-  按保留策略清理；tuned xn 只保证在当前每日 tag 上可取。
+- `--publish` 默认在 `leptonyu/xn` 上发 `v<Cargo.toml version>`：不存在就新建 release，
+  存在就追加/覆盖同名资产（`--clobber`）。上游仓库的 tag 若已存在但 release 不存在，
+  会在该 tag 上补建 release。
+- `--release-repo` 指向非上游仓库时，只追加到已有 release，不会在别的仓库自动建 tag。
 - `--package-only` 不重跑构建，但会重新生成 sha256、build-info 和 tarball；用于上传重试。

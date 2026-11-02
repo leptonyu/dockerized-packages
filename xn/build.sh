@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# xn 模块：编译 PGO+BOLT 优化的 x86_64 GNU xn，并挂到当天的 release tag。
+# xn 模块：编译 PGO+BOLT 优化的 x86_64 GNU xn，并挂到 xn 版本号对应的 release tag。
 #
 # 上游仓库：git@github.com:leptonyu/xn.git
 #
@@ -8,15 +8,15 @@
 #   ./release.sh --tuned --target x86_64-unknown-linux-gnu
 # 由它完成 PGO 采集（loopback 套件 + 常规 nextest）→ profile 重建 → BOLT，
 # 产物固定写 target/x86_64-unknown-linux-gnu/release/xn 与 xn.tuned.env。
-# 这里只负责：取上游源码、跑这条命令、打包、上传到本仓库“当天”的 release tag。
+# 这里只负责：取上游源码、跑这条命令、打包、创建/追加 v<Cargo.toml version> release。
 #
 # 为什么必须原生 Linux x86_64：BOLT 需要 --emit-relocs 的重定位节，zig 交叉档
 # （macOS / musl 容器）拿不到。后续扩展见 README.md 的 Roadmap。
 #
 # 典型用法：
 #   ./xn/build.sh                                      # 构建 + 打包（不发布）
-#   ./xn/build.sh --publish                            # 追加到最新每日 tag
-#   ./xn/build.sh --tag v20261102 --publish            # 指定每日 tag
+#   ./xn/build.sh --publish                            # 发布到 v<Cargo.toml version>
+#   ./xn/build.sh --tag v6.1.0 --publish               # 指定 release tag
 #   ./xn/build.sh --check                              # 只检查工具链
 #   ./xn/build.sh --dry-run                            # 只打印命令
 #
@@ -30,7 +30,7 @@ ref="${XN_REF:-main}"
 ref_explicit=false
 src="${XN_SRC:-}"
 out_dir="${XN_OUT_DIR:-$root/dist}"
-release_repo="${XN_RELEASE_REPO:-${GITHUB_REPOSITORY:-leptonyu/dockerized-packages}}"
+release_repo="${XN_RELEASE_REPO:-leptonyu/xn}"
 tag="${XN_TAG:-}"
 features="${XN_FEATURES:-}"
 event="${XN_EVENT:-}"
@@ -62,8 +62,8 @@ usage() {
   --repo URL           上游仓库，默认 git@github.com:leptonyu/xn.git
   --ref REF            分支 / tag / commit，默认 main（须包含 release.sh --tuned）
   --out-dir DIR        产物目录，默认 xn/dist
-  --release-repo R     release 所在仓库，默认本仓库（或 $GITHUB_REPOSITORY）
-  --tag TAG            目标每日 release tag（如 v20261102）；不给则取最新 vYYYYMMDD
+  --release-repo R     release 所在仓库，默认 leptonyu/xn
+  --tag TAG            目标 release tag；默认直接读 Cargo.toml 的 v<version>
   --features LIST      cargo features，默认不加（需要时传 quic 等）
   --event EVENT        BOLT stage2 的 perf 事件，默认用 release.sh 的默认值；
                        GitHub 托管 runner 用 cpu-clock:u
@@ -75,7 +75,7 @@ usage() {
   --no-locked          不向 cargo 传 --locked
   --force              让 build-tuned 重做已有 run 目录
   --package-only       不构建，只打包 target/<triple>/release/xn + xn.tuned.env
-  --publish            通过 gh 把产物追加到 --tag（--clobber，不建 tag/release）
+  --publish            通过 gh 发布到 --tag；release 不存在时新建（默认上游 xn）
   --check              只检查工具链与 release.sh 能力，不构建
   --dry-run            只打印命令，不 clone / 不构建 / 不上传
   -h, --help           本帮助
@@ -163,6 +163,55 @@ have_tuned() { # $1=src
 	[[ -f "$1/release.sh" ]] && grep -q -- '--tuned' "$1/release.sh"
 }
 
+# 直接从上游 Cargo.toml 读 xn 版本号（workspace.package，其次 package）。
+xn_version() { # $1=src
+	local f="$1/Cargo.toml" v
+	[[ -f "$f" ]] || return 1
+	v="$(awk '
+		/^\[workspace.package\]/ { in_section = 1; next }
+		in_section && /^\[/ { exit }
+		in_section && /^[[:space:]]*version[[:space:]]*=/ {
+			line = $0
+			sub(/^[^=]*=[[:space:]]*/, "", line)
+			gsub(/["[:space:]]/, "", line)
+			print line
+			exit
+		}
+	' "$f")"
+	if [[ -z "$v" ]]; then
+		v="$(awk '
+			/^\[package\]/ { in_section = 1; next }
+			in_section && /^\[/ { exit }
+			in_section && /^[[:space:]]*version[[:space:]]*=/ {
+				line = $0
+				sub(/^[^=]*=[[:space:]]*/, "", line)
+				gsub(/["[:space:]]/, "", line)
+				print line
+				exit
+			}
+		' "$f")"
+	fi
+	[[ -n "$v" ]] || return 1
+	printf '%s\n' "$v"
+}
+
+# 上游 repo URL 的 owner/repo（用于判断能否在目标仓库自动建 release/tag）。
+repo_slug() {
+	case "$repo" in
+		git@github.com:*) printf '%s\n' "${repo#git@github.com:}" | sed 's/\.git$//' ;;
+		https://github.com/*) printf '%s\n' "${repo#https://github.com/}" | sed 's/\.git$//' ;;
+		sh:*|git://*) printf '%s\n' "${repo#*github.com[:/]}" | sed 's/\.git$//' ;;
+		*) return 1 ;;
+	esac
+}
+
+# 源码准备好后确定版本与默认 tag：v<workspace version>。
+prepare_version() {
+	version="$(xn_version "$src")" || die "读不到 xn 版本（$src/Cargo.toml）"
+	[[ -n "$tag" ]] || tag="v$version"
+	note "xn 版本：${version}（发布 tag：${tag}）"
+}
+
 # 发布出去的环境文件不要带本地路径 / 主机名：run_dir、workload、host、uname 一律脱敏。
 sanitize_env() { # $1=输入 $2=输出
 	awk '
@@ -220,6 +269,7 @@ prepare_source() {
 		commit="$(git -C "$src" rev-parse HEAD 2>/dev/null || echo unknown)"
 		ref_label="<local HEAD>"
 		$ref_explicit && warn "--src 已指定，忽略 --ref=${ref}，使用当前 HEAD ${commit:0:12}"
+		prepare_version
 		return 0
 	fi
 
@@ -237,6 +287,7 @@ prepare_source() {
 	commit="$(git -C "$src" rev-parse HEAD)"
 	ref_label="$ref"
 	have_tuned "$src" || die "$src 的 release.sh 没有 --tuned（$ref 太旧？）；用 --ref 指向含该提交的分支/tag"
+	prepare_version
 }
 
 # ---------------------------------------------------------------- dry-run
@@ -268,7 +319,11 @@ print_plan() {
 	fi
 	printf '+ 打包 %s.tar.xz（xn / LICENSE / xn.tuned.env / THIRD-PARTY-NOTICES.txt）\n' "$base"
 	if $publish; then
-		printf '+ gh release upload %q --repo %q --clobber %q/*\n' "${tag:-<最新 vYYYYMMDD>}" "$release_repo" "$out_dir"
+		if [[ -n "$tag" ]]; then
+			printf '+ gh release create/upload %q --repo %q --clobber %q/*\n' "$tag" "$release_repo" "$out_dir"
+		else
+			printf '+ gh release create/upload v<Cargo.toml version> --repo %q --clobber %q/*\n' "$release_repo" "$out_dir"
+		fi
 	fi
 }
 if $dry_run; then
@@ -342,18 +397,7 @@ rm -rf "$smoke_dir"
 
 # ---------------------------------------------------------------- package
 if $publish; then
-	resolve_tag() {
-		if [[ -n "$tag" ]]; then return 0; fi
-		command -v gh >/dev/null 2>&1 || die "未给 --tag 且找不到 gh；请显式指定当天的 tag，如 v20261102"
-		tag="$(gh release list --repo "$release_repo" --limit 50 --json tagName \
-			--jq '.[].tagName' 2>/dev/null | grep -E '^v[0-9]{8}$' | head -n1 || true)"
-		if [[ -z "$tag" ]]; then
-			tag="v$(TZ=Asia/Shanghai date +%Y%m%d)"
-			warn "没找到每日 release；按今天算 ${tag}（可能尚未创建）"
-		fi
-	}
-	resolve_tag
-	note "目标 release：$release_repo@$tag"
+	note "目标 release：${release_repo}@${tag}（版本 ${version}）"
 fi
 
 stage="$out_dir/.stage-$base"
@@ -400,6 +444,7 @@ fi
 	printf 'source_repo=%s\n' "$repo"
 	printf 'source_ref=%s\n' "$ref_label"
 	printf 'source_commit=%s\n' "$commit"
+	printf 'version=%s\n' "$version"
 	printf 'target=%s\n' "$target"
 	printf 'profile=pgo+bolt\n'
 	printf 'features=%s\n' "${features:-<default>}"
@@ -432,9 +477,16 @@ if $publish; then
 	if [[ -z "${GH_TOKEN:-}" && -z "${GITHUB_TOKEN:-}" ]]; then
 		gh auth status >/dev/null 2>&1 || die "gh 未登录；设 GH_TOKEN（contents:write）或 gh auth login"
 	fi
-	# 不建 tag / release：目标就是当天已经由 adguard.yml 建好的 release。
-	gh release view "$tag" --repo "$release_repo" >/dev/null 2>&1 \
-		|| die "release $release_repo@$tag 不存在；每日 release 由 .github/workflows/adguard.yml 创建"
+	# 默认 tag 是 v<Cargo.toml version>：没有 release 就新建（目标 commit = 本次构建的上游 commit）。
+	if ! gh release view "$tag" --repo "$release_repo" >/dev/null 2>&1; then
+		slug="$(repo_slug || true)"
+		[[ -n "$slug" && "$release_repo" == "$slug" ]] \
+			|| die "release $release_repo@$tag 不存在；只有上游 $slug 会自动创建（其他仓库请先建 release 或用 --tag）"
+		note "新建 release ${release_repo}@${tag}（target ${commit:0:12}）"
+		gh release create "$tag" --repo "$release_repo" --target "$commit" \
+			--title "xn $version" \
+			--notes "PGO+BOLT x86_64 GNU build of xn $version from ${commit:0:12}."
+	fi
 	note "上传 ${#assets[@]} 个资产到 $release_repo@$tag"
 	gh release upload "$tag" --repo "$release_repo" --clobber "${assets[@]}"
 	echo "https://github.com/$release_repo/releases/tag/$tag"
