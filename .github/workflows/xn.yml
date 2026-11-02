@@ -100,7 +100,7 @@ jobs:
         id: built
         # 变量之外的第二道“已构建”标记；变量写失败时也不会每小时重编。
         continue-on-error: true
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: .xn-built-sha
           key: xn-main-sha-${{ steps.resolve.outputs.sha }}
@@ -205,7 +205,7 @@ jobs:
         # 与仓库变量并存：变量写不了时，下一轮靠这个 cache 跳过重编。
         if: success() && needs.check.outputs.ref == 'main'
         continue-on-error: true
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: .xn-built-sha
           key: xn-main-sha-${{ needs.check.outputs.sha }}
