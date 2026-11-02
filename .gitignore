@@ -9,3 +9,7 @@ apple.conf*
 filter_49.txt
 dlc.dat*
 dlc-official.dat
+
+# xn 模块：构建产物与托管的上游 checkout
+xn/dist/
+xn/.cache/

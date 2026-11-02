@@ -1,0 +1,240 @@
+name: Build xn (PGO+BOLT)
+
+# 不按天编译：每小时只检查上游 leptonyu/xn 的 main SHA，只有 SHA 变化（或手动 force /
+# repository_dispatch）才跑 60–90 分钟的 PGO+BOLT。构建成功后把 SHA 写进仓库变量
+# XN_LAST_MAIN_SHA；下一次看到同一个 SHA 就跳过。
+#
+# 上游想立即触发，可在自己的 workflow 里发：
+#   repository_dispatch:
+#     event_type: xn-main-updated
+#     client_payload: { sha: <commit> }
+# 没有 dispatch 时，最多晚一小时发现 main 更新；也可手动 workflow_dispatch。
+
+on:
+  schedule:
+    - cron: "17 * * * *" # 每小时 :17 检查一次，不编译
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 即使 main SHA 未变化也编译
+        type: choice
+        options:
+          - "false"
+          - "true"
+        default: "false"
+      ref:
+        description: 指定上游 ref（留空 = main；用于 --tuned 尚未合入 main）
+        required: false
+        default: ""
+      tag:
+        description: 目标每日 release tag（留空 = 最新 vYYYYMMDD）
+        required: false
+        default: ""
+      event:
+        description: BOLT stage2 的 perf event
+        required: false
+        default: cpu-clock:u
+      features:
+        description: cargo features（留空 = 默认，不加 quic）
+        required: false
+        default: ""
+  repository_dispatch:
+    types: [xn-main-updated]
+
+permissions:
+  contents: write # 追加资产到每日 release
+  actions: write  # gh variable set 记录已构建的 main SHA
+
+concurrency:
+  group: xn-pgo-bolt
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+      ref: ${{ steps.resolve.outputs.ref }}
+      changed: ${{ steps.decide.outputs.changed }}
+    steps:
+      - name: Check XN_REPO_TOKEN
+        env:
+          TOKEN: ${{ secrets.XN_REPO_TOKEN }}
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "::error::需要仓库 secret XN_REPO_TOKEN（对 leptonyu/xn 至少 contents:read）"
+            exit 1
+          fi
+      - name: Resolve upstream ref
+        id: resolve
+        env:
+          GH_TOKEN: ${{ secrets.XN_REPO_TOKEN }}
+          INPUT_REF: ${{ inputs.ref }}
+          PAYLOAD_SHA: ${{ github.event.client_payload.sha }}
+        run: |
+          set -euo pipefail
+          ref="${INPUT_REF:-main}"
+          sha="${PAYLOAD_SHA:-}"
+          if [ -z "$sha" ]; then
+            # 用 query 参数解析 ref：分支名里的 / 不需要手工 URL 编码。
+            sha="$(gh api --method GET repos/leptonyu/xn/commits \
+              -f "sha=$ref" -f per_page=1 --jq ".[0].sha")"
+          fi
+          [ -n "$sha" ] || { echo "::error::解析不到 $ref 的 SHA"; exit 1; }
+          {
+            echo "sha=$sha"
+            echo "ref=$ref"
+          } >> "$GITHUB_OUTPUT"
+      - name: Prepare state dir
+        run: mkdir -p .xn-built-sha
+      - name: Restore built marker
+        id: built
+        # 变量之外的第二道“已构建”标记；变量写失败时也不会每小时重编。
+        continue-on-error: true
+        uses: actions/cache/restore@v4
+        with:
+          path: .xn-built-sha
+          key: xn-main-sha-${{ steps.resolve.outputs.sha }}
+          lookup-only: true
+      - name: Decide whether to build
+        id: decide
+        env:
+          SHA: ${{ steps.resolve.outputs.sha }}
+          REF: ${{ steps.resolve.outputs.ref }}
+          LAST_SHA: ${{ vars.XN_LAST_MAIN_SHA }}
+          CACHE_HIT: ${{ steps.built.outputs.cache-hit }}
+          FORCE: ${{ inputs.force || 'false' }}
+        run: |
+          set -euo pipefail
+          changed=true
+          if [ "$REF" = "main" ] && [ "$FORCE" != "true" ]; then
+            if [ "$SHA" = "${LAST_SHA:-}" ] || [ "${CACHE_HIT:-false}" = "true" ]; then
+              changed=false
+            fi
+          fi
+          echo "changed=$changed" >> "$GITHUB_OUTPUT"
+          {
+            echo "### upstream"
+            echo "- ref: \`$REF\`"
+            echo "- sha: \`$SHA\`"
+            echo "- last built (variable): \`${LAST_SHA:-<未记录>}\`"
+            echo "- cache marker: \`${CACHE_HIT:-false}\`"
+            echo "- build: \`$changed\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  build:
+    needs: check
+    if: needs.check.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+      - name: Resolve daily release
+        # 先确认目标 release 存在，避免白跑 60–90 分钟后才在 gh release upload 失败。
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          tag="${INPUT_TAG:-}"
+          if [ -z "$tag" ]; then
+            tag="$(gh release list --repo "$GITHUB_REPOSITORY" --limit 50 --json tagName \
+              --jq '.[].tagName' | grep -E '^v[0-9]{8}$' | head -n1 || true)"
+          fi
+          [ -n "$tag" ] || {
+            echo "::error::没有 vYYYYMMDD 每日 release；等 adguard.yml 建好，或手动填 tag"
+            exit 1
+          }
+          gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null
+          echo "RELEASE_TAG=$tag" >> "$GITHUB_ENV"
+          echo "目标 release：$GITHUB_REPOSITORY@$tag" >> "$GITHUB_STEP_SUMMARY"
+      - name: Checkout upstream xn
+        uses: actions/checkout@v7
+        with:
+          repository: leptonyu/xn
+          ref: ${{ needs.check.outputs.sha }}
+          token: ${{ secrets.XN_REPO_TOKEN }}
+          path: .cache/xn-src
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install system dependencies
+        # 与上游 tag release 同一套：LLVM 23 + bolt-23 + perf。
+        # 托管 runner 没有 PMU/LBR，用 software event cpu-clock:u。
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config cmake perl nasm \
+            clang lld linux-tools-common linux-tools-generic \
+            libclang-dev libssl-dev zlib1g-dev liblzma-dev \
+            curl git xz-utils file binutils python3 openssl lsb-release
+          curl -fsSL https://apt.llvm.org/llvm.sh -o /tmp/llvm.sh
+          chmod +x /tmp/llvm.sh
+          sudo /tmp/llvm.sh 23
+          sudo apt-get install -y llvm-23 llvm-23-tools bolt-23 lld-23 clang-23
+          echo "/usr/lib/llvm-23/bin" >> "$GITHUB_PATH"
+          for p in /usr/lib/linux-tools/*/perf; do
+            [ -x "$p" ] && sudo ln -sf "$p" /usr/local/bin/perf && break
+          done
+          echo 'kernel.perf_event_paranoid=1' | sudo tee /etc/sysctl.d/99-xn-perf.conf >/dev/null
+          sudo sysctl --system
+          perf --version
+          /usr/lib/llvm-23/bin/llvm-bolt --version
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - name: Install cargo-nextest
+        # release.sh --tuned 默认用 pgo.sh tests 跑 release 档 nextest 采样。
+        uses: taiki-e/install-action@nextest
+      - name: Install cargo-deny
+        # 只为打包时生成 THIRD-PARTY-NOTICES.txt。
+        uses: taiki-e/install-action@cargo-deny
+      - name: Build tuned xn and publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          LLVM_PROFDATA: /usr/lib/llvm-23/bin/llvm-profdata
+          INPUT_FEATURES: ${{ inputs.features }}
+        run: |
+          set -euo pipefail
+          args=(
+            --src "$GITHUB_WORKSPACE/.cache/xn-src"
+            --release-repo "$GITHUB_REPOSITORY"
+            --tag "$RELEASE_TAG"
+            --publish
+            --event "${{ inputs.event || 'cpu-clock:u' }}"
+          )
+          if [ -n "${INPUT_FEATURES:-}" ]; then args+=(--features "$INPUT_FEATURES"); fi
+          ./xn/build.sh "${args[@]}"
+      - name: Prepare built marker
+        if: success() && needs.check.outputs.ref == 'main'
+        run: |
+          mkdir -p .xn-built-sha
+          printf '%s\n' "${{ needs.check.outputs.sha }}" > .xn-built-sha/sha
+      - name: Save built marker
+        # 与仓库变量并存：变量写不了时，下一轮靠这个 cache 跳过重编。
+        if: success() && needs.check.outputs.ref == 'main'
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: .xn-built-sha
+          key: xn-main-sha-${{ needs.check.outputs.sha }}
+      - name: Record built main SHA
+        # 只有 main 的构建才更新状态；手动指定 ref 时不污染 main 的已构建 SHA。
+        if: success() && needs.check.outputs.ref == 'main'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh variable set XN_LAST_MAIN_SHA \
+            --repo "$GITHUB_REPOSITORY" \
+            --body "${{ needs.check.outputs.sha }}"
+      - name: Upload build outputs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xn-pgo-bolt
+          # 不传 build.log：里面有 runner 的绝对路径；发布资产本身已脱敏。
+          path: |
+            xn/dist/*
+            !xn/dist/build.log
+          if-no-files-found: ignore
