@@ -13,7 +13,10 @@
        dlc 没有的   -> 所在列表名
 
 输入是三个纯域名列表（fake 只有 domain.txt 里手工维护的少量域名，
-消费方对未标注条目的默认处理已经覆盖了 !cn 全集，不必再整份写进 dlc）；
+消费方对未标注条目的默认处理已经覆盖了 !cn 全集，不必再整份写进 dlc）。
+输出前会归一化 Regex 型条目（ASCII 字符类 / 非捕获组 / 量词整理），并修正两处
+上游边界；归一化部分只改写法、不改合法 ASCII 域名的匹配结果，用于缩小 Rust
+`RegexSet` 的 NFA/DFA。
 --selfcheck 会在写盘前用官方 dat 验证编解码
 往返是否字节一致，不一致就报错退出（防止格式漂移写出坏文件）。
 """
@@ -164,6 +167,87 @@ def has_attr(dom, key):
     return any(a["key"] == key for a in dom["attrs"])
 
 
+def noncapture(pattern):
+    """把捕获组改成非捕获组；`(?...)` 特殊组原样保留。
+
+    RegexSet 不取 captures，捕获组只会让 NFA 多出状态。
+    """
+    out = []
+    i = 0
+    in_class = False
+    while i < len(pattern):
+        c = pattern[i]
+        if c == "\\":
+            out.append(pattern[i:i + 2])
+            i += 2
+            continue
+        if c == "[":
+            in_class = True
+        elif c == "]":
+            in_class = False
+        if c == "(" and not in_class:
+            if i + 1 < len(pattern) and pattern[i + 1] == "?":
+                out.append("(")
+            else:
+                out.append("(?:")
+        else:
+            out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def optimize_regex(value):
+    """把 DLC 的 regexp 归一成 Rust regex/RegexSet 更省状态的写法。
+
+    域名是 ASCII/punycode，所以 `\\w` / `\\d` / `\\S` 的 Unicode 字符类可以换成
+    ASCII 等价类；`\\w{5}` 这种重复的 Unicode 类会把 NFA 撑大一个数量级。
+    另外顺手修两处上游 pattern 的边界错误（见下面的 replace）。
+    """
+    # 上游 pattern 的结构性修正：91cg 的 `.com` 少转义；javdb 缺域名边界。
+    value = value.replace(
+        r"(^|\.)91cg([1-9]|[0-9][1-9])?.com$",
+        r"(?:^|\.)91cg(?:[1-9]|[0-9][1-9])?\.com$",
+    )
+    value = value.replace(
+        r"javdb\d+\.com$",
+        r"(?:^|\.)javdb[0-9]+\.com$",
+    )
+    # 纯域名语义下等价，但 NFA 小得多。
+    value = value.replace(r"\w", "[A-Za-z0-9_]")
+    value = value.replace(r"\d", "[0-9]")
+    value = value.replace(r"\S", r"[^ \t\r\n]")
+    value = value.replace(r"[^\.]", "[^.]")
+    # 先去掉捕获组，下面的量词整理才能命中 `(?:...)` 形态。
+    value = noncapture(value)
+    # 精确等价的量词整理。
+    while "[0-9][0-9]" in value:
+        value = value.replace("[0-9][0-9]", "[0-9]{2}")
+    value = value.replace("[0-9]{2}?", "[0-9]{2}")
+    value = value.replace("(?:[0-9]+)?", "[0-9]*")
+    value = value.replace("(?:[0-9]{2})?", "[0-9]{0,2}")
+    value = value.replace("(?:[0-9]{3})?", "[0-9]{0,3}")
+    value = value.replace("(?:[0-9]{0,5})", "[0-9]{0,5}")
+    value = value.replace("(?:[a-z][a-z]?)?", "[a-z]{0,2}")
+    value = value.replace(
+        r"^(?:.+\.)*zh\.okaapps\.com$",
+        r"^(?:[^.]+\.)*zh\.okaapps\.com$",
+    )
+    return value
+
+
+def optimize_regexes(sites):
+    """就地归一化所有 Regex 型条目，返回改动条数。"""
+    changed = 0
+    for _, domains in sites:
+        for dom in domains:
+            if dom["type"] == 1:
+                new = optimize_regex(dom["value"])
+                if new != dom["value"]:
+                    dom["value"] = new
+                    changed += 1
+    return changed
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--base", required=True, help="官方 dlc.dat")
@@ -179,6 +263,10 @@ def main():
         sys.exit("dlc_dat: 官方 dlc.dat 编解码往返不是字节一致，疑似格式变化，中止")
     print("dlc_dat: 基准 %d 个列表 / %d 个域名，往返自检通过"
           % (len(sites), sum(len(d) for _, d in sites)))
+
+    # regex 只改“怎么写”，不改匹配语义（ASCII 域名）；必须在官方往返自检之后做。
+    changed = optimize_regexes(sites)
+    print("dlc_dat: regex 归一化 %d 条" % changed)
 
     # 优先级 ads > cn > fake：一个域名只打一个标签
     tag_of = {}

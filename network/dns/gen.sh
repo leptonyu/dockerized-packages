@@ -16,6 +16,11 @@ DLCDAT_URL="https://github.com/v2fly/domain-list-community/releases/latest/downl
 # 固定走国内 DNS 的域名：自有域名 sdxpass.com，以及上游没标 @cn 的 googleapis.cn。
 # domain.txt 只放 fake 域名，不再混 @cn 条目。
 CN_FORCED="sdxpass.com googleapis.cn"
+# 不参与 ads 的域名：filter_49 / v2fly @ads 里命中也要剔除。
+# ipinfo.io 是 domain.txt 里的手工 fake 例外，不能被 filter_49 误伤成 ads。
+ADS_EXCLUDE="ipinfo.io"
+# 固定加入 ads 的域名：filter_49 / v2fly @ads 没覆盖，但需要全网拦截。
+ADS_FORCED="aiahk88.com aiahk01.com aiahk02.com"
 OUT="${1:-all}"
 
 # 脚本在本目录生成产物；上游两个 checkout 在仓库根目录（CI 在仓库根 clone）。
@@ -116,7 +121,7 @@ gen_blocked_domains(){
 				         if (a[1] == "" || a[1] ~ /[:|^\/]/) next
 				         for (i = 2; i <= n; i++) if (a[i] ~ /@ads([,]|$)/) { print a[1]; break }
 				       }'
-		} | sort -u > "$cache"
+		} | grep -vxF -f <(printf '%s\n' $ADS_EXCLUDE) | sort -u > "$cache"
 	fi
 	cat "$cache"
 }
@@ -133,7 +138,7 @@ gen_dlc(){
 	  || { echo "gen.sh: 下载 $DLCDAT_URL 失败" >&2; exit 1; }
 	[ -s "$base" ] || { echo "gen.sh: $base 为空" >&2; exit 1; }
 
-	gen_blocked_domains > "$sets/ads.txt"
+	{ gen_blocked_domains; for d in $ADS_FORCED; do echo "$d"; done; } | LC_ALL=C sort -u > "$sets/ads.txt"
 	{ gen_cn_domains; for d in $CN_FORCED; do echo "$d"; done; } | LC_ALL=C sort -u > "$sets/cn.txt"
 	gen_fake | LC_ALL=C sort -u > "$sets/fake.txt"
 

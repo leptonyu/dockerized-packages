@@ -34,7 +34,12 @@ Git LFS 里的 [`bin/cidr`](bin/README.md)（Linux x86_64）生成，不再需�
 - `fake` 只代表 `domain.txt` 里手工维护的少量域名，不再展开 !cn 全集；需要强制走
   国内 DNS 的域名写在 `gen.sh` 的 `CN_FORCED`；
 - CN 只取 dnsmasq 三份中国列表 + `CN_FORCED`。v2fly 列表的 `@cn` 官方 dlc 已经
-  自带，消费端（machine）也按 DLC 列表名自己映射 fake_tags，生成侧不再展开列表。
+  自带，消费端（machine）也按 DLC 列表名自己映射 fake_tags，生成侧不再展开列表；
+- ads 由 `filter_49` + v2fly `@ads` 生成：上游没覆盖、需要强制拦截的写在
+  `gen.sh` 的 `ADS_FORCED`，需要放行的写在 `ADS_EXCLUDE`；
+- 生成时把 Regex 条目的 `\w` / `\d` / `\S` 归一成 ASCII 类、捕获组改成非捕获组；
+  `\w{5}` 这类 Unicode 类会显著缩小 Rust `RegexSet` 的 NFA/DFA，对合法 ASCII
+  域名的匹配结果不变（另修正 `91cg` / `javdb` 两处上游边界误匹配）。
 
 ## block 的三种口径
 
