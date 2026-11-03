@@ -31,11 +31,14 @@ jobs:
         run: |
           export TZ=Asia/Shanghai
           echo "date=$(date -d next-hour +'%Y%m%d')" >> "$GITHUB_OUTPUT"
-      - name: Run Generate
+      - name: Generate DNS artifacts
+        # dns job 产出三份：dlc.dat(.xz)（DNS 分流 / 广告拦截名单）、
+        # apple.conf（AdGuard Home 的 apple 上游选择）、filter_49（AdGuard 过滤规则）。
+        # 生成脚本在 network/dns/，仓库根只放上游 checkout。
         run: |
           git clone --depth 1 https://github.com/felixonmars/dnsmasq-china-list.git
           git clone --depth 1 https://github.com/v2fly/domain-list-community.git
-          ./gen.sh all
+          ./network/dns/gen.sh all
       - name: Tag the repository
         id: tag
         run: |
@@ -51,13 +54,13 @@ jobs:
         with:
           tag_name: v${{ steps.date.outputs.date }}
           files: |
-            filter_49.tar.xz
-            filter_49.tar.xz.sha256sum
-            dlc.dat.sha256sum
-            dlc.dat.xz
-            dlc.dat.xz.sha256sum
-            apple.tar.xz
-            apple.conf.sha256sum
+            network/dns/filter_49.tar.xz
+            network/dns/filter_49.tar.xz.sha256sum
+            network/dns/dlc.dat.sha256sum
+            network/dns/dlc.dat.xz
+            network/dns/dlc.dat.xz.sha256sum
+            network/dns/apple.tar.xz
+            network/dns/apple.conf.sha256sum
 
   network:
     needs: dns

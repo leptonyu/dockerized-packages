@@ -13,8 +13,9 @@
 # DNS-over-QUIC quic://dns.alidns.com:853 添加到 AdGuard, 添加到 AdGuard VPN
 # 官方编译好的 dlc.dat（作为基准，保留 dlc 全部列表/域名/类型/属性）
 DLCDAT_URL="https://github.com/v2fly/domain-list-community/releases/latest/download/dlc.dat"
-# 固定走国内 DNS 的自有域名（不在 dnsmasq / v2fly 任何列表里）
-CN_FORCED="sdxpass.com"
+# 固定走国内 DNS 的域名：自有域名 sdxpass.com，以及上游没标 @cn 的 googleapis.cn。
+# domain.txt 只放 fake 域名，不再混 @cn 条目。
+CN_FORCED="sdxpass.com googleapis.cn"
 OUT="${1:-all}"
 
 # 脚本在本目录生成产物；上游两个 checkout 在仓库根目录（CI 在仓库根 clone）。
@@ -23,8 +24,8 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 SRC="$(cd "$HERE/../.." && pwd)"
 cd "$HERE"
 
-# 临时缓存目录：存放展开后的列表集合 / 国内域名全集。
-# 用文件而不是变量，因为这两个函数会在管道和命令替换的子 shell 里被调用，变量缓存传不出来
+# 临时缓存目录：国内域名全集 / 拦截域名全集。
+# 用文件而不是变量，因为这些函数会在管道和命令替换的子 shell 里被调用，变量缓存传不出来
 CACHE_DIR="$(mktemp -d)"
 trap 'rm -rf "${CACHE_DIR:?}"' EXIT
 
@@ -50,14 +51,13 @@ check_output(){
 	fi
 }
 
-# 全部国内域名：data 列表 / domain.txt 里 @cn 的 + dnsmasq 三份中国列表里的。
-# 只给 dlc 的 CN 一路用（gen_dlc）。dnsmasq 三份必须算进来：accelerated-domains 里的
-# 域名在 v2fly data 里没有 @cn 标签，漏了它们就补不进 CN。
+# 全部国内域名：dnsmasq 三份中国列表（+ CN_FORCED 在 gen_dlc 里补）。
+# v2fly 的 @cn 标签官方 dlc 自带，生成侧不再逐层展开列表补 CN；消费端（machine）
+# 自己按 DLC 列表名映射 fake_tags。
 gen_cn_domains(){
 	local cache="$CACHE_DIR/cn-domains"
 	if [ ! -s "$cache" ]; then
 		{
-			gen_fake
 			# linkedin 系域名（accelerated-domains 里有，如 linkedin-event.com）强制走 fake，
 			# 与 data/linkedin 的非 @cn 部分保持一致
 			awk '-F[/]' 'NF { print $2 }' \
@@ -74,159 +74,10 @@ gen_apple(){
   awk -F/ '{print $2}' "$SRC/dnsmasq-china-list/apple.china.conf"
 }
 
-# 名单 -> 真正要读的列表集合：逐层展开 include 直到不再出现新列表
-# include 目标先剥掉 @属性 和 # 注释
-# $1 = keep-cn 时保留 *-cn 列表（gen_cn_only_lists 用：CN 侧的 -cn 列表本来就该读），
-#      否则排除（gen_fake_lists 用：-cn 列表交给 gen_cn_only_lists 那一遍处理）
-# （旧实现只展开一层，amp / cursor / bytedance-ai-!cn 这类深层列表会被整个漏掉）
-gen_fake_includes(){
-  local keep_cn="$1" queue name seen targets
-  local files
-  seen=" "
-  queue="$(cat | tr -s '[:space:]' '\n' | sed '/^$/d')"
-  while :; do
-    files=()
-    for name in $queue; do
-      case "$seen" in *" $name "*) continue ;; esac
-      seen="$seen$name "
-      if [ -e "$SRC/domain-list-community/data/$name" ]; then
-        echo "$name"
-        files+=("$SRC/domain-list-community/data/$name")
-      else
-        echo "gen.sh: 警告：列表 $name 不存在，已跳过" >&2
-      fi
-    done
-    [ "${#files[@]}" -gt 0 ] || break
-    # 下一层：本轮所有新列表一次性抽出 include 目标
-    targets="$(sed -n 's/^include:\([^[:space:]#]*\).*/\1/p' "${files[@]}")"
-    if [ "$keep_cn" = "keep-cn" ]; then
-      queue="$targets"
-    else
-      queue="$(printf '%s\n' "$targets" | grep -v -- '-cn$')"
-    fi
-  done
-}
-
-# 展开列表：只取带 @cn 的条目，统一只留域名
-# 先把列表名换成文件列表，一次 grep 处理完（逐个 spawn 会慢一个数量级）
-gen_fake_expand(){
-  local name
-  local files=()
-  while read -r name || [ -n "$name" ]; do
-    [ -e "$SRC/domain-list-community/data/$name" ] && files+=("$SRC/domain-list-community/data/$name")
-  done
-  [ "${#files[@]}" -gt 0 ] || return 0
-  grep -h -v '^\(regexp:\|include:\|#\|$\)' "${files[@]}" \
-    | grep '..*@cn' \
-    | sed 's/^full://g' \
-    | awk 'NF { print $1 }'
-}
-
-# 要展开的上游列表名单（v2fly/domain-list-community/data 下的名字）
-gen_fake_base(){
-  cat <<EOF
-anthropic
-apple
-apple-intelligence
-archive
-discord
-disney
-github
-google
-hbo
-hsbc
-huggingface
-jetbrains
-jetbrains-ai
-linkedin
-linux
-medium
-netflix
-nintendo
-openai
-oreilly
-paypal
-pccw
-pixiv
-reddit
-sentry
-spotify
-stripe
-telegram
-tesla
-tiktok
-tvb
-twitch
-twitter
-wikimedia
-wise
-x
-youtube
-category-ai-chat-!cn
-category-anticensorship
-category-antivirus
-category-cas
-category-cdn-!cn
-category-communication
-category-companies
-category-cryptocurrency
-category-dev
-category-ecommerce
-category-forums
-category-games-!cn
-category-media
-category-scholar-!cn
-category-social-media-!cn
-category-vpnservices
-cloudflare
-connectivity-check
-EOF
-}
-
-# 名单 + 逐层 include 展开后的列表集合（结果缓存，避免同一次运行里重复展开）
-gen_fake_lists(){
-  local cache="$CACHE_DIR/fake-lists"
-  [ -s "$cache" ] || gen_fake_base | gen_fake_includes > "$cache"
-  cat "$cache"
-}
-
-# 只参与 CN 侧的列表：这些列表里"无标签"的条目本身就是中国域名
-# （12306.cn、10086.cn、alibaba.com 之类），但这里只取它们带 @cn 的条目。
-# 父列表（gen_fake_base）与它们分开，靠 gen_fake_includes 的 keep-cn 区分
-gen_cn_only_base(){
-  cat <<EOF
-category-cdn-cn
-category-ip-geo-detect
-geolocation-cn
-EOF
-}
-
-gen_cn_only_lists(){
-  local cache="$CACHE_DIR/cn-only-lists"
-  # CN 侧保留 *-cn 列表：cloudflare-cn / aws-cn / category-ntp-cn 就在这一层
-  [ -s "$cache" ] || gen_cn_only_base | gen_fake_includes keep-cn > "$cache"
-  cat "$cache"
-}
-
-# domain.txt -> 纯域名：$1 为空取带 @cn 的条目，$1=-v 取不带 @cn 的条目
-gen_domain_txt(){
-  grep -v '^\(regexp:\|include:\|#\|$\)' domain.txt | grep $1 '..*@cn' | sed 's/^full://g' | awk 'NF { print $1 }'
-}
-
-# CN 域名：父列表里带 @cn 的条目 + CN-only 列表 + domain.txt 里带 @cn 的条目
+# fake 域名：只有 domain.txt 里手工维护的少量境外域名（一行一个，# 注释）。
+# 未标注条目的 fake 语义由消费方的默认处理承担，不再展开 !cn 全集。
 gen_fake(){
-  {
-    gen_fake_lists | gen_fake_expand
-    gen_cn_only_lists | gen_fake_expand
-    gen_domain_txt ""
-  }
-}
-
-# 只给 dlc 补的 fake 域名：domain.txt 里手工维护的非 @cn 条目（约 80 条）。
-# !cn 全集（约 11 万条）不再进 dlc：未标注条目的 fake 语义由消费方的默认处理承担，
-# 再全量打一遍 @fake 属性只是把同一份信息写两遍。这份人工例外才是 dlc 需要额外带的。
-gen_fake_manual(){
-  gen_domain_txt "-v"
+  awk '!/^[[:space:]]*#/ && NF { print $1 }' domain.txt
 }
 
 gen_blocklist(){
@@ -274,7 +125,7 @@ gen_blocked_domains(){
 # 只追加 @ads / @cn / @fake 三种属性（优先级 ads > cn > fake）。
 # dlc 里没有的域名：ads -> ADS 列表、cn -> 追加进已有 CN 列表、fake -> FAKE 列表，
 # 统一用 Domain 型（后缀匹配）。
-# fake 这一路只喂 gen_fake_manual（domain.txt 里手工维护的几条），不展开 !cn 全集。
+# fake 这一路只喂 gen_fake（domain.txt 里手工维护的少量域名），不展开 !cn 全集。
 # 实际的编解码与自检在 dlc_dat.py 里（含官方 dat 的字节级往返校验）。
 gen_dlc(){
 	local base="dlc-official.dat" sets="$CACHE_DIR"
@@ -284,7 +135,7 @@ gen_dlc(){
 
 	gen_blocked_domains > "$sets/ads.txt"
 	{ gen_cn_domains; for d in $CN_FORCED; do echo "$d"; done; } | LC_ALL=C sort -u > "$sets/cn.txt"
-	gen_fake_manual | LC_ALL=C sort -u > "$sets/fake.txt"
+	gen_fake | LC_ALL=C sort -u > "$sets/fake.txt"
 
 	python3 dlc_dat.py --base "$base" \
 	  --ads "$sets/ads.txt" --cn "$sets/cn.txt" --fake "$sets/fake.txt" \

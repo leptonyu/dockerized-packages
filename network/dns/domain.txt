@@ -1,3 +1,8 @@
+# 手工维护的 fake 域名（一行一个，# 开头为注释）。
+# 这些域名在 DNS 里返回 fake IP，流量交给 fakedns 走代理。
+# 未标注条目的 fake 语义由消费方默认处理，所以这里只列需要人工兜底的域名。
+# 需要强制走国内 DNS 的域名不放这里，写到 gen.sh 的 CN_FORCED。
+
 au
 uk
 us
@@ -36,7 +41,6 @@ claw.cloud
 cookielaw.org
 digicert.com
 doubleclicktv.live
-events.goldcast.io
 fastmail.com
 formula1.com
 ## --> Microsoft
@@ -53,11 +57,9 @@ ls.apple.com
 apple.com
 ## --< Apple
 gcore.com
-globalsign.com
 gradle.com
 gradle.org
 hostloc.com
-ipapi.co
 jwplayer.com
 lastpass.com
 privacy-mgmt.com
@@ -74,7 +76,6 @@ yahoo.com
 yimg.com
 ## VictorOps
 victorops.com
-app-measurement.com
 bestvm.cloud
 oclc.org
 truecharts.org
@@ -88,7 +89,3 @@ jpmorgan.com
 models.inference.ai.azure.com
 anythingllm.com
 amazon.com
-ipinfo.io
-### 带 @cn 的域名强制走国内 DNS：gen.sh 会把它从 !cn（fake）结果里剔除
-### 只放上游列表里没标 @cn、但确实该走国内 DNS 的域名
-googleapis.cn @cn

@@ -1,6 +1,7 @@
 # network — xn 的八份 CIDR 名单
 
-从 `machine/modules/network/` 迁过来的 CIDR 生成目录。数据源、ASN、scanner
+从 `machine/modules/network/` 迁过来的 CIDR 生成目录（DNS / AdGuard 制品在
+[`dns/`](dns/)）。数据源、ASN、scanner
 （`source: file`）和全部 ops 都在 [`cidr.yaml`](cidr.yaml)；[`gen.sh`](gen.sh)
 只负责准备 `.cache/scanners/all.txt`、跑 pipeline、自检并写 checksum。CI 用
 Git LFS 里的 [`bin/cidr`](bin/README.md)（Linux x86_64）生成，不再需要本地提交
@@ -20,6 +21,20 @@ Git LFS 里的 [`bin/cidr`](bin/README.md)（Linux x86_64）生成，不再需�
 `xn_block_orig` / `xn_cn` / `xn_fake` / `xn_us` / `xn_vpn` 与 machine 当前同名文件
 逐字节一致（当前源里没有额外的非公网条目，所以过滤后条数不变）；`xn_allow` 与
 `cf.txt + cft.txt` 的并集一致。`xn_block` 和 `xn_block_all` 是新增的两种口径。
+
+## DNS / AdGuard（`dns/`）
+
+原仓库根目录的 `gen.sh`、`domain.txt`、`dlc_dat.py` 已移到 [`dns/`](dns/)，
+`adguard.yml` 的 `dns` job 直接跑 `./network/dns/gen.sh all`：
+
+- 输入：仓库根目录的 `dnsmasq-china-list/`、`domain-list-community/`（CI checkout 后
+  clone），以及 `dns/domain.txt`（手工 fake 域名）和 `dns/dlc_dat.py`；
+- 产物：`dns/` 下的 `dlc.dat(.xz)`（DNS 分流 / 广告拦截 DLC）、`apple.conf` /
+  `apple.tar.xz`、`filter_49` / `filter_49.tar.xz` 及 checksum；
+- `fake` 只代表 `domain.txt` 里手工维护的少量域名，不再展开 !cn 全集；需要强制走
+  国内 DNS 的域名写在 `gen.sh` 的 `CN_FORCED`；
+- CN 只取 dnsmasq 三份中国列表 + `CN_FORCED`。v2fly 列表的 `@cn` 官方 dlc 已经
+  自带，消费端（machine）也按 DLC 列表名自己映射 fake_tags，生成侧不再展开列表。
 
 ## block 的三种口径
 
@@ -107,7 +122,8 @@ SCANNERS_TARBALL=/path/to/internet-scanners.tar.gz ./gen.sh block
 
 `.github/workflows/adguard.yml` 的每日 release 现在有两个 job：
 
-1. `dns`：生成 DNS/AdGuard 制品，建当天 tag/release 并上传 DNS 资产；
+1. `dns`：跑 `./network/dns/gen.sh all` 生成 DNS/AdGuard 制品（`dlc.dat` /
+   `apple.conf` / `filter_49`），建当天 tag/release 并上传 DNS 资产；
 2. `network`（`needs: dns`）：`checkout` 带 `lfs: true` 拿到 `network/bin/cidr`，
    `actions/cache` 缓存 `~/.cache/cidr`，用 `secrets.IPINFO_TOKEN` 跑
    [`ci.sh`](ci.sh)；`ci.sh` 把每份 `.txt` 单独压成 `.xz`，release 上传八份
@@ -146,9 +162,9 @@ network job 会先用 `gh release delete-asset` 清掉它们，再上传新的 `
 生效前，把 release 全下到同一目录再 `xz -d` 会因为「输出文件已存在」失败，这不是
 压缩包损坏；用 `xz -df` 或 `xz -dc` 即可。
 
-生成物不入 git（本目录的 `.gitignore` 已挡 `xn_*.txt*` 和 `xn_*.txt.xz*`）；
-`network/` 里只放 `cidr.yaml`、`gen.sh`、`ci.sh`、`bin/cidr`、`.gitattributes`
-和文档。
+生成物不入 git（`network/.gitignore` 挡 `xn_*`，`dns/` 的产物由仓库根
+`.gitignore` 统一挡）；`network/` 里放 `cidr.yaml`、`gen.sh`、`ci.sh`、`bin/cidr`、
+`dns/`、`.gitattributes` 和文档。
 
 > CI 首次运行需要仓库 secret `IPINFO_TOKEN`；没有缓存又没有 token 时，
 > `country_asn` 源会失败。之后的运行即使 token 暂时缺失，也可以靠缓存完成。
