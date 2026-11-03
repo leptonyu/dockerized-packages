@@ -1,5 +1,11 @@
 #!/bin/bash
 
+# DNS / AdGuard 产物的生成入口（原仓库根目录的 gen.sh）。
+# 输入：仓库根目录的 dnsmasq-china-list/、domain-list-community/（CI 在 checkout 后 clone），
+#       以及本目录的 domain.txt / dlc_dat.py。
+# 产物：写到本目录（apple.conf / apple.tar.xz、filter_49.txt / filter_49.tar.xz、
+#       dlc.dat / dlc.dat.xz 及各自 .sha256sum），由 adguard.yml 的 dns job 发布。
+
 # DNS, IPv4 223.5.5.5 和 223.6.6.6 添加到 AdGuard，添加到 AdGuard VPN
 # DNS, IPv6 2400:3200::1 和 2400:3200:baba::1  添加到 AdGuard，添加到 AdGuard VPN
 # DNS-over-HTTPS  https://dns.alidns.com/dns-query  添加到 AdGuard，添加到 AdGuard VPN
@@ -11,17 +17,23 @@ DLCDAT_URL="https://github.com/v2fly/domain-list-community/releases/latest/downl
 CN_FORCED="sdxpass.com"
 OUT="${1:-all}"
 
+# 脚本在本目录生成产物；上游两个 checkout 在仓库根目录（CI 在仓库根 clone）。
+# 这样从任意工作目录调用都可以，root 也不再需要放着这个脚本。
+HERE="$(cd "$(dirname "$0")" && pwd)"
+SRC="$(cd "$HERE/../.." && pwd)"
+cd "$HERE"
+
 # 临时缓存目录：存放展开后的列表集合 / 国内域名全集。
 # 用文件而不是变量，因为这两个函数会在管道和命令替换的子 shell 里被调用，变量缓存传不出来
 CACHE_DIR="$(mktemp -d)"
 trap 'rm -rf "${CACHE_DIR:?}"' EXIT
 
 # 前置检查：缺任何一份上游数据都直接失败，避免静默生成残缺配置
-[ -r domain.txt ] || { echo "gen.sh: 缺少 domain.txt" >&2; exit 1; }
-[ -d domain-list-community/data ] || { echo "gen.sh: 缺少 domain-list-community/data" >&2; exit 1; }
-for f in dnsmasq-china-list/accelerated-domains.china.conf \
-         dnsmasq-china-list/google.china.conf \
-         dnsmasq-china-list/apple.china.conf; do
+[ -r domain.txt ] || { echo "gen.sh: 缺少 $HERE/domain.txt" >&2; exit 1; }
+[ -d "$SRC/domain-list-community/data" ] || { echo "gen.sh: 缺少 $SRC/domain-list-community/data" >&2; exit 1; }
+for f in "$SRC/dnsmasq-china-list/accelerated-domains.china.conf" \
+         "$SRC/dnsmasq-china-list/google.china.conf" \
+         "$SRC/dnsmasq-china-list/apple.china.conf"; do
 	[ -r "$f" ] || { echo "gen.sh: 缺少 $f" >&2; exit 1; }
 done
 
@@ -49,9 +61,9 @@ gen_cn_domains(){
 			# linkedin 系域名（accelerated-domains 里有，如 linkedin-event.com）强制走 fake，
 			# 与 data/linkedin 的非 @cn 部分保持一致
 			awk '-F[/]' 'NF { print $2 }' \
-			  dnsmasq-china-list/accelerated-domains.china.conf \
-			  dnsmasq-china-list/google.china.conf \
-			  dnsmasq-china-list/apple.china.conf \
+			  "$SRC/dnsmasq-china-list/accelerated-domains.china.conf" \
+			  "$SRC/dnsmasq-china-list/google.china.conf" \
+			  "$SRC/dnsmasq-china-list/apple.china.conf" \
 			  | grep -v linkedin
 		} | sort -u > "$cache"
 	fi
@@ -59,7 +71,7 @@ gen_cn_domains(){
 }
 
 gen_apple(){
-  awk -F/ '{print $2}' dnsmasq-china-list/apple.china.conf
+  awk -F/ '{print $2}' "$SRC/dnsmasq-china-list/apple.china.conf"
 }
 
 # 名单 -> 真正要读的列表集合：逐层展开 include 直到不再出现新列表
@@ -68,24 +80,25 @@ gen_apple(){
 #      否则排除（gen_fake_lists 用：-cn 列表交给 gen_cn_only_lists 那一遍处理）
 # （旧实现只展开一层，amp / cursor / bytedance-ai-!cn 这类深层列表会被整个漏掉）
 gen_fake_includes(){
-  local keep_cn="$1" queue name files seen targets
+  local keep_cn="$1" queue name seen targets
+  local files
   seen=" "
   queue="$(cat | tr -s '[:space:]' '\n' | sed '/^$/d')"
   while :; do
-    files=""
+    files=()
     for name in $queue; do
       case "$seen" in *" $name "*) continue ;; esac
       seen="$seen$name "
-      if [ -e "domain-list-community/data/$name" ]; then
+      if [ -e "$SRC/domain-list-community/data/$name" ]; then
         echo "$name"
-        files="$files domain-list-community/data/$name"
+        files+=("$SRC/domain-list-community/data/$name")
       else
         echo "gen.sh: 警告：列表 $name 不存在，已跳过" >&2
       fi
     done
-    [ -n "$files" ] || break
+    [ "${#files[@]}" -gt 0 ] || break
     # 下一层：本轮所有新列表一次性抽出 include 目标
-    targets="$(sed -n 's/^include:\([^[:space:]#]*\).*/\1/p' $files)"
+    targets="$(sed -n 's/^include:\([^[:space:]#]*\).*/\1/p' "${files[@]}")"
     if [ "$keep_cn" = "keep-cn" ]; then
       queue="$targets"
     else
@@ -97,13 +110,13 @@ gen_fake_includes(){
 # 展开列表：只取带 @cn 的条目，统一只留域名
 # 先把列表名换成文件列表，一次 grep 处理完（逐个 spawn 会慢一个数量级）
 gen_fake_expand(){
-  local files name
-  files=""
+  local name
+  local files=()
   while read -r name || [ -n "$name" ]; do
-    [ -e "domain-list-community/data/$name" ] && files="$files domain-list-community/data/$name"
+    [ -e "$SRC/domain-list-community/data/$name" ] && files+=("$SRC/domain-list-community/data/$name")
   done
-  [ -n "$files" ] || return 0
-  grep -h -v '^\(regexp:\|include:\|#\|$\)' $files \
+  [ "${#files[@]}" -gt 0 ] || return 0
+  grep -h -v '^\(regexp:\|include:\|#\|$\)' "${files[@]}" \
     | grep '..*@cn' \
     | sed 's/^full://g' \
     | awk 'NF { print $1 }'
@@ -244,7 +257,7 @@ gen_blocked_domains(){
 			  filter_49.txt
 			# v2fly 自带 @ads 标签的条目：去掉行内注释后要求 @ads 出现在标签位，
 			# 并跳过 regexp: / include: / keyword: 这类不是域名的行
-			grep -rh '@ads' domain-list-community/data/ \
+			grep -rh '@ads' "$SRC/domain-list-community/data/" \
 				| awk '{ sub(/#.*/, "") }
 				       /@ads/ {
 				         sub(/^full:/, "")
