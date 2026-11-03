@@ -15,9 +15,10 @@ target/x86_64-unknown-linux-gnu/release/xn
 target/x86_64-unknown-linux-gnu/release/xn.tuned.env
 ```
 
-[`build.sh`](build.sh) 只负责取源码、跑这条命令、打包，并发布回 **`XN_REPO`（默认
-`leptonyu/xn`）的 `v<Cargo.toml version>` release**。tag 直接从上游 `Cargo.toml` 的
-workspace 版本读取（当前会得到 `v6.0.0`）；release 不存在就新建，存在就追加资产。
+[`build.sh`](build.sh) 只负责取源码、跑这条命令、打两个包（二进制包 + 全过程包），
+并发布回 **`XN_REPO`（默认 `leptonyu/xn`）的 `v<Cargo.toml version>` release**。tag
+直接从上游 `Cargo.toml` 的 workspace 版本读取（当前会得到 `v6.0.0`）；release 不存在
+就新建，存在就追加资产。
 
 ## 快速开始
 
@@ -35,8 +36,11 @@ workspace 版本读取（当前会得到 `v6.0.0`）；release 不存在就新�
 ./xn/build.sh --check
 ./xn/build.sh --dry-run
 
-# 构建成功后上传失败：不重编，直接重传
+# 构建成功后上传失败：不重编，直接重传（会重新生成两个包）
 ./xn/build.sh --package-only --tag v6.0.0 --publish
+
+# 过程包不带 perf.data（只保留各步骤日志）
+./xn/build.sh --package-only --no-perf-data --publish
 
 # 需要 quic 时
 ./xn/build.sh --features quic --publish
@@ -95,30 +99,41 @@ GitHub 托管 runner 没有 PMU/LBR，CI 用 software event：
 
 ## 产物
 
-打包根目录（tar 内）：
+release 上只有两个包（不再单独发布 `.sha256sum` / `.env` / `.build-info.txt` /
+`.manifest.tsv` / `.bolt.env`）。
+
+**二进制包** `xn.x86_64-unknown-linux-gnu.pgo-bolt.tar.xz`（tar 内，不带 `xn.tuned.env`）：
 
 ```text
 xn
 LICENSE
-xn.tuned.env
+docs/configuration.md
 THIRD-PARTY-NOTICES.txt
 ```
 
-上传到 release 的资产：
+**全过程包** `xn.x86_64-unknown-linux-gnu.pgo-bolt.trace.tar.xz`：
 
 ```text
-xn.x86_64-unknown-linux-gnu.pgo-bolt.tar.xz
-xn.x86_64-unknown-linux-gnu.pgo-bolt.tar.xz.sha256sum
-xn.x86_64-unknown-linux-gnu.pgo-bolt.env              # 上游 xn.tuned.env
-xn.x86_64-unknown-linux-gnu.pgo-bolt.build-info.txt   # 源码 commit / 参数 / tag
-xn.x86_64-unknown-linux-gnu.pgo-bolt.manifest.tsv     # 上游 run 目录有就带
-xn.x86_64-unknown-linux-gnu.pgo-bolt.bolt.env         # 上游 run 目录有就带
+build.log          # 本次 release.sh --tuned 的完整输出
+build-info.txt     # 源码 commit / 参数 / tag / 二进制包 sha256
+xn.tuned.env       # 上游 xn.tuned.env（run_dir / host / uname / workload 脱敏）
+run/               # 上游 run 目录原样收录，即“所有步骤”：
+  manifest.tsv     #   各步骤产物清单（build-id / size / sha256）
+  <step>/...       #   每个步骤的日志与产物
+  **/perf.data     #   PGO / BOLT 的 perf 采样原始数据
+  **/perf.fdata、03-bolt/bolt.env、perf.bolt.yaml 等
 ```
 
-`xn.tuned.env` 里已有 `build_id`、`size`、`sha256`、工具版本；`build-info.txt`
-额外记录完整源码 commit 与目标 release。发布前会脱敏：`run_dir` / `workload` /
-`host` / `uname` 置为 `<redacted>`，`manifest.tsv` 的绝对路径换成产物名，`bolt.env`
-里的二进制 / perf / 工具路径同样脱敏。
+- 二进制包随包带上游 `docs/configuration.md`（路径不变）；`xn.tuned.env` 只留在过程包里，
+  构建元数据（`build_id`、`size`、`sha256`、工具版本）都可在那里查到。
+- 二进制包的 sha256 记录在 `build-info.txt` 的 `tarball_sha256`。
+- `run/` 原样收录（含 `manifest.tsv` 的绝对构建路径与各步骤日志），便于复现/排查；
+  `xn.tuned.env` 里的 `run_dir` 改成包内相对路径 `run`，`host` / `uname` / `workload`
+  置为 `<redacted>`。
+- perf.data 很大：`--perf-xz-level N` 控制过程包的 xz 级别（默认 3，`0` 最快）；只想留
+  日志时用 `--no-perf-data`。过程包超过 GitHub release 单资产 2 GiB 上限时脚本会警告。
+- `--publish` 时会顺手删掉旧版本单独发布的 `.sha256sum` / `.env` / `.build-info.txt` /
+  `.manifest.tsv` / `.bolt.env`，保证 release 上只有两个包；要保留加 `--keep-legacy`。
 
 ## 独立 workflow
 
@@ -143,6 +158,8 @@ schedule 绑定：
   既要 checkout，也要创建/更新 release）；本仓库只用它自己的 `GITHUB_TOKEN` 更新
   `XN_LAST_MAIN_SHA`（`actions: write`）。
 - 默认**不加** cargo features；需要时在手动触发的 `features` 输入或本地 `build.sh --features quic` 里加。
+- `Upload build outputs` 只收集 `xn/dist/*.tar.xz`（二进制包 + 过程包），过程包里已经带着
+  `build.log`，不再单独上传。
 
 `xn` workflow 与 DNS/network 的每日 release 相互独立；它失败不会撤回其它 workflow 的资产。
 
@@ -170,4 +187,4 @@ schedule 绑定：
   存在就追加/覆盖同名资产（`--clobber`）。上游仓库的 tag 若已存在但 release 不存在，
   会在该 tag 上补建 release。
 - `--release-repo` 指向非上游仓库时，只追加到已有 release，不会在别的仓库自动建 tag。
-- `--package-only` 不重跑构建，但会重新生成 sha256、build-info 和 tarball；用于上传重试。
+- `--package-only` 不重跑构建，但会重新生成两个包（sha256、build-info 都在过程包里）；用于上传重试。

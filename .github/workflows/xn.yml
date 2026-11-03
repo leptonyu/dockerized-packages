@@ -223,8 +223,8 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: xn-pgo-bolt
-          # 不传 build.log：里面有 runner 的绝对路径；发布资产本身已脱敏。
+          # 只留两个包：二进制包 + 全过程包（build.log / 各步骤 / perf.data）。
+          # 不传 xn/dist/build.log：它已经在过程包里，且带 runner 的绝对路径。
           path: |
-            xn/dist/*
-            !xn/dist/build.log
+            xn/dist/*.tar.xz
           if-no-files-found: ignore
