@@ -335,8 +335,15 @@ prepare_extras() {
 				break
 			fi
 		done
-		[[ -n "$found" ]] || die "缺 extras 产物：${b}（$src/target[/$target]/release/${b}）。
-                     --package-only 不编译；先完整构建一次，或加 --no-extras。"
+		if [[ -z "$found" ]]; then
+			found="$(find "$src/target" -maxdepth 3 -type f -name "$b" -perm -u+x 2>/dev/null | head -n1)"
+		fi
+		if [[ -z "$found" ]]; then
+			die "缺 extras 产物：${b}。找过：${src}/target/${target}/release/${b}、${src}/target/release/${b}，
+                     以及 ${src}/target 下 3 层内的同名可执行文件。
+                     上游 release.sh 的这一步可能没编出它；--package-only 不编译；
+                     也可以加 --no-extras 跳过。"
+		fi
 		extra_paths+=("$b=$found")
 		note "extras 产物：${b} ← ${found}"
 	done
@@ -443,20 +450,20 @@ if ! $package_only; then
 	$tests || build_args+=(--no-tests)
 	$locked && build_args+=(--locked)
 
-	note "release.sh ${build_args[*]}"
-	( cd "$src" && ./release.sh "${build_args[@]}" ) 2>&1 | tee "$out_dir/build.log"
-
-	# extras：cidr / xn-tui 单独打，**不做 PGO/BOLT**（不在 xn 热路径上，普通构建就够）。
-	# 上游明确要求逐包单独调 cargo —— 一次写多个 -p 会做 feature 合并（xn 的 reqwest/rustls
-	# 会被带进 xn-tui，白白胖 2 MB），所以直接用上游 release.sh 的选包逻辑。
+	# extras 先编：cidr / xn-tui **不做 PGO/BOLT**（不在 xn 热路径上，普通构建就够），
+	# 而且**必须逐包单独调用** release.sh —— 一次写多个包（或用多个 -p）会做 feature
+	# 合并：xn 的 reqwest/rustls 会被带进 xn-tui，白胖 2 MB，构建产物也不是同一套。
 	if [[ -n "${extras// /}" ]]; then
-		extra_sel=(${extras//,/ })
-		note "构建 extras（不调优）：${extra_sel[*]}"
 		extra_args=(--target "$target")
 		$locked && extra_args+=(--locked)
-		( cd "$src" && ./release.sh "${extra_sel[@]}" "${extra_args[@]}" ) \
-			2>&1 | tee -a "$out_dir/build.log"
+		for b in ${extras//,/ }; do
+			note "构建 extras（不调优）：${b}（单独调用 release.sh）"
+			( cd "$src" && ./release.sh "$b" "${extra_args[@]}" ) 2>&1 | tee -a "$out_dir/build.log"
+		done
 	fi
+
+	note "release.sh ${build_args[*]}"
+	( cd "$src" && ./release.sh "${build_args[@]}" ) 2>&1 | tee "$out_dir/build.log"
 else
 	# --package-only 不构建，但仍要有源码来拿产物与元数据。
 	if [[ -z "$src" ]]; then

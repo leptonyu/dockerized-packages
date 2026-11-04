@@ -132,8 +132,9 @@ xn-tui.x86_64-unknown-linux-gnu.tar.xz    (+ .sha256sum)   # xn-tui / LICENSE / 
 
 - 上游 package 分别是 `xn-cidr-bin` / `xn-tui-bin`（交付的 bin 名才是 `cidr` / `xn-tui`）；
   它们不在 xn 的热路径上，所以只做普通 `release` 构建，不跑 PGO/BOLT。
-- 构建走上游 `./release.sh cidr xn-tui --target <triple>`：上游逐包单独调 cargo
-  （一次写多个 `-p` 会做 feature 合并，`xn` 的 reqwest/rustls 会被带进 `xn-tui`，白胖 2 MB）。
+- 构建**逐包单独调用**：`./release.sh cidr --target <triple>`、`./release.sh xn-tui --target <triple>`
+  各一次（一次写多个包/多个 `-p` 会做 feature 合并，`xn` 的 reqwest/rustls 会被带进 `xn-tui`，
+  白胖 2 MB）。两包都编在 tuned 构建之前，产物在 `target/release/` 或 `target/<triple>/release/`。
 - `--extras "cidr xn-tui"` 换/加列表，`--no-extras` 全关；`--package-only` 不编译，
   `target[/<triple>]/release/` 里没有就报错（要跳过用 `--no-extras`）。
 
