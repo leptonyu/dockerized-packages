@@ -85,13 +85,20 @@ x86_64 包，不再需要本地提交名单快照。
 
 ## 生成
 
-依赖 `cidr`（`xn-cidr-bin` 的 CLI）。仓库不再提交二进制；`ci.sh` 默认从 xn 的
-`latest` release 下载 `cidr.x86_64-unknown-linux-gnu.tar.xz`，解压到
-`network/.cache/cidr-bin/`（已在 `.gitignore` 里）：
+依赖 `cidr`（`xn-cidr-bin` 的 CLI）。仓库不再提交二进制；`ci.sh` 从 xn 的
+**最新 release**（不钉版本）下载 `cidr.x86_64-unknown-linux-gnu.tar.xz`，解压到
+`network/.cache/cidr-bin/`（已在 `.gitignore` 里）。下载方式按环境自动选：
 
-```text
-https://github.com/leptonyu/xn/releases/download/latest/cidr.x86_64-unknown-linux-gnu.tar.xz
-```
+| 条件 | 下载方式 |
+| --- | --- |
+| 配了 `XN_REPO_TOKEN`（CI） | `gh release download`（走 GitHub API，不传 tag = 最新 release） |
+| 没配 token（公开仓库） | `curl` GitHub 的 latest 地址：`https://github.com/leptonyu/xn/releases/latest/download/cidr.x86_64-unknown-linux-gnu.tar.xz` |
+| 配了 `CIDR_URL` | 直接 `curl` 这个地址（镜像 / 固定 tag / 私有镜像） |
+
+> 私有仓库的 release 资产不能走网页下载地址（`releases/download/<tag>/<asset>`），
+> 带 `Authorization` 也是 404；必须走 API，所以 CI 里用 `gh`。
+> 另外 “latest” 的正确路径顺序是 `releases/latest/download/<asset>`，
+> 不是 `releases/download/latest/<asset>`（后者把 `latest` 当成一个真实 tag）。
 
 本地也可以把 cidr 放到 `PATH`，或用 `CIDR=/path/to/cidr` 指定。`ci.sh` 支持的
 环境变量：
@@ -99,7 +106,10 @@ https://github.com/leptonyu/xn/releases/download/latest/cidr.x86_64-unknown-linu
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
 | `CIDR` | 空（走下载） | 已有 cidr 的路径或命令名，设置后不再下载 |
-| `CIDR_URL` | 上面的 `latest` 包 | 换成固定 tag 或镜像地址 |
+| `XN_REPO` | `leptonyu/xn` | release 所在仓库 |
+| `CIDR_ASSET` | `cidr.x86_64-unknown-linux-gnu.tar.xz` | release 里的资产名 |
+| `CIDR_TAG` | 空（最新 release） | 钉到某个 tag，例如 `v6.0.0` |
+| `CIDR_URL` | 空 | 显式下载地址；设置后用它 curl，不再走 gh |
 | `XN_REPO_TOKEN` | 空 | xn 是私有仓库，下载 release 资产用；和 xn 构建共用同一个 secret，只读即可 |
 | `CIDR_SHA256` | 空 | 固定包的 sha256，设置后下载完先校验 |
 
@@ -148,8 +158,9 @@ SCANNERS_TARBALL=/path/to/internet-scanners.tar.gz ./gen.sh block
    `apple.conf` / `filter_49`），建当天 tag/release 并上传 DNS 资产；
 2. `network`（`needs: dns`）：普通 `checkout`（不再需要 LFS），`actions/cache`
    缓存 `~/.cache/cidr`；用 `secrets.IPINFO_TOKEN` 和 `secrets.XN_REPO_TOKEN` 跑
-   [`ci.sh`](ci.sh)——`ci.sh` 先从 `CIDR_URL` 下载 cidr，把每份 `.txt` 单独压成
-   `.xz`，release 上传八份 `.txt.xz` 和各自的 `.txt.xz.sha256sum`（不打包 tar）。
+   [`ci.sh`](ci.sh)——`ci.sh` 先用 `gh release download` 拉最新的 cidr，把每份
+   `.txt` 单独压成 `.xz`，release 上传八份 `.txt.xz` 和各自的 `.txt.xz.sha256sum`
+   （不打包 tar）。
 
 缓存和 `cidr.yaml` 的 `cache_max_age: 12h` 对齐：key 是 **UTC 日期 + 12h 桶**，
 `restore-keys: cidr-src-` 取最近一份。同桶重跑命中缓存、不重复下载；隔天/换桶
@@ -192,8 +203,8 @@ network job 会先用 `gh release delete-asset` 清掉它们，再上传新的 `
 >
 > `cidr` 从 xn 的私有 release 下载，用的是和 xn 构建同一个仓库 secret
 > `XN_REPO_TOKEN`（[`xn.yml`](../.github/workflows/xn.yml) 里那个）。下载只需要
-> Contents: Read，现有的 write 权限当然也够；xn 公开后这个 secret 可以留着也能删，
-> `ci.sh` 只在变量非空时才带 `Authorization`。
+> Contents: Read，现有的 write 权限当然也够；xn 公开后可以删掉这个 secret，
+> `ci.sh` 会自动退回 `curl` 公开仓库的 latest 地址。
 
 ## 与 machine 的对应关系
 

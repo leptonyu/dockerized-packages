@@ -25,8 +25,8 @@
 #   IPINFO_TOKEN=xxx ./gen.sh all   # 首次/缓存过期时需要
 #   SCANNERS_TARBALL=/path/to/internet-scanners.tar.gz ./gen.sh block  # 离线
 #
-# cidr 是 rust/xn 的 xn-cidr-bin 二进制；CI 由 ci.sh 从 xn 的 release 下载
-# （见 ci.sh 的 CIDR_URL），本地用 PATH 里的 cidr 或 CIDR=... 指定。
+# cidr 是 rust/xn 的 xn-cidr-bin 二进制；CI 由 ci.sh 用 gh 从 xn 的最新 release
+# 下载（见 ci.sh），本地用 PATH 里的 cidr 或 CIDR=... 指定。
 
 set -euo pipefail
 

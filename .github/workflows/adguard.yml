@@ -86,8 +86,8 @@ jobs:
           restore-keys: |
             cidr-src-
       - name: Generate network lists
-        # cidr 不再随仓库提交：ci.sh 默认从 xn 的 release 下载
-        # cidr.x86_64-unknown-linux-gnu.tar.xz；xn 是私有仓库，复用 xn 构建的 secret。
+        # cidr 不再随仓库提交：ci.sh 用 gh 从 xn 的最新 release 下载
+        # cidr.x86_64-unknown-linux-gnu.tar.xz（私有仓库必须走 API）；复用 xn 构建的 secret。
         env:
           IPINFO_TOKEN: ${{ secrets.IPINFO_TOKEN }}
           XN_REPO_TOKEN: ${{ secrets.XN_REPO_TOKEN }}
