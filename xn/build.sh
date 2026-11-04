@@ -17,7 +17,7 @@
 #   xn.<triple>.pgo-bolt.trace.tar.xz  trace：trace-files.txt 列出的诊断文件 + xn.tuned.env
 #                                      + 两份清单 + build.log / build-info.txt
 #   SHA256SUMS                         两行 sha256 filename
-# 另外（本脚本自己打，不调优）：
+# 另外（同样 release.sh --pack，不调优；老版本才回退手工打）：
 #   cidr.<triple>.tar.xz / xn-tui.<triple>.tar.xz（各带 .sha256sum）
 #
 # 为什么必须原生 Linux x86_64：BOLT 需要 --emit-relocs 的重定位节，zig 交叉档
@@ -99,7 +99,7 @@ usage() {
 
 打包由上游 release.sh 完成（`--tuned --pack`），本脚本只上传：
   xn.<triple>.pgo-bolt.tar.xz / xn.<triple>.pgo-bolt.trace.tar.xz / SHA256SUMS
-  外加 cidr.<triple>.tar.xz / xn-tui.<triple>.tar.xz（各带 .sha256sum，不调优）
+  外加 cidr.<triple>.tar.xz / xn-tui.<triple>.tar.xz（也是 release.sh --pack，不调优）
 EOF
 }
 
@@ -312,41 +312,18 @@ prepare_source() {
 	prepare_version
 }
 
-# 本次要传的 extras（bin 名数组）。
-extra_bins=()
-extra_paths=()
-prepare_extras() {
-	local b found cand
-	extra_bins=()
-	[[ -n "${extras// /}" ]] || return 0
-	extra_bins=(${extras//,/ })
-	for b in ${extra_bins[@]+"${extra_bins[@]}"}; do
-		case "$b" in
-			"" | .* | *[!A-Za-z0-9._-]*) die "extras 里的名字不合法：${b}" ;;
-		esac
-	done
-	# 本机 host == target 时上游走普通 cargo build（target/release）；跨编才落到
-	# target/<triple>/release。两个位置都认。
-	for b in ${extra_bins[@]+"${extra_bins[@]}"}; do
-		found=""
-		for cand in "$src/target/$target/release/$b" "$src/target/release/$b"; do
-			if [[ -x "$cand" ]]; then
-				found="$cand"
-				break
-			fi
-		done
-		if [[ -z "$found" ]]; then
-			found="$(find "$src/target" -maxdepth 3 -type f -name "$b" -perm -u+x 2>/dev/null | head -n1)"
+# 找 extras 的可执行文件（release.sh --pack 没出包时的回退路径要用）。
+find_extra_bin() { # $1=bin 名 → stdout 路径，失败返回 1
+	local b="$1" cand found=""
+	for cand in "$src/target/$target/release/$b" "$src/target/release/$b"; do
+		if [[ -x "$cand" ]]; then
+			printf '%s\n' "$cand"
+			return 0
 		fi
-		if [[ -z "$found" ]]; then
-			die "缺 extras 产物：${b}。找过：${src}/target/${target}/release/${b}、${src}/target/release/${b}，
-                     以及 ${src}/target 下 3 层内的同名可执行文件。
-                     上游 release.sh 的这一步可能没编出它；--package-only 不编译；
-                     也可以加 --no-extras 跳过。"
-		fi
-		extra_paths+=("$b=$found")
-		note "extras 产物：${b} ← ${found}"
 	done
+	found="$(find "$src/target" -maxdepth 3 -type f -name "$b" -perm -u+x 2>/dev/null | head -n1)"
+	[[ -n "$found" ]] || return 1
+	printf '%s\n' "$found"
 }
 
 # ---------------------------------------------------------------- dry-run
@@ -454,10 +431,10 @@ if ! $package_only; then
 	# 而且**必须逐包单独调用** release.sh —— 一次写多个包（或用多个 -p）会做 feature
 	# 合并：xn 的 reqwest/rustls 会被带进 xn-tui，白胖 2 MB，构建产物也不是同一套。
 	if [[ -n "${extras// /}" ]]; then
-		extra_args=(--target "$target")
+		extra_args=(--target "$target" --pack)
 		$locked && extra_args+=(--locked)
 		for b in ${extras//,/ }; do
-			note "构建 extras（不调优）：${b}（单独调用 release.sh）"
+			note "构建 extras（不调优）：${b}（单独调用 release.sh --pack）"
 			( cd "$src" && ./release.sh "$b" "${extra_args[@]}" ) 2>&1 | tee -a "$out_dir/build.log"
 		done
 	fi
@@ -499,19 +476,51 @@ note "产物：$(basename "$runtime_tar")（$(human_bytes "$(bytes_of "$runtime_
 note "      $(basename "$trace_tar")（$(human_bytes "$(bytes_of "$trace_tar")")）"
 cp -p "$runtime_tar" "$trace_tar" "$sums" "$out_dir/"
 
-# 校验和自检（SHA256SUMS 里是「sha256 filename」，在 out_dir 里核对）。
-if command -v sha256sum >/dev/null 2>&1; then
-	( cd "$out_dir" && sha256sum -c SHA256SUMS >/dev/null ) || die "SHA256SUMS 校验失败（$out_dir）"
-else
-	( cd "$out_dir" && shasum -a 256 -c SHA256SUMS >/dev/null ) || die "SHA256SUMS 校验失败（$out_dir）"
-fi
-note "SHA256SUMS 校验通过"
+# 校验和自检：只对两个 xn 包按 SHA256SUMS 里的行核对（extras 的 pack 若也写
+# SHA256SUMS，行数/内容可能被动过，别让 extras 的行把 xn 的校验搞成假阴性）。
+verify_sum() { # $1=文件
+	local f="$1" base want got
+	base="$(basename "$f")"
+	want="$(awk -v n="$base" '$2 == n { print $1; exit }' "$out_dir/SHA256SUMS")"
+	[[ -n "$want" ]] || die "SHA256SUMS 里没有 ${base} 的校验和（$out_dir/SHA256SUMS）"
+	got="$(sha256_file "$f")"
+	[[ "$got" == "$want" ]] || die "${base} 校验失败（期望 ${want}，实际 ${got}）"
+}
+verify_sum "$out_dir/$(basename "$runtime_tar")"
+verify_sum "$out_dir/$(basename "$trace_tar")"
+note "SHA256SUMS 校验通过（runtime + trace）"
 
 # ---------------------------------------------------------------- extras package
-prepare_extras
-for kv in ${extra_paths[@]+"${extra_paths[@]}"}; do
-	eb="${kv%%=*}"
-	ebin="${kv#*=}"
+# cidr / xn-tui 也支持 release.sh --pack：包直接落在 target/<triple>/release/，
+# 名字是 <bin>.<triple>.tar.xz（可能有配套的 .sha256sum）。找不到才回退手工打。
+extra_list=(${extras//,/ })
+for eb in ${extra_list[@]+"${extra_list[@]}"}; do
+	epkg=""
+	shopt -s nullglob
+	for f in "$release_dir/$eb".*.tar.xz; do
+		case "$f" in
+			*.trace.tar.xz) continue ;;
+		esac
+		epkg="$f"
+		break
+	done
+	shopt -u nullglob
+	if [[ -n "$epkg" ]]; then
+		ename="$(basename "$epkg")"
+		cp -p "$epkg" "$out_dir/"
+		if [[ -f "$epkg.sha256sum" ]]; then
+			cp -p "$epkg.sha256sum" "$out_dir/"
+		else
+			printf '%s  %s\n' "$(sha256_file "$out_dir/$ename")" "$ename" > "$out_dir/$ename.sha256sum"
+		fi
+		extra_assets+=("$out_dir/$ename" "$out_dir/$ename.sha256sum")
+		note "extras 包：${ename}（release.sh --pack，$(human_bytes "$(bytes_of "$out_dir/$ename")")）"
+		continue
+	fi
+	# 回退：老 release.sh 不带 --pack，或这步没编出包 —— 手工打 bin / LICENSE / NOTICES。
+	ebin="$(find_extra_bin "$eb")" || die "缺 extras 产物：${eb}。找过：${src}/target/${target}/release/${eb}、${src}/target/release/${eb}，
+                     以及 ${src}/target 下 3 层内的同名可执行文件；release.sh 也没给出 ${eb}.*.tar.xz。
+                     --package-only 不编译；也可以加 --no-extras 跳过。"
 	estage="$out_dir/.stage-$eb.$target"
 	rm -rf "$estage"
 	mkdir -p "$estage"
@@ -525,7 +534,7 @@ for kv in ${extra_paths[@]+"${extra_paths[@]}"}; do
 	else
 		warn "没有 THIRD-PARTY-NOTICES.txt：$eb.$target.tar.xz 不带许可清单"
 	fi
-	note "打包 $eb.$target.tar.xz（${efiles[*]}，不调优）"
+	note "打包 $eb.$target.tar.xz（${efiles[*]}，不调优，手工回退）"
 	tar -C "$estage" -cJf "$out_dir/$eb.$target.tar.xz" "${efiles[@]}"
 	rm -rf "$estage"
 	eb_sha="$(sha256_file "$out_dir/$eb.$target.tar.xz")"

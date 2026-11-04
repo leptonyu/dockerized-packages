@@ -123,7 +123,7 @@ SHA256SUMS                                         # 两行 sha256 filename
 - 发布时上传的就是这三份；`build.sh` 还会把 `trace-files.txt` / `trace-replay-files.txt`
   的生成交给上游（`release.sh --pack`），不在本地做任何裁剪。
 
-**额外二进制 `cidr` / `xn-tui`（不调优，`build.sh` 自己打）**：
+**额外二进制 `cidr` / `xn-tui`（不调优，同样走 `release.sh --pack`）**：
 
 ```text
 cidr.x86_64-unknown-linux-gnu.tar.xz      (+ .sha256sum)   # cidr / LICENSE / THIRD-PARTY-NOTICES.txt
@@ -132,9 +132,12 @@ xn-tui.x86_64-unknown-linux-gnu.tar.xz    (+ .sha256sum)   # xn-tui / LICENSE / 
 
 - 上游 package 分别是 `xn-cidr-bin` / `xn-tui-bin`（交付的 bin 名才是 `cidr` / `xn-tui`）；
   它们不在 xn 的热路径上，所以只做普通 `release` 构建，不跑 PGO/BOLT。
-- 构建**逐包单独调用**：`./release.sh cidr --target <triple>`、`./release.sh xn-tui --target <triple>`
+- 构建**逐包单独调用**：`./release.sh cidr --target <triple> --pack`、`./release.sh xn-tui --target <triple> --pack`
   各一次（一次写多个包/多个 `-p` 会做 feature 合并，`xn` 的 reqwest/rustls 会被带进 `xn-tui`，
-  白胖 2 MB）。两包都编在 tuned 构建之前，产物在 `target/release/` 或 `target/<triple>/release/`。
+  白胖 2 MB）。两包都在 tuned 构建之前编完，包和 `.sha256sum` 由 release.sh 放到
+  `target/<triple>/release/`，`build.sh` 只复制。
+- 老 release.sh 不支持 extras 的 `--pack` 时回退到手工打（bin / LICENSE / NOTICES），日志里会标
+  `手工回退`。
 - `--extras "cidr xn-tui"` 换/加列表，`--no-extras` 全关；`--package-only` 不编译，
   `target[/<triple>]/release/` 里没有就报错（要跳过用 `--no-extras`）。
 
