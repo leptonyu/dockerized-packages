@@ -13,8 +13,10 @@
 #   5) 需要时 gh release upload。
 #
 # 产物（target/<triple>/release/，本脚本再复制到 --out-dir）：
-#   xn.<triple>.pgo-bolt.tar.xz        runtime：xn / LICENSE / docs/configuration.md / THIRD-PARTY-NOTICES.txt
-#   xn.<triple>.pgo-bolt.trace.tar.xz  trace：trace-files.txt 列出的诊断文件 + xn.tuned.env
+#   xn.<triple>.tuned.tar.xz        runtime：xn / LICENSE / docs/configuration.md / THIRD-PARTY-NOTICES.txt
+#   xn.<triple>.tuned.trace.tar.xz  trace：trace-files.txt 列出的诊断文件 + xn.tuned.env
+#   （上游 release.sh 产出的名字带 flavor（Linux 是 pgo-bolt、macOS 是 pgo），
+#    发布前统一改名成 .tuned.）
 #                                      + 两份清单 + build.log / build-info.txt
 #   SHA256SUMS                         两行 sha256 filename（本地校验用，不发布）
 #   *.tar.xz.sha256sum                 每个包自己的校验和（发布用）
@@ -99,7 +101,7 @@ usage() {
   -h, --help           本帮助
 
 打包由上游 release.sh 完成（`--tuned --pack`），本脚本只上传：
-  xn.<triple>.pgo-bolt.tar.xz / xn.<triple>.pgo-bolt.trace.tar.xz（各带 .sha256sum）
+  xn.<triple>.tuned.tar.xz / xn.<triple>.tuned.trace.tar.xz（各带 .sha256sum）
   外加 cidr.<triple>.tar.xz / xn-tui.<triple>.tar.xz（也是 release.sh --pack，不调优）
 EOF
 }
@@ -482,8 +484,13 @@ shopt -u nullglob
 [[ -n "$trace_tar" ]] || die "缺 trace 包：$release_dir/xn.*.trace.tar.xz"
 [[ -n "$sums" ]] || die "缺 SHA256SUMS：$release_dir/SHA256SUMS"
 
-note "产物：$(basename "$runtime_tar")（$(human_bytes "$(bytes_of "$runtime_tar")")）"
-note "      $(basename "$trace_tar")（$(human_bytes "$(bytes_of "$trace_tar")")）"
+runtime_base="$(basename "$runtime_tar")"
+trace_base="$(basename "$trace_tar")"
+runtime_out="$out_dir/xn.$target.tuned.tar.xz"
+trace_out="$out_dir/xn.$target.tuned.trace.tar.xz"
+
+note "产物：${runtime_base}（$(human_bytes "$(bytes_of "$runtime_tar")")）"
+note "      ${trace_base}（$(human_bytes "$(bytes_of "$trace_tar")")）"
 cp -p "$runtime_tar" "$trace_tar" "$sums" "$out_dir/"
 
 # 校验和自检：只对两个 xn 包按 SHA256SUMS 里的行核对（extras 的 pack 若也写
@@ -496,9 +503,20 @@ verify_sum() { # $1=文件
 	got="$(sha256_file "$f")"
 	[[ "$got" == "$want" ]] || die "${base} 校验失败（期望 ${want}，实际 ${got}）"
 }
-verify_sum "$out_dir/$(basename "$runtime_tar")"
-verify_sum "$out_dir/$(basename "$trace_tar")"
+verify_sum "$out_dir/$runtime_base"
+verify_sum "$out_dir/$trace_base"
 note "SHA256SUMS 校验通过（runtime + trace）"
+
+# 发布名固定成 .tuned.：不把上游的 flavor（pgo-bolt / pgo）暴露给消费端。
+# 本地校验在改名前已经做完，SHA256SUMS 只用于这一步。
+if [[ "$out_dir/$runtime_base" != "$runtime_out" ]]; then
+	mv -f "$out_dir/$runtime_base" "$runtime_out"
+fi
+if [[ "$out_dir/$trace_base" != "$trace_out" ]]; then
+	mv -f "$out_dir/$trace_base" "$trace_out"
+fi
+runtime_tar="$runtime_out"
+trace_tar="$trace_out"
 
 # ---------------------------------------------------------------- extras package
 # cidr / xn-tui 也支持 release.sh --pack：包直接落在 target/<triple>/release/，
@@ -650,6 +668,13 @@ if $publish; then
 			"$base_name.manifest.tsv"
 			"$base_name.bolt.env"
 		)
+		# 发布名从上游 flavor（pgo-bolt / pgo）统一改成 .tuned. 后，清掉旧名字。
+		if [[ "$runtime_base" != "$(basename "$runtime_tar")" ]]; then
+			legacy+=(
+				"$runtime_base" "$runtime_base.sha256sum"
+				"$trace_base" "$trace_base.sha256sum"
+			)
+		fi
 		names="$(gh release view "$tag" --repo "$release_repo" --json assets --jq '.assets[].name' 2>/dev/null || true)"
 		for name in "${legacy[@]}"; do
 			if grep -qxF -- "$name" <<<"$names"; then

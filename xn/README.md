@@ -107,11 +107,11 @@ GitHub 托管 runner 没有 PMU/LBR，CI 用 software event：
 `target/x86_64-unknown-linux-gnu/release/`，`build.sh` 再复制到 `--out-dir`（默认 `xn/dist/`）：
 
 ```text
-xn.x86_64-unknown-linux-gnu.pgo-bolt.tar.xz        # runtime 包
-xn.x86_64-unknown-linux-gnu.pgo-bolt.tar.xz.sha256sum
-xn.x86_64-unknown-linux-gnu.pgo-bolt.trace.tar.xz  # trace 包
-xn.x86_64-unknown-linux-gnu.pgo-bolt.trace.tar.xz.sha256sum
-SHA256SUMS                                         # 上游生成的汇总，只做本地校验，不发布
+xn.x86_64-unknown-linux-gnu.tuned.tar.xz        # runtime 包
+xn.x86_64-unknown-linux-gnu.tuned.tar.xz.sha256sum
+xn.x86_64-unknown-linux-gnu.tuned.trace.tar.xz  # trace 包
+xn.x86_64-unknown-linux-gnu.tuned.trace.tar.xz.sha256sum
+SHA256SUMS                                      # 上游生成的汇总，只做本地校验，不发布
 ```
 
 - **runtime 包**：`xn` / `LICENSE` / `docs/configuration.md` / `THIRD-PARTY-NOTICES.txt`。
@@ -120,10 +120,12 @@ SHA256SUMS                                         # 上游生成的汇总，只
   `build-info.txt`。`trace-replay-files.txt` 里列的 `perf.data` / `xn.stage2` **只留清单、
   不打进包**；需要逐字节重放 BOLT 时另收。
 - **校验和**：每个包一个同名的 `<asset>.sha256sum`（发布的就是这个），
-  `(cd xn/dist && shasum -a 256 -c xn.x86_64-unknown-linux-gnu.pgo-bolt.tar.xz.sha256sum)`；
+  `(cd xn/dist && shasum -a 256 -c xn.x86_64-unknown-linux-gnu.tuned.tar.xz.sha256sum)`；
   上游生成的 `SHA256SUMS` 只用于本地校验，不再上传。
-- flavor：Linux 上是 `pgo-bolt`，macOS PGO-only 自动变 `pgo`。`build.sh` 用
-  `xn.*.tar.xz` / `xn.*.trace.tar.xz` glob 认产物，不写死 flavor。
+- flavor：上游产出的文件名带 flavor（Linux 是 `pgo-bolt`，macOS PGO-only 是 `pgo`）。
+  `build.sh` 用 `xn.*.tar.xz` / `xn.*.trace.tar.xz` glob 认产物，**发布时统一改名成
+  `.tuned.`**（`xn.<triple>.tuned.tar.xz` / `xn.<triple>.tuned.trace.tar.xz`），消费端
+  不用关心 flavor；旧名字的资产会在发布时清掉。
 - 发布时每个包 + 自己的 `.sha256sum` 一起上传（不再发汇总的 `SHA256SUMS`）；
   `build.sh` 还会把 `trace-files.txt` / `trace-replay-files.txt`
   的生成交给上游（`release.sh --pack`），不在本地做任何裁剪。
@@ -189,7 +191,7 @@ schedule 绑定：
   `--emit-relocs`，musl 档能否保留重定位要单独验证。当前 `release.sh --tuned` 只做
   target == host 的 gnu 档，容器化时复用同一 `build.sh` 的打包/发布段。
 - **macOS**：只能做 PGO 的 collect/optimize（zig 交叉），BOLT 不可用；届时增加
-  `--no-bolt` 分支，产物命名区分 `.pgo.`，不覆盖本模块的 `.pgo-bolt.` 资产。
+  `--no-bolt` 分支，产物命名区分 `.pgo.`，不覆盖本模块的 `.tuned.` 资产。
 - **发布目标**：默认回到 `XN_REPO` / `--repo` 的 `v<version>` release；其他仓库用
   `--release-repo` 指定（不会自动在其上创建 release）。
 
