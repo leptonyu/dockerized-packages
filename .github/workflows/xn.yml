@@ -227,5 +227,4 @@ jobs:
           path: |
             xn/dist/*.tar.xz
             xn/dist/*.sha256sum
-            xn/dist/SHA256SUMS
           if-no-files-found: ignore

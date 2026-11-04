@@ -16,7 +16,8 @@
 #   xn.<triple>.pgo-bolt.tar.xz        runtime：xn / LICENSE / docs/configuration.md / THIRD-PARTY-NOTICES.txt
 #   xn.<triple>.pgo-bolt.trace.tar.xz  trace：trace-files.txt 列出的诊断文件 + xn.tuned.env
 #                                      + 两份清单 + build.log / build-info.txt
-#   SHA256SUMS                         两行 sha256 filename
+#   SHA256SUMS                         两行 sha256 filename（本地校验用，不发布）
+#   *.tar.xz.sha256sum                 每个包自己的校验和（发布用）
 # 另外（同样 release.sh --pack，不调优；老版本才回退手工打）：
 #   cidr.<triple>.tar.xz / xn-tui.<triple>.tar.xz（各带 .sha256sum）
 #
@@ -98,7 +99,7 @@ usage() {
   -h, --help           本帮助
 
 打包由上游 release.sh 完成（`--tuned --pack`），本脚本只上传：
-  xn.<triple>.pgo-bolt.tar.xz / xn.<triple>.pgo-bolt.trace.tar.xz / SHA256SUMS
+  xn.<triple>.pgo-bolt.tar.xz / xn.<triple>.pgo-bolt.trace.tar.xz（各带 .sha256sum）
   外加 cidr.<triple>.tar.xz / xn-tui.<triple>.tar.xz（也是 release.sh --pack，不调优）
 EOF
 }
@@ -177,6 +178,15 @@ sha256_file() {
 
 # 文件字节数（日志里报「多大」用）。
 bytes_of() { wc -c < "$1" | tr -d '[:space:]'; }
+
+# 是否在本次要上传的资产列表里（verify_published 用）。
+is_uploaded_asset() {
+	local n="$1" a
+	for a in "${assets[@]}"; do
+		if [[ "$(basename "$a")" == "$n" ]]; then return 0; fi
+	done
+	return 1
+}
 
 # 字节数 → 人读。
 human_bytes() { # $1=字节数
@@ -357,9 +367,9 @@ print_plan() {
 	printf '+ 打包 extras（不调优）：%s\n' "${extras:-<none>}"
 	if $publish; then
 		if [[ -n "$tag" ]]; then
-			printf '+ gh release create/upload %q --repo %q --clobber <两个包 + SHA256SUMS + extras>\n' "$tag" "$release_repo"
+			printf '+ gh release create/upload %q --repo %q --clobber <包 + 各自的 .sha256sum + extras>\n' "$tag" "$release_repo"
 		else
-			printf '+ gh release create/upload v<Cargo.toml version> --repo %q --clobber <两个包 + SHA256SUMS + extras>\n' "$release_repo"
+			printf '+ gh release create/upload v<Cargo.toml version> --repo %q --clobber <包 + 各自的 .sha256sum + extras>\n' "$release_repo"
 		fi
 	fi
 }
@@ -544,13 +554,63 @@ for eb in ${extra_list[@]+"${extra_list[@]}"}; do
 done
 
 # ---------------------------------------------------------------- publish
-# release 上放：runtime 包 + trace 包 + SHA256SUMS（3 个文件），再加 extras 的包与校验和。
+# release 上放：runtime / trace / extras 各自一个包 + 同名的 <asset>.sha256sum。
+# 不再发汇总的 SHA256SUMS：校验和与资产一一对应，消费端按 <asset>.sha256sum 校验。
+for f in "$(basename "$runtime_tar")" "$(basename "$trace_tar")"; do
+	printf '%s  %s\n' "$(sha256_file "$out_dir/$f")" "$f" > "$out_dir/$f.sha256sum"
+done
+
 assets=(
 	"$out_dir/$(basename "$runtime_tar")"
 	"$out_dir/$(basename "$trace_tar")"
-	"$out_dir/SHA256SUMS"
 	${extra_assets[@]+"${extra_assets[@]}"}
+	# 校验和最后传：消费端最坏看到旧包 + 旧校验和，不会新校验和配旧包
+	"$out_dir/$(basename "$runtime_tar").sha256sum"
+	"$out_dir/$(basename "$trace_tar").sha256sum"
 )
+
+# release 资产是一个个传的，不是原子操作；传完从 API 再确认一遍，防止
+# 「包换了、.sha256sum 还是旧的」这种半更新。一致返回 0。
+verify_published() {
+	local tmp a name digest want bad=0
+
+	tmp="$(mktemp -d)"
+	if ! gh release download "$tag" --repo "$release_repo" --pattern '*.sha256sum' \
+		--dir "$tmp" --clobber >/dev/null 2>&1; then
+		rm -rf "$tmp"
+		warn "release 上取不到 *.sha256sum"
+		return 1
+	fi
+	for a in "${assets[@]}"; do
+		case "$a" in
+			*.sha256sum) ;;
+			*) continue ;;
+		esac
+		name="$(basename "$a")"
+		if [[ ! -f "$tmp/$name" ]]; then
+			warn "release 上缺 $name"
+			bad=1
+		elif ! cmp -s "$tmp/$name" "$a"; then
+			warn "release 上的 $name 与本次构建不一致"
+			bad=1
+		fi
+	done
+	rm -rf "$tmp"
+
+	# GitHub 会给 release asset 记 sha256 digest；老 gh / 没有该字段时跳过。
+	while read -r name digest; do
+		[[ -n "$digest" && "$digest" != "null" ]] || continue
+		is_uploaded_asset "$name" || continue
+		want="$(sha256_file "$out_dir/$name")"
+		if [[ "$digest" != "sha256:$want" ]]; then
+			warn "release 上 $name 的 digest 对不上（$digest ≠ sha256:$want）"
+			bad=1
+		fi
+	done < <(gh api "repos/$release_repo/releases/tags/$tag" \
+		--jq '.assets[] | "\(.name) \(.digest)"' 2>/dev/null || true)
+
+	return "$bad"
+}
 
 if $publish; then
 	command -v gh >/dev/null 2>&1 || die "--publish 需要 gh CLI"
@@ -568,15 +628,23 @@ if $publish; then
 
 - \`$(basename "$runtime_tar")\`: runtime package (xn / LICENSE / docs/configuration.md / THIRD-PARTY-NOTICES.txt)
 - \`$(basename "$trace_tar")\`: build trace (trace-files.txt 列出的诊断文件 + xn.tuned.env + 清单 + build.log / build-info.txt)
-- \`SHA256SUMS\`: \`shasum -a 256 -c SHA256SUMS\`"
+- \`*.tar.xz.sha256sum\`: 每个包自己的校验和（\`shasum -a 256 -c <asset>.sha256sum\`）"
 	fi
 	note "上传 ${#assets[@]} 个资产到 $release_repo@$tag"
 	gh release upload "$tag" --repo "$release_repo" --clobber "${assets[@]}"
+	if ! verify_published; then
+		warn "release 资产与本次构建不一致，重传一次"
+		gh release upload "$tag" --repo "$release_repo" --clobber "${assets[@]}"
+		verify_published ||
+			die "release 资产仍与本次构建不一致（是否有别的 workflow 在写 $release_repo@$tag？）"
+	fi
+	note "release 资产自检通过（*.sha256sum + digest）"
 	# 旧版曾把 env / build-info / manifest / bolt.env 单独发布；默认清掉。
 	if $prune_legacy; then
 		base_name="$(basename "$runtime_tar")"
 		base_name="${base_name%.tar.xz}"
 		legacy=(
+			"SHA256SUMS" # 旧版汇总校验和，改成每个包一个 .sha256sum
 			"$base_name.env"
 			"$base_name.build-info.txt"
 			"$base_name.manifest.tsv"
@@ -596,4 +664,4 @@ else
 	note "未加 --publish；产物在 $out_dir"
 fi
 
-note "完成：$(basename "$runtime_tar") / $(basename "$trace_tar") / SHA256SUMS 在 $out_dir"
+note "完成：$(basename "$runtime_tar") / $(basename "$trace_tar") / *.sha256sum 在 $out_dir"

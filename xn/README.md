@@ -108,8 +108,10 @@ GitHub 托管 runner 没有 PMU/LBR，CI 用 software event：
 
 ```text
 xn.x86_64-unknown-linux-gnu.pgo-bolt.tar.xz        # runtime 包
+xn.x86_64-unknown-linux-gnu.pgo-bolt.tar.xz.sha256sum
 xn.x86_64-unknown-linux-gnu.pgo-bolt.trace.tar.xz  # trace 包
-SHA256SUMS                                         # 两行 sha256 filename
+xn.x86_64-unknown-linux-gnu.pgo-bolt.trace.tar.xz.sha256sum
+SHA256SUMS                                         # 上游生成的汇总，只做本地校验，不发布
 ```
 
 - **runtime 包**：`xn` / `LICENSE` / `docs/configuration.md` / `THIRD-PARTY-NOTICES.txt`。
@@ -117,10 +119,13 @@ SHA256SUMS                                         # 两行 sha256 filename
   `hot-functions.tsv`、`xn.fdata` 等）+ `xn.tuned.env` + 两份清单 +（可选）`build.log` /
   `build-info.txt`。`trace-replay-files.txt` 里列的 `perf.data` / `xn.stage2` **只留清单、
   不打进包**；需要逐字节重放 BOLT 时另收。
-- **SHA256SUMS**：`(cd xn/dist && shasum -a 256 -c SHA256SUMS)`。
+- **校验和**：每个包一个同名的 `<asset>.sha256sum`（发布的就是这个），
+  `(cd xn/dist && shasum -a 256 -c xn.x86_64-unknown-linux-gnu.pgo-bolt.tar.xz.sha256sum)`；
+  上游生成的 `SHA256SUMS` 只用于本地校验，不再上传。
 - flavor：Linux 上是 `pgo-bolt`，macOS PGO-only 自动变 `pgo`。`build.sh` 用
   `xn.*.tar.xz` / `xn.*.trace.tar.xz` glob 认产物，不写死 flavor。
-- 发布时上传的就是这三份；`build.sh` 还会把 `trace-files.txt` / `trace-replay-files.txt`
+- 发布时每个包 + 自己的 `.sha256sum` 一起上传（不再发汇总的 `SHA256SUMS`）；
+  `build.sh` 还会把 `trace-files.txt` / `trace-replay-files.txt`
   的生成交给上游（`release.sh --pack`），不在本地做任何裁剪。
 
 **额外二进制 `cidr` / `xn-tui`（不调优，同样走 `release.sh --pack`）**：
@@ -165,7 +170,7 @@ schedule 绑定：
   `XN_LAST_MAIN_SHA`（`actions: write`）。
 - 默认**不加** cargo features；需要时在手动触发的 `features` 输入或本地 `build.sh --features quic` 里加。
 - `Upload build outputs` 收集 `xn/dist/*.tar.xz`、`xn/dist/*.sha256sum` 和
-  `xn/dist/SHA256SUMS`（runtime + trace + 校验和，加 extras 两个包），`build.log` 已经在
+  每个包的 `.sha256sum`（runtime + trace + extras），`build.log` 已经在
   trace 包里，不再单独上传。
 
 `xn` workflow 与 DNS/network 的每日 release 相互独立；它失败不会撤回其它 workflow 的资产。
@@ -193,6 +198,10 @@ schedule 绑定：
 - `--publish` 默认在 `XN_REPO` 上发 `v<Cargo.toml version>`：不存在就新建 release，
   存在就追加/覆盖同名资产（`--clobber`）。上游仓库的 tag 若已存在但 release 不存在，
   会在该 tag 上补建 release。
+- **同一版本重建 hash 会变**：PGO+BOLT 不可复现，`v<version>` 的 tar 每次重建都不同。
+  发布现在按包上传 `<asset>.sha256sum`（校验和最后传），上传后从 API 自检校验和内容与
+  asset digest，不一致就重传一次、还不对就让 job 失败；但消费端不要跨构建 pin hash，
+  要稳定就按具体构建钉（tag 带构建号目前还没做）。旧的汇总 `SHA256SUMS` 资产会被删掉。
 - `--release-repo` 指向非上游仓库时，只追加到已有 release，不会在别的仓库自动建 tag。
 - `--package-only` 不重跑构建，直接用 `target/<triple>/release/` 里现成的三个文件重传；
   缺文件就报错（先跑一次完整构建），也不编译 extras（缺就用 `--no-extras`）。
