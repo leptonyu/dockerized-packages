@@ -3,9 +3,9 @@
 从 `machine/modules/network/` 迁过来的 CIDR 生成目录（DNS / AdGuard 制品在
 [`dns/`](dns/)）。数据源、ASN、scanner
 （`source: file`）和全部 ops 都在 [`cidr.yaml`](cidr.yaml)；[`gen.sh`](gen.sh)
-只负责准备 `.cache/scanners/all.txt`、跑 pipeline、自检并写 checksum。CI 用
-Git LFS 里的 [`bin/cidr`](bin/README.md)（Linux x86_64）生成，不再需要本地提交
-名单快照。
+只负责准备 `.cache/scanners/all.txt`、跑 pipeline、自检并写 checksum。仓库不再
+提交 cidr 二进制：CI 由 [`ci.sh`](ci.sh) 从 xn 的 `latest` release 下载 Linux
+x86_64 包，不再需要本地提交名单快照。
 
 | 产物 | 用途（xn 配置里的落点） | 内容 |
 | --- | --- | --- |
@@ -85,8 +85,25 @@ Git LFS 里的 [`bin/cidr`](bin/README.md)（Linux x86_64）生成，不再需�
 
 ## 生成
 
-依赖 `cidr`（`xn-cidr-bin` 的 CLI）。CI 用 LFS 里的 Linux 二进制；本地可以放到
-`PATH`，或用 `CIDR=/path/to/cidr` 指定：
+依赖 `cidr`（`xn-cidr-bin` 的 CLI）。仓库不再提交二进制；`ci.sh` 默认从 xn 的
+`latest` release 下载 `cidr.x86_64-unknown-linux-gnu.tar.xz`，解压到
+`network/.cache/cidr-bin/`（已在 `.gitignore` 里）：
+
+```text
+https://github.com/leptonyu/xn/releases/download/latest/cidr.x86_64-unknown-linux-gnu.tar.xz
+```
+
+本地也可以把 cidr 放到 `PATH`，或用 `CIDR=/path/to/cidr` 指定。`ci.sh` 支持的
+环境变量：
+
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `CIDR` | 空（走下载） | 已有 cidr 的路径或命令名，设置后不再下载 |
+| `CIDR_URL` | 上面的 `latest` 包 | 换成固定 tag 或镜像地址 |
+| `XN_REPO_TOKEN` | 空 | xn 是私有仓库，下载 release 资产用；和 xn 构建共用同一个 secret，只读即可 |
+| `CIDR_SHA256` | 空 | 固定包的 sha256，设置后下载完先校验 |
+
+`gen.sh` 本身不下载 cidr（只认 `CIDR` / `PATH`），生成方式不变：
 
 ```bash
 cd network
@@ -129,17 +146,17 @@ SCANNERS_TARBALL=/path/to/internet-scanners.tar.gz ./gen.sh block
 
 1. `dns`：跑 `./network/dns/gen.sh all` 生成 DNS/AdGuard 制品（`dlc.dat` /
    `apple.conf` / `filter_49`），建当天 tag/release 并上传 DNS 资产；
-2. `network`（`needs: dns`）：`checkout` 带 `lfs: true` 拿到 `network/bin/cidr`，
-   `actions/cache` 缓存 `~/.cache/cidr`，用 `secrets.IPINFO_TOKEN` 跑
-   [`ci.sh`](ci.sh)；`ci.sh` 把每份 `.txt` 单独压成 `.xz`，release 上传八份
-   `.txt.xz` 和各自的 `.txt.xz.sha256sum`（不打包 tar）。
+2. `network`（`needs: dns`）：普通 `checkout`（不再需要 LFS），`actions/cache`
+   缓存 `~/.cache/cidr`；用 `secrets.IPINFO_TOKEN` 和 `secrets.XN_REPO_TOKEN` 跑
+   [`ci.sh`](ci.sh)——`ci.sh` 先从 `CIDR_URL` 下载 cidr，把每份 `.txt` 单独压成
+   `.xz`，release 上传八份 `.txt.xz` 和各自的 `.txt.xz.sha256sum`（不打包 tar）。
 
 缓存和 `cidr.yaml` 的 `cache_max_age: 12h` 对齐：key 是 **UTC 日期 + 12h 桶**，
 `restore-keys: cidr-src-` 取最近一份。同桶重跑命中缓存、不重复下载；隔天/换桶
 的那次缓存已超过 12h，会重下并刷新 mtime，所以列表每天都是新的。
 
-network job 失败不会撤回已经发布的 DNS 制品，但整个 run 会标红。生成、校验、LFS
-属性和忽略规则都在 `network/` 里；workflow 只是 release 编排。
+network job 失败不会撤回已经发布的 DNS 制品，但整个 run 会标红。生成、校验和忽略
+规则都在 `network/` 里；workflow 只是 release 编排。
 
 发布资产：
 
@@ -167,12 +184,16 @@ network job 会先用 `gh release delete-asset` 清掉它们，再上传新的 `
 生效前，把 release 全下到同一目录再 `xz -d` 会因为「输出文件已存在」失败，这不是
 压缩包损坏；用 `xz -df` 或 `xz -dc` 即可。
 
-生成物不入 git（`network/.gitignore` 挡 `xn_*`，`dns/` 的产物由仓库根
-`.gitignore` 统一挡）；`network/` 里放 `cidr.yaml`、`gen.sh`、`ci.sh`、`bin/cidr`、
-`dns/`、`.gitattributes` 和文档。
+生成物不入 git（`network/.gitignore` 挡 `xn_*` 和 `.cache/`，`dns/` 的产物由仓库根
+`.gitignore` 统一挡）；`network/` 里放 `cidr.yaml`、`gen.sh`、`ci.sh`、`dns/` 和文档。
 
 > CI 首次运行需要仓库 secret `IPINFO_TOKEN`；没有缓存又没有 token 时，
 > `country_asn` 源会失败。之后的运行即使 token 暂时缺失，也可以靠缓存完成。
+>
+> `cidr` 从 xn 的私有 release 下载，用的是和 xn 构建同一个仓库 secret
+> `XN_REPO_TOKEN`（[`xn.yml`](../.github/workflows/xn.yml) 里那个）。下载只需要
+> Contents: Read，现有的 write 权限当然也够；xn 公开后这个 secret 可以留着也能删，
+> `ci.sh` 只在变量非空时才带 `Authorization`。
 
 ## 与 machine 的对应关系
 

@@ -67,8 +67,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-        with:
-          lfs: true # network/bin/cidr（Linux x86_64）走 Git LFS
       - name: Get cache bucket
         # 和 cidr.yaml 的 cache_max_age: 12h 对齐：UTC 日期 + 12h 桶。
         # 同桶重跑命中缓存；换桶/隔天的那次会重下（保证列表每天更新）。
@@ -88,8 +86,11 @@ jobs:
           restore-keys: |
             cidr-src-
       - name: Generate network lists
+        # cidr 不再随仓库提交：ci.sh 默认从 xn 的 release 下载
+        # cidr.x86_64-unknown-linux-gnu.tar.xz；xn 是私有仓库，复用 xn 构建的 secret。
         env:
           IPINFO_TOKEN: ${{ secrets.IPINFO_TOKEN }}
+          XN_REPO_TOKEN: ${{ secrets.XN_REPO_TOKEN }}
         run: ./network/ci.sh
       - name: Remove obsolete plain network assets
         # release 以后只保留 .xz；清掉旧版本 workflow 留下的 plain .txt / .txt.sha256sum，
