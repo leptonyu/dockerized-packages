@@ -14,6 +14,9 @@
 #   xn.<target>.pgo-bolt.tar.xz        二进制包：xn / LICENSE / docs/configuration.md / THIRD-PARTY-NOTICES.txt
 #   xn.<target>.pgo-bolt.trace.tar.xz  全过程包：build.log / build-info.txt / xn.tuned.env /
 #                                      run/（上游各步骤日志、perf.data、manifest.tsv、bolt.env）
+#   run/ 取自上游 target/tune/<run>/：01-collect / 02-optimize / 03-bolt（bolt.env、
+#   hot-functions.tsv、xn.fdata…）/ logs / manifest.tsv。上游 xn.tuned.env 没写 run_dir 时
+#   按产物 sha256 匹配，再退到该 target/profile 下最新的一份；也可用 --run-dir 指定。
 # 两个包各生成一个 .sha256sum；不再单独发布 .env / .build-info.txt / .manifest.tsv / .bolt.env，
 # 这些元数据都在 trace 包内（build-info.txt 记录二进制包的 sha256）。
 #
@@ -55,6 +58,8 @@ locked=true
 perf_data=true
 perf_xz_level="${XN_PERF_XZ_LEVEL:-3}"
 prune_legacy=true
+run_dir_opt="${XN_TUNE_RUN_DIR:-}"
+allow_missing_run=false
 
 target="x86_64-unknown-linux-gnu"
 base="xn.${target}.pgo-bolt"
@@ -87,6 +92,9 @@ usage() {
   --force              让 build-tuned 重做已有 run 目录
   --no-perf-data       trace 包不带 perf.data（只保留各步骤日志）
   --perf-xz-level N    trace 包的 xz 级别 0-9，默认 3（perf.data 很大，0 最快）
+  --run-dir DIR        指定上游 run 目录（默认取 xn.tuned.env 的 run_dir；没有就按产物
+                       sha256 在 target/tune/* 里匹配，再退到最新的同 target/profile run）
+  --allow-missing-run  找不到 run 目录也照打（trace 包只剩日志与环境；默认直接报错）
   --keep-legacy        发布时不删除旧版单独上传的 .env / .build-info 等
   --package-only       不构建，只重新打两个包（二进制包 + 全过程包）
   --publish            通过 gh 发布到 --tag；release 不存在时新建（默认上游 xn）
@@ -140,6 +148,9 @@ while (($#)); do
 		--no-perf-data) perf_data=false; shift ;;
 		--perf-xz-level) need_value "$1" "$#"; perf_xz_level="$2"; shift 2 ;;
 		--perf-xz-level=*) perf_xz_level="${1#*=}"; shift ;;
+		--run-dir) need_value "$1" "$#"; run_dir_opt="$2"; shift 2 ;;
+		--run-dir=*) run_dir_opt="${1#*=}"; shift ;;
+		--allow-missing-run) allow_missing_run=true; shift ;;
 		--keep-legacy) prune_legacy=false; shift ;;
 		--force) force=true; shift ;;
 		--package-only) package_only=true; shift ;;
@@ -178,6 +189,50 @@ sha256_file() {
 	else
 		die "找不到 sha256sum / shasum"
 	fi
+}
+
+# 在 <src>/target/tune/ 里挑与本次产物对得上的 run 目录（trace 包的主体）。
+# 上游到 commit 0920e81 那份 release.sh 的 xn.tuned.env 里**没有 run_dir 字段**，
+# 只 sed env 会让 trace 包悄悄少掉整个 run/（v6.0.0 的 trace 就只有 3 个文件）。
+# 输出「来源<TAB>绝对路径」：
+#   sha256 = <run>/03-bolt/xn.final 的 sha256 与 xn.tuned.env 的 sha256 相同（最可靠）；
+#   newest = 该 target/profile 下最新的一份（并提示是按时间猜的）。
+# 都找不到返回 1。
+xn_pick_run_dir() { # $1=xn.tuned.env 里的 sha256（可空）
+	local want="${1:-}" d sha best="" matches=0
+	local -a cands=()
+	for d in "$src"/target/tune/*/; do
+		[[ -d "$d" ]] || continue
+		d="${d%/}"
+		[[ -f "$d/run.env" || -f "$d/manifest.tsv" ]] || continue
+		case "$(basename "$d")" in
+			*"-${target}-"*) ;;
+			*) continue ;;
+		esac
+		cands+=("$d")
+	done
+	((${#cands[@]})) || return 1
+	if [[ -n "$want" ]]; then
+		for d in ${cands[@]+"${cands[@]}"}; do
+			[[ -f "$d/03-bolt/xn.final" ]] || continue
+			sha="$(sha256_file "$d/03-bolt/xn.final" 2>/dev/null || true)"
+			if [[ "$sha" == "$want" ]]; then
+				best="$d"
+				matches=$((matches + 1))
+			fi
+		done
+	fi
+	if [[ -n "$best" ]]; then
+		if ((matches > 1)); then
+			warn "有 ${matches} 个 run 的 03-bolt/xn.final 都等于产物 sha256，取最后一个：$best"
+		fi
+		printf 'sha256\t%s\n' "$best"
+		return 0
+	fi
+	best="$(printf '%s\n' ${cands[@]+"${cands[@]}"} | sort -r | head -n1)"
+	[[ -n "$best" ]] || return 1
+	warn "xn.tuned.env 没有 run_dir，也没有 run 的 03-bolt/xn.final 对得上产物 sha256；取最新的 run：$best"
+	printf 'newest\t%s\n' "$best"
 }
 
 have_tuned() { # $1=src
@@ -422,6 +477,47 @@ if ! ( cd "$smoke_dir" && "$bin" --version >/dev/null 2>&1 ); then
 fi
 rm -rf "$smoke_dir"
 
+# ---------------------------------------------------------------- run 目录
+# trace 包真正的主体是上游 run 目录：01-collect / 02-optimize / 03-bolt（bolt.env、
+# hot-functions.tsv、xn.fdata、xn.final）/ logs / manifest.tsv / run.env。
+# 上游早期 release.sh 写 xn.tuned.env 时**没有 run_dir 字段**（v6.0.0 就是这样），
+# 只读 env 会让 trace 包悄悄少掉整个 run/，所以按优先级找：
+#   --run-dir / XN_TUNE_RUN_DIR > env 的 run_dir > 产物 sha256 匹配 > 该 target 最新一份。
+env_sha="$(sed -n 's/^sha256=//p' "$envf" | head -n1 | sed 's/[[:space:]]*$//')"
+run_dir=""
+run_dir_source="none"
+if [[ -n "$run_dir_opt" ]]; then
+	run_dir="$run_dir_opt"
+	run_dir_source="explicit"
+	[[ "$run_dir" == /* ]] || run_dir="$PWD/$run_dir"
+else
+	run_dir="$(sed -n 's/^run_dir=//p' "$envf" | head -n1 | sed 's/[[:space:]]*$//')"
+	if [[ -n "$run_dir" ]]; then
+		run_dir_source="env"
+		[[ "$run_dir" == /* ]] || run_dir="$src/$run_dir"
+	fi
+fi
+if [[ -n "$run_dir" && ! -d "$run_dir" ]]; then
+	warn "run 目录不存在：${run_dir}（来源 ${run_dir_source}）"
+	run_dir=""
+	run_dir_source="none"
+fi
+if [[ -z "$run_dir" ]]; then
+	pick="$(xn_pick_run_dir "$env_sha")" || pick=""
+	if [[ -n "$pick" ]]; then
+		run_dir_source="${pick%%$'\t'*}"
+		run_dir="${pick#*$'\t'}"
+	fi
+fi
+if [[ -z "$run_dir" ]]; then
+	if $allow_missing_run; then
+		warn "找不到上游 run 目录（$src/target/tune/*）：trace 包只有日志与环境"
+	else
+		die "找不到上游 run 目录（$src/target/tune/*）：trace 包会缺掉所有步骤文件。
+                     构建用的 run 已被清掉？用 --run-dir 指过去，或加 --allow-missing-run 只打日志。"
+	fi
+fi
+
 # ---------------------------------------------------------------- package
 # 只打两个包：二进制包 + 全过程包（上游 run 目录里的所有步骤与 perf.data）。
 if $publish; then
@@ -466,11 +562,7 @@ rm -rf "$stage"
 
 # 2) 全过程包：上游 run 目录（各步骤日志 / perf.data / manifest.tsv / bolt.env）
 #    + 本脚本的 build.log / build-info.txt / 脱敏的 xn.tuned.env。
-run_dir="$(sed -n 's/^run_dir=//p' "$envf" | head -n1 | sed 's/[[:space:]]*$//')"
-if [[ -n "$run_dir" && ! -d "$run_dir" && -d "$src/$run_dir" ]]; then
-	run_dir="$src/$run_dir"
-fi
-
+#    run_dir 在打包前就已经定位好（见上面的「run 目录」段）。
 trace_stage="$out_dir/.stage-$trace_base"
 rm -rf "$trace_stage"
 mkdir -p "$trace_stage"
@@ -480,13 +572,21 @@ else
 	note "没有 $out_dir/build.log（--package-only 且本目录没构建过），trace 包不含构建日志"
 fi
 sanitize_env "$envf" "$trace_stage/xn.tuned.env" "run"
+# 早期 xn.tuned.env 本来就没有 run_dir 字段：补上包内相对路径，别让读的人以为没收录。
+if [[ -n "$run_dir" ]] && ! grep -q '^run_dir=' "$trace_stage/xn.tuned.env"; then
+	printf 'run_dir=run\n' >> "$trace_stage/xn.tuned.env"
+fi
 
-if [[ -n "$run_dir" && -d "$run_dir" ]]; then
+if [[ -n "$run_dir" ]]; then
 	run_dir="$(cd "$run_dir" && pwd -P)"
-	note "收集上游 run 目录：$run_dir"
+	note "收集上游 run 目录：${run_dir}（来源 ${run_dir_source}）"
 	cp -R -p "$run_dir" "$trace_stage/run"
-else
-	warn "xn.tuned.env 的 run_dir 不存在（${run_dir:-<空>}）：trace 包只有日志与环境"
+	if [[ ! -f "$trace_stage/run/manifest.tsv" ]]; then
+		warn "run/ 里没有 manifest.tsv（run 目录不完整？）"
+	fi
+	if [[ ! -f "$trace_stage/run/03-bolt/bolt.env" ]]; then
+		warn "run/ 里没有 03-bolt/bolt.env（BOLT 步骤没跑完？）"
+	fi
 fi
 
 perf_count=0
@@ -500,6 +600,14 @@ if [[ -d "$trace_stage/run" ]]; then
 		find "$trace_stage/run" -type f -name 'perf.data*' -delete 2>/dev/null || true
 	fi
 	note "run 目录：$(du -sh "$trace_stage/run" | awk '{print $1}')（源 perf.data ${perf_total} 个，收录 ${perf_count} 个）"
+fi
+
+run_file_count=0
+run_steps=""
+if [[ -d "$trace_stage/run" ]]; then
+	run_file_count="$(find "$trace_stage/run" -type f 2>/dev/null | wc -l | tr -d '[:space:]')" || run_file_count=0
+	run_steps="$(cd "$trace_stage/run" && ls -1 | paste -sd, -)"
+	note "run 步骤：${run_steps:-<空>}（${run_file_count} 个文件）"
 fi
 
 {
@@ -518,6 +626,9 @@ fi
 	printf 'freq=%s\n' "${freq:-<release.sh default>}"
 	printf 'icf=%s\n' "${icf:-all}"
 	printf 'run_dir=run\n'
+	printf 'run_dir_source=%s\n' "$run_dir_source"
+	printf 'run_steps=%s\n' "${run_steps:-<none>}"
+	printf 'run_files=%s\n' "$run_file_count"
 	printf 'tarball=%s\n' "$base.tar.xz"
 	printf 'tarball_sha256=%s\n' "$sha"
 	printf 'trace_tarball=%s\n' "$trace_base.tar.xz"
@@ -526,7 +637,7 @@ fi
 	printf 'perf_data_files_source=%s\n' "$perf_total"
 	printf 'release_repo=%s\n' "$release_repo"
 	printf 'release_tag=%s\n' "${tag:-<none>}"
-	printf 'trace_note=上游 run 目录原样收录；run_dir / host / uname / workload 已脱敏\n'
+	printf 'trace_note=上游 run 目录按来源 %s 收录（%s）；run_dir / host / uname / workload 已脱敏\n' "$run_dir_source" "${run_steps:-<none>}"
 } > "$trace_stage/build-info.txt"
 
 note "打包 $trace_base.tar.xz（xz -T0 -${perf_xz_level}，perf.data 大时较慢）"
