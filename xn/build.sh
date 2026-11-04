@@ -10,11 +10,11 @@
 # 产物固定写 target/x86_64-unknown-linux-gnu/release/xn 与 xn.tuned.env。
 # 这里只负责：取上游源码、跑这条命令、打两个包、创建/追加 v<Cargo.toml version> release。
 #
-# 只打两个包（release 上也只有这两个资产）：
+# 只打两个包（每个包配一个 .sha256sum，release 上共 4 个资产）：
 #   xn.<target>.pgo-bolt.tar.xz        二进制包：xn / LICENSE / docs/configuration.md / THIRD-PARTY-NOTICES.txt
 #   xn.<target>.pgo-bolt.trace.tar.xz  全过程包：build.log / build-info.txt / xn.tuned.env /
 #                                      run/（上游各步骤日志、perf.data、manifest.tsv、bolt.env）
-# 不再额外发布 .sha256sum / .env / .build-info.txt / .manifest.tsv / .bolt.env；
+# 两个包各生成一个 .sha256sum；不再单独发布 .env / .build-info.txt / .manifest.tsv / .bolt.env，
 # 这些元数据都在 trace 包内（build-info.txt 记录二进制包的 sha256）。
 #
 # 为什么必须原生 Linux x86_64：BOLT 需要 --emit-relocs 的重定位节，zig 交叉档
@@ -87,19 +87,21 @@ usage() {
   --force              让 build-tuned 重做已有 run 目录
   --no-perf-data       trace 包不带 perf.data（只保留各步骤日志）
   --perf-xz-level N    trace 包的 xz 级别 0-9，默认 3（perf.data 很大，0 最快）
-  --keep-legacy        发布时不删除旧版单独上传的 .sha256sum / .env / .build-info 等
+  --keep-legacy        发布时不删除旧版单独上传的 .env / .build-info 等
   --package-only       不构建，只重新打两个包（二进制包 + 全过程包）
   --publish            通过 gh 发布到 --tag；release 不存在时新建（默认上游 xn）
   --check              只检查工具链与 release.sh 能力，不构建
   --dry-run            只打印命令，不 clone / 不构建 / 不上传
   -h, --help           本帮助
 
-产物（也即上传的资产，只有两个包）：
+产物（release 上 2 个包 + 各自的 .sha256sum）：
   xn.x86_64-unknown-linux-gnu.pgo-bolt.tar.xz
       二进制包：xn / LICENSE / docs/configuration.md / THIRD-PARTY-NOTICES.txt
+  xn.x86_64-unknown-linux-gnu.pgo-bolt.tar.xz.sha256sum
   xn.x86_64-unknown-linux-gnu.pgo-bolt.trace.tar.xz
       全过程包：build.log / build-info.txt / xn.tuned.env / run/
       （run/ 是上游 run 目录：各步骤日志、perf.data、manifest.tsv、bolt.env）
+  xn.x86_64-unknown-linux-gnu.pgo-bolt.trace.tar.xz.sha256sum
 EOF
 }
 
@@ -336,16 +338,18 @@ print_plan() {
 		printf ')\n'
 	fi
 	printf '+ 打包 %s.tar.xz（xn / LICENSE / docs/configuration.md / THIRD-PARTY-NOTICES.txt）\n' "$base"
+	printf '+ 生成 %s.tar.xz.sha256sum\n' "$base"
 	if $perf_data; then
 		printf '+ 打包 %s.tar.xz（build.log / build-info.txt / xn.tuned.env / run/，含 perf.data；xz -T0 -%s）\n' "$trace_base" "$perf_xz_level"
 	else
 		printf '+ 打包 %s.tar.xz（build.log / build-info.txt / xn.tuned.env / run/，不含 perf.data；xz -T0 -%s）\n' "$trace_base" "$perf_xz_level"
 	fi
+	printf '+ 生成 %s.tar.xz.sha256sum\n' "$trace_base"
 	if $publish; then
 		if [[ -n "$tag" ]]; then
-			printf '+ gh release create/upload %q --repo %q --clobber <两个 tarball>\n' "$tag" "$release_repo"
+			printf '+ gh release create/upload %q --repo %q --clobber <两个包 + 两个 .sha256sum>\n' "$tag" "$release_repo"
 		else
-			printf '+ gh release create/upload v<Cargo.toml version> --repo %q --clobber <两个 tarball>\n' "$release_repo"
+			printf '+ gh release create/upload v<Cargo.toml version> --repo %q --clobber <两个包 + 两个 .sha256sum>\n' "$release_repo"
 		fi
 	fi
 }
@@ -534,6 +538,10 @@ bin_bytes="$(bytes_of "$out_dir/$base.tar.xz")"
 trace_bytes="$(bytes_of "$out_dir/$trace_base.tar.xz")"
 trace_sha="$(sha256_file "$out_dir/$trace_base.tar.xz")"
 
+# 校验和随包发布：每个包一个 .sha256sum（与 sha256sum 默认格式一致）。
+printf '%s  %s\n' "$sha" "$base.tar.xz" > "$out_dir/$base.tar.xz.sha256sum"
+printf '%s  %s\n' "$trace_sha" "$trace_base.tar.xz" > "$out_dir/$trace_base.tar.xz.sha256sum"
+
 note "二进制包：$base.tar.xz（${bin_bytes} 字节，sha256 ${sha:0:16}…）"
 note "过程包：$trace_base.tar.xz（${trace_bytes} 字节，sha256 ${trace_sha:0:16}…，perf.data ${perf_count} 个）"
 if ((trace_bytes > 2 * 1024 * 1024 * 1024)); then
@@ -541,10 +549,13 @@ if ((trace_bytes > 2 * 1024 * 1024 * 1024)); then
 fi
 
 # ---------------------------------------------------------------- publish
-# release 上只放这两个包；sha256 / env / build-info / manifest / bolt.env 不再单独上传。
+# release 上放：两个包 + 各自的 .sha256sum（共 4 个资产）；
+# env / build-info / manifest / bolt.env 不再单独上传，都在过程包里。
 assets=(
 	"$out_dir/$base.tar.xz"
+	"$out_dir/$base.tar.xz.sha256sum"
 	"$out_dir/$trace_base.tar.xz"
+	"$out_dir/$trace_base.tar.xz.sha256sum"
 )
 
 if $publish; then
@@ -563,15 +574,16 @@ if $publish; then
 			--notes "PGO+BOLT x86_64 GNU build of xn $version from ${commit:0:12}.
 
 - \`${base}.tar.xz\`: binary package (xn / LICENSE / docs/configuration.md / THIRD-PARTY-NOTICES.txt)
-- \`${trace_base}.tar.xz\`: full build trace (all stages, logs, manifest, bolt.env, perf.data)"
+- \`${base}.tar.xz.sha256sum\`: SHA-256 of the binary package
+- \`${trace_base}.tar.xz\`: full build trace (all stages, logs, manifest, bolt.env, perf.data)
+- \`${trace_base}.tar.xz.sha256sum\`: SHA-256 of the trace package"
 	fi
 	note "上传 ${#assets[@]} 个资产到 $release_repo@$tag"
 	gh release upload "$tag" --repo "$release_repo" --clobber "${assets[@]}"
-	# 旧版曾把 sha256 / env / build-info / manifest / bolt.env 单独发布；默认清掉，
-	# 保持 release 上只有两个包。--keep-legacy 可保留（跨版本对比用）。
+	# 旧版曾把 env / build-info / manifest / bolt.env 单独发布；默认清掉，
+	# 保持 release 上只有两个包与各自的 .sha256sum。--keep-legacy 可保留（跨版本对比用）。
 	if $prune_legacy; then
 		legacy=(
-			"$base.tar.xz.sha256sum"
 			"$base.env"
 			"$base.build-info.txt"
 			"$base.manifest.tsv"
@@ -591,4 +603,4 @@ else
 	note "未加 --publish；产物在 $out_dir"
 fi
 
-note "完成：$out_dir/$base.tar.xz 与 $out_dir/$trace_base.tar.xz"
+note "完成：$out_dir/$base.tar.xz 与 $out_dir/$trace_base.tar.xz（各带 .sha256sum）"

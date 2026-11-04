@@ -223,8 +223,8 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: xn-pgo-bolt
-          # 只留两个包：二进制包 + 全过程包（build.log / 各步骤 / perf.data）。
-          # 不传 xn/dist/build.log：它已经在过程包里，且带 runner 的绝对路径。
+          # 只留两个包与各自的 .sha256sum；build.log 在过程包里，不再单独上传。
           path: |
             xn/dist/*.tar.xz
+            xn/dist/*.sha256sum
           if-no-files-found: ignore

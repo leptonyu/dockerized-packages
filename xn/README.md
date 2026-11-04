@@ -99,8 +99,8 @@ GitHub 托管 runner 没有 PMU/LBR，CI 用 software event：
 
 ## 产物
 
-release 上只有两个包（不再单独发布 `.sha256sum` / `.env` / `.build-info.txt` /
-`.manifest.tsv` / `.bolt.env`）。
+release 上是两个包 + 各自的 `.sha256sum`（共 4 个资产；不再单独发布 `.env` /
+`.build-info.txt` / `.manifest.tsv` / `.bolt.env`）。
 
 **二进制包** `xn.x86_64-unknown-linux-gnu.pgo-bolt.tar.xz`（tar 内，不带 `xn.tuned.env`）：
 
@@ -110,6 +110,9 @@ LICENSE
 docs/configuration.md
 THIRD-PARTY-NOTICES.txt
 ```
+
+同目录的 `xn.x86_64-unknown-linux-gnu.pgo-bolt.tar.xz.sha256sum` 是它的校验和
+（`sha256sum -c` 可直接用）。
 
 **全过程包** `xn.x86_64-unknown-linux-gnu.pgo-bolt.trace.tar.xz`：
 
@@ -124,6 +127,9 @@ run/               # 上游 run 目录原样收录，即“所有步骤”：
   **/perf.fdata、03-bolt/bolt.env、perf.bolt.yaml 等
 ```
 
+`xn.x86_64-unknown-linux-gnu.pgo-bolt.trace.tar.xz.sha256sum` 是过程包的校验和
+（包内写不下自己的 sha256，所以单独发布）。
+
 - 二进制包随包带上游 `docs/configuration.md`（路径不变）；`xn.tuned.env` 只留在过程包里，
   构建元数据（`build_id`、`size`、`sha256`、工具版本）都可在那里查到。
 - 二进制包的 sha256 记录在 `build-info.txt` 的 `tarball_sha256`。
@@ -132,8 +138,8 @@ run/               # 上游 run 目录原样收录，即“所有步骤”：
   置为 `<redacted>`。
 - perf.data 很大：`--perf-xz-level N` 控制过程包的 xz 级别（默认 3，`0` 最快）；只想留
   日志时用 `--no-perf-data`。过程包超过 GitHub release 单资产 2 GiB 上限时脚本会警告。
-- `--publish` 时会顺手删掉旧版本单独发布的 `.sha256sum` / `.env` / `.build-info.txt` /
-  `.manifest.tsv` / `.bolt.env`，保证 release 上只有两个包；要保留加 `--keep-legacy`。
+- `--publish` 时会顺手删掉旧版本单独发布的 `.env` / `.build-info.txt` / `.manifest.tsv` /
+  `.bolt.env`，release 上只留两个包和各自的 `.sha256sum`；要保留加 `--keep-legacy`。
 
 ## 独立 workflow
 
@@ -158,8 +164,8 @@ schedule 绑定：
   既要 checkout，也要创建/更新 release）；本仓库只用它自己的 `GITHUB_TOKEN` 更新
   `XN_LAST_MAIN_SHA`（`actions: write`）。
 - 默认**不加** cargo features；需要时在手动触发的 `features` 输入或本地 `build.sh --features quic` 里加。
-- `Upload build outputs` 只收集 `xn/dist/*.tar.xz`（二进制包 + 过程包），过程包里已经带着
-  `build.log`，不再单独上传。
+- `Upload build outputs` 收集 `xn/dist/*.tar.xz` 和 `xn/dist/*.sha256sum`（两个包 + 校验和），
+  `build.log` 已经在过程包里，不再单独上传。
 
 `xn` workflow 与 DNS/network 的每日 release 相互独立；它失败不会撤回其它 workflow 的资产。
 
