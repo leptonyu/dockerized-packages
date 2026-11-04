@@ -129,6 +129,13 @@ SHA256SUMS                                      # 上游生成的汇总，只做
 - 发布时每个包 + 自己的 `.sha256sum` 一起上传（不再发汇总的 `SHA256SUMS`）；
   `build.sh` 还会把 `trace-files.txt` / `trace-replay-files.txt`
   的生成交给上游（`release.sh --pack`），不在本地做任何裁剪。
+- **上传是逐资产做的**：每个文件单独调 `gh release upload`，`.sha256sum` 排最后；
+  单个资产遇到 5xx（GitHub 的 asset API 偶发 502/503/504）或网络抖动会退避重试
+  （`XN_RETRIES` 默认 4 次，`XN_RETRY_DELAY` 默认 3 秒起、翻倍至 30 秒），4xx
+  （token 没权限 / release 不存在）直接失败不重试。一个资产失败不会连累其余，
+  也不会把半小时的构建白等在一个 502 上。
+- 上传后自检：重新下载 `*.sha256sum` 比对内容，并按 `digest` 核对每个资产；
+  不一致才整体重传一次，仍不一致就让 job 失败。
 
 **额外二进制 `cidr` / `xn-tui`（不调优，同样走 `release.sh --pack`）**：
 
@@ -174,6 +181,9 @@ schedule 绑定：
 - `Upload build outputs` 收集 `xn/dist/*.tar.xz`、`xn/dist/*.sha256sum` 和
   每个包的 `.sha256sum`（runtime + trace + extras），`build.log` 已经在
   trace 包里，不再单独上传。
+- 发布上传逐资产 + 自动重试（见上），GitHub 偶发的 502 不再让 job 停在
+  「8 个资产传到一半」；`XN_LAST_MAIN_SHA` 仍只在发布成功后记账，最终失败的话
+  下一轮会重新构建并重传。
 
 `xn` workflow 与 DNS/network 的每日 release 相互独立；它失败不会撤回其它 workflow 的资产。
 
@@ -201,9 +211,12 @@ schedule 绑定：
   存在就追加/覆盖同名资产（`--clobber`）。上游仓库的 tag 若已存在但 release 不存在，
   会在该 tag 上补建 release。
 - **同一版本重建 hash 会变**：PGO+BOLT 不可复现，`v<version>` 的 tar 每次重建都不同。
-  发布现在按包上传 `<asset>.sha256sum`（校验和最后传），上传后从 API 自检校验和内容与
-  asset digest，不一致就重传一次、还不对就让 job 失败；但消费端不要跨构建 pin hash，
+  发布按包上传 `<asset>.sha256sum`（校验和最后传），上传后从 API 自检校验和内容与
+  asset digest，不一致就重传一次、还不对就让 job 失败；期间遇到 5xx 会先自动退避重试，
+  不会因为一个 502 就把「传到一半」的 release 留在那里。但消费端不要跨构建 pin hash，
   要稳定就按具体构建钉（tag 带构建号目前还没做）。旧的汇总 `SHA256SUMS` 资产会被删掉。
+- 发布路径有离线自测：`./xn/tests/publish-retry.test.sh`（临时假 `gh`，不联网、不构建），
+  覆盖 502 重试、4xx 快速失败、自检发现不一致后重传。
 - `--release-repo` 指向非上游仓库时，只追加到已有 release，不会在别的仓库自动建 tag。
 - `--package-only` 不重跑构建，直接用 `target/<triple>/release/` 里现成的三个文件重传；
   缺文件就报错（先跑一次完整构建），也不编译 extras（缺就用 `--no-extras`）。

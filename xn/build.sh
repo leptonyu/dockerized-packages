@@ -10,7 +10,11 @@
 #   2) 把 build.log / build-info.txt 交给它收进 trace 包（--pack-log / --pack-info）；
 #   3) 校验产物、复制到 --out-dir；
 #   4) 额外把 cidr / xn-tui 单独打好（不调优，见下）；
-#   5) 需要时 gh release upload。
+#   5) 需要时 gh release upload（逐资产上传；5xx / 网络抖动自动退避重试）。
+#
+# 发布不是原子操作：GitHub 的 release asset API 偶发 502/503/504，一个资产失败
+# 不该连累其余的。所以上传是**逐个文件**做的（runtime/trace 的 .sha256sum 排最后），
+# 每个文件单独重试；传完再按 *.sha256sum + asset digest 自检，不一致才整体重传一次。
 #
 # 产物（target/<triple>/release/，本脚本再复制到 --out-dir）：
 #   xn.<triple>.tuned.tar.xz        runtime：xn / LICENSE / docs/configuration.md / THIRD-PARTY-NOTICES.txt
@@ -70,8 +74,42 @@ die() { echo "xn/build.sh: $*" >&2; exit 2; }
 note() { echo "==> $*" >&2; }
 warn() { echo "xn/build.sh: 警告：$*" >&2; }
 
+# 瞬时故障重试：GitHub API 偶发 502/503/504，或网络抖动。
+#   retry <描述> <命令...>
+# 4xx（408 / 429 除外）不重试 —— token 没权限、release 不存在这类错误直接失败，
+# 不白等 4 轮；5xx / 超时 / 连接重置才退避重试。
+# 环境变量：XN_RETRIES（尝试次数，默认 4）、XN_RETRY_DELAY（首次退避秒数，默认 3，翻倍至 30）。
+retry() {
+	local what="$1"; shift
+	local attempts="${XN_RETRIES:-4}" delay="${XN_RETRY_DELAY:-3}"
+	local tmp rc=0 i
+	((attempts > 0)) || attempts=1
+	tmp="$(mktemp)"
+	for ((i = 1; i <= attempts; i++)); do
+		rc=0
+		"$@" 2>&1 | tee "$tmp" || rc=$?
+		if ((rc == 0)); then
+			rm -f "$tmp"
+			return 0
+		fi
+		# 输出里有 4xx 且不是 408/429：重试也没用。
+		if grep -Eq 'HTTP 4(0[0-9]|1[0-9])' "$tmp" && ! grep -Eq 'HTTP 4(08|29)' "$tmp"; then
+			warn "${what}：HTTP 4xx（不可重试），放弃"
+			rm -f "$tmp"
+			return "$rc"
+		fi
+		if ((i == attempts)); then break; fi
+		warn "$what 失败（第 ${i}/${attempts} 次）：$(tail -n 1 "$tmp")；${delay}s 后重试"
+		sleep "$delay"
+		delay=$((delay * 2 > 30 ? 30 : delay * 2))
+	done
+	warn "$what 失败（已重试 ${attempts} 次）"
+	rm -f "$tmp"
+	return "$rc"
+}
+
 usage() {
-	sed -n '2,30p' "$self" | sed 's/^# \{0,1\}//'
+	sed -n '2,39p' "$self" | sed 's/^# \{0,1\}//'
 	cat <<'EOF'
 
 选项（环境变量同名，带 XN_ 前缀）：
@@ -582,10 +620,22 @@ assets=(
 	"$out_dir/$(basename "$runtime_tar")"
 	"$out_dir/$(basename "$trace_tar")"
 	${extra_assets[@]+"${extra_assets[@]}"}
-	# 校验和最后传：消费端最坏看到旧包 + 旧校验和，不会新校验和配旧包
+	# runtime/trace 的校验和最后传：消费端最坏看到旧包 + 旧校验和，不会新校验和配旧包
 	"$out_dir/$(basename "$runtime_tar").sha256sum"
 	"$out_dir/$(basename "$trace_tar").sha256sum"
 )
+
+# 逐个资产上传：一个文件 502 不该让后面的（尤其是排在最后的 .sha256sum）传不上去，
+# 每个文件单独重试 + 退避。gh --clobber 会先删同名旧资产再传，重试是幂等的。
+upload_assets() {
+	local a name
+	for a in "${assets[@]}"; do
+		name="$(basename "$a")"
+		note "上传 ${name}（$(human_bytes "$(bytes_of "$a")")）"
+		retry "上传 $name" gh release upload "$tag" --repo "$release_repo" --clobber "$a" ||
+			die "上传 $name 失败：$release_repo@${tag}（网络/API 抖动，可稍后重跑：--package-only --publish）"
+	done
+}
 
 # release 资产是一个个传的，不是原子操作；传完从 API 再确认一遍，防止
 # 「包换了、.sha256sum 还是旧的」这种半更新。一致返回 0。
@@ -593,8 +643,8 @@ verify_published() {
 	local tmp a name digest want bad=0
 
 	tmp="$(mktemp -d)"
-	if ! gh release download "$tag" --repo "$release_repo" --pattern '*.sha256sum' \
-		--dir "$tmp" --clobber >/dev/null 2>&1; then
+	if ! retry "下载 *.sha256sum" gh release download "$tag" --repo "$release_repo" \
+		--pattern '*.sha256sum' --dir "$tmp" --clobber >/dev/null; then
 		rm -rf "$tmp"
 		warn "release 上取不到 *.sha256sum"
 		return 1
@@ -621,7 +671,7 @@ verify_published() {
 		is_uploaded_asset "$name" || continue
 		want="$(sha256_file "$out_dir/$name")"
 		if [[ "$digest" != "sha256:$want" ]]; then
-			warn "release 上 $name 的 digest 对不上（$digest ≠ sha256:$want）"
+			warn "release 上 $name 的 digest 对不上（$digest ≠ sha256:${want}）"
 			bad=1
 		fi
 	done < <(gh api "repos/$release_repo/releases/tags/$tag" \
@@ -640,21 +690,25 @@ if $publish; then
 		[[ -n "$slug" && "$release_repo" == "$slug" ]] \
 			|| die "release $release_repo@$tag 不存在；只有上游 $slug 会自动创建（其他仓库请先建 release 或用 --tag）"
 		note "新建 release ${release_repo}@${tag}（target ${commit:0:12}）"
-		gh release create "$tag" --repo "$release_repo" --target "$commit" \
+		retry "创建 release" gh release create "$tag" --repo "$release_repo" --target "$commit" \
 			--title "xn $version" \
 			--notes "PGO+BOLT x86_64 GNU build of xn $version from ${commit:0:12}.
 
 - \`$(basename "$runtime_tar")\`: runtime package (xn / LICENSE / docs/configuration.md / THIRD-PARTY-NOTICES.txt)
 - \`$(basename "$trace_tar")\`: build trace (trace-files.txt 列出的诊断文件 + xn.tuned.env + 清单 + build.log / build-info.txt)
-- \`*.tar.xz.sha256sum\`: 每个包自己的校验和（\`shasum -a 256 -c <asset>.sha256sum\`）"
+- \`*.tar.xz.sha256sum\`: 每个包自己的校验和（\`shasum -a 256 -c <asset>.sha256sum\`）" || {
+			# 502 时请求可能已经落地；再看一眼，别把建成功的 release 当失败。
+			gh release view "$tag" --repo "$release_repo" >/dev/null 2>&1 ||
+				die "创建 release ${release_repo}@${tag} 失败"
+		}
 	fi
 	note "上传 ${#assets[@]} 个资产到 $release_repo@$tag"
-	gh release upload "$tag" --repo "$release_repo" --clobber "${assets[@]}"
+	upload_assets
 	if ! verify_published; then
 		warn "release 资产与本次构建不一致，重传一次"
-		gh release upload "$tag" --repo "$release_repo" --clobber "${assets[@]}"
+		upload_assets
 		verify_published ||
-			die "release 资产仍与本次构建不一致（是否有别的 workflow 在写 $release_repo@$tag？）"
+			die "release 资产仍与本次构建不一致（是否有别的 workflow 在写 $release_repo@${tag}？）"
 	fi
 	note "release 资产自检通过（*.sha256sum + digest）"
 	# 旧版曾把 env / build-info / manifest / bolt.env 单独发布；默认清掉。
@@ -679,7 +733,7 @@ if $publish; then
 		for name in "${legacy[@]}"; do
 			if grep -qxF -- "$name" <<<"$names"; then
 				note "删除旧版遗留资产 $name"
-				gh release delete-asset "$tag" "$name" --repo "$release_repo" --yes \
+				retry "删除 $name" gh release delete-asset "$tag" "$name" --repo "$release_repo" --yes \
 					|| warn "删除 $name 失败（gh 版本过旧？）"
 			fi
 		done
