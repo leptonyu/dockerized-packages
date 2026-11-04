@@ -4,31 +4,32 @@
 #
 # 上游仓库：git@github.com:leptonyu/xn.git
 #
-# 本脚本**不重复实现**调优链：直接调用上游 repo 里的
-#   ./release.sh --tuned --target x86_64-unknown-linux-gnu
-# 由它完成 PGO 采集（loopback 套件 + 常规 nextest）→ profile 重建 → BOLT，
-# 产物固定写 target/x86_64-unknown-linux-gnu/release/xn 与 xn.tuned.env。
-# 这里只负责：取上游源码、跑这条命令、打两个包、创建/追加 v<Cargo.toml version> release。
+# 本脚本**不打包**：打包已经交给上游 release.sh 的 `--tuned --pack`（runtime 包 +
+# trace 包 + SHA256SUMS 都落在 target/<triple>/release/）。这里只负责：
+#   1) 取上游源码、跑 `release.sh --tuned --target <triple> --pack`；
+#   2) 把 build.log / build-info.txt 交给它收进 trace 包（--pack-log / --pack-info）；
+#   3) 校验产物、复制到 --out-dir；
+#   4) 额外把 cidr / xn-tui 单独打好（不调优，见下）；
+#   5) 需要时 gh release upload。
 #
-# 只打两个包（每个包配一个 .sha256sum，release 上共 4 个资产）：
-#   xn.<target>.pgo-bolt.tar.xz        二进制包：xn / LICENSE / docs/configuration.md / THIRD-PARTY-NOTICES.txt
-#   xn.<target>.pgo-bolt.trace.tar.xz  全过程包：build.log / build-info.txt / xn.tuned.env /
-#                                      run/（上游各步骤日志、perf.data、manifest.tsv、bolt.env）
-#   run/ 取自上游 target/tune/<run>/：01-collect / 02-optimize / 03-bolt（bolt.env、
-#   hot-functions.tsv、xn.fdata…）/ logs / manifest.tsv。上游 xn.tuned.env 没写 run_dir 时
-#   按产物 sha256 匹配，再退到该 target/profile 下最新的一份；也可用 --run-dir 指定。
-# 两个包各生成一个 .sha256sum；不再单独发布 .env / .build-info.txt / .manifest.tsv / .bolt.env，
-# 这些元数据都在 trace 包内（build-info.txt 记录二进制包的 sha256）。
+# 产物（target/<triple>/release/，本脚本再复制到 --out-dir）：
+#   xn.<triple>.pgo-bolt.tar.xz        runtime：xn / LICENSE / docs/configuration.md / THIRD-PARTY-NOTICES.txt
+#   xn.<triple>.pgo-bolt.trace.tar.xz  trace：trace-files.txt 列出的诊断文件 + xn.tuned.env
+#                                      + 两份清单 + build.log / build-info.txt
+#   SHA256SUMS                         两行 sha256 filename
+# 另外（本脚本自己打，不调优）：
+#   cidr.<triple>.tar.xz / xn-tui.<triple>.tar.xz（各带 .sha256sum）
 #
 # 为什么必须原生 Linux x86_64：BOLT 需要 --emit-relocs 的重定位节，zig 交叉档
-# （macOS / musl 容器）拿不到。后续扩展见 README.md 的 Roadmap。
+# （macOS / musl 容器）拿不到。macOS 只能用 PGO-only（flavor 会变成 pgo）。
 #
 # 典型用法：
-#   ./xn/build.sh                                      # 构建 + 打包（不发布）
-#   ./xn/build.sh --publish                            # 发布到 v<Cargo.toml version>
-#   ./xn/build.sh --tag v6.1.0 --publish               # 指定 release tag
-#   ./xn/build.sh --check                              # 只检查工具链
-#   ./xn/build.sh --dry-run                            # 只打印命令
+#   ./xn/build.sh                     # 构建 + 打包（不发布）
+#   ./xn/build.sh --publish           # 发布到 v<Cargo.toml version>
+#   ./xn/build.sh --tag v6.1.0 --publish
+#   ./xn/build.sh --check             # 只检查工具链
+#   ./xn/build.sh --dry-run           # 只打印命令
+#   ./xn/build.sh --package-only --publish   # 不重编，拿现成产物重传
 #
 set -euo pipefail
 
@@ -53,30 +54,27 @@ dry_run=false
 check=false
 force=false
 tests=true
-notices=true
 locked=true
-perf_data=true
-perf_xz_level="${XN_PERF_XZ_LEVEL:-3}"
 prune_legacy=true
-run_dir_opt="${XN_TUNE_RUN_DIR:-}"
-allow_missing_run=false
+# 额外单独打包、**不做 PGO/BOLT** 的 bin（上游 bin 名：cidr <- xn-cidr-bin、
+# xn-tui <- xn-tui-bin）。它们不在 xn 的热路径上，普通 release 构建就够。
+extras="${XN_EXTRAS-cidr xn-tui}"
+extra_assets=()
 
 target="x86_64-unknown-linux-gnu"
-base="xn.${target}.pgo-bolt"
-trace_base="${base}.trace"
 
 die() { echo "xn/build.sh: $*" >&2; exit 2; }
 note() { echo "==> $*" >&2; }
 warn() { echo "xn/build.sh: 警告：$*" >&2; }
 
 usage() {
-	sed -n '2,28p' "$self" | sed 's/^# \{0,1\}//'
+	sed -n '2,30p' "$self" | sed 's/^# \{0,1\}//'
 	cat <<'EOF'
 
 选项（环境变量同名，带 XN_ 前缀）：
   --src DIR            本地 xn checkout（CI 里由 actions/checkout 提供；给了就不再 clone）
   --repo URL           上游仓库，默认 git@github.com:leptonyu/xn.git
-  --ref REF            分支 / tag / commit，默认 main（须包含 release.sh --tuned）
+  --ref REF            分支 / tag / commit，默认 main（须包含 release.sh --tuned --pack）
   --out-dir DIR        产物目录，默认 xn/dist
   --release-repo R     release 所在仓库；默认 = --repo / XN_REPO 的 owner/repo
   --tag TAG            目标 release tag；默认直接读 Cargo.toml 的 v<version>
@@ -87,29 +85,21 @@ usage() {
   --icf MODE           BOLT ICF：safe / all / none
   --workload CMD       自定义 PGO/BOLT 负载，透传给 release.sh
   --no-tests           PGO 采样只跑 loopback 套件，不跑 nextest
-  --no-notices         不生成 THIRD-PARTY-NOTICES.txt（只用于本地排查）
   --no-locked          不向 cargo 传 --locked
   --force              让 build-tuned 重做已有 run 目录
-  --no-perf-data       trace 包不带 perf.data（只保留各步骤日志）
-  --perf-xz-level N    trace 包的 xz 级别 0-9，默认 3（perf.data 很大，0 最快）
-  --run-dir DIR        指定上游 run 目录（默认取 xn.tuned.env 的 run_dir；没有就按产物
-                       sha256 在 target/tune/* 里匹配，再退到最新的同 target/profile run）
-  --allow-missing-run  找不到 run 目录也照打（trace 包只剩日志与环境；默认直接报错）
+  --extras "A B"       额外单独打包的 bin（上游 bin 名，默认 "cidr xn-tui"）：
+                       只做普通 release 构建，不跑 PGO/BOLT
+  --no-extras          不打包这些额外 bin
   --keep-legacy        发布时不删除旧版单独上传的 .env / .build-info 等
-  --package-only       不构建，只重新打两个包（二进制包 + 全过程包）
+  --package-only       不构建，只拿 target/<triple>/release/ 里现成的产物去发布
   --publish            通过 gh 发布到 --tag；release 不存在时新建（默认上游 xn）
   --check              只检查工具链与 release.sh 能力，不构建
   --dry-run            只打印命令，不 clone / 不构建 / 不上传
   -h, --help           本帮助
 
-产物（release 上 2 个包 + 各自的 .sha256sum）：
-  xn.x86_64-unknown-linux-gnu.pgo-bolt.tar.xz
-      二进制包：xn / LICENSE / docs/configuration.md / THIRD-PARTY-NOTICES.txt
-  xn.x86_64-unknown-linux-gnu.pgo-bolt.tar.xz.sha256sum
-  xn.x86_64-unknown-linux-gnu.pgo-bolt.trace.tar.xz
-      全过程包：build.log / build-info.txt / xn.tuned.env / run/
-      （run/ 是上游 run 目录：各步骤日志、perf.data、manifest.tsv、bolt.env）
-  xn.x86_64-unknown-linux-gnu.pgo-bolt.trace.tar.xz.sha256sum
+打包由上游 release.sh 完成（`--tuned --pack`），本脚本只上传：
+  xn.<triple>.pgo-bolt.tar.xz / xn.<triple>.pgo-bolt.trace.tar.xz / SHA256SUMS
+  外加 cidr.<triple>.tar.xz / xn-tui.<triple>.tar.xz（各带 .sha256sum，不调优）
 EOF
 }
 
@@ -143,14 +133,10 @@ while (($#)); do
 		--workload) need_value "$1" "$#"; workload="$2"; shift 2 ;;
 		--workload=*) workload="${1#*=}"; shift ;;
 		--no-tests) tests=false; shift ;;
-		--no-notices) notices=false; shift ;;
 		--no-locked) locked=false; shift ;;
-		--no-perf-data) perf_data=false; shift ;;
-		--perf-xz-level) need_value "$1" "$#"; perf_xz_level="$2"; shift 2 ;;
-		--perf-xz-level=*) perf_xz_level="${1#*=}"; shift ;;
-		--run-dir) need_value "$1" "$#"; run_dir_opt="$2"; shift 2 ;;
-		--run-dir=*) run_dir_opt="${1#*=}"; shift ;;
-		--allow-missing-run) allow_missing_run=true; shift ;;
+		--extras) need_value "$1" "$#"; extras="$2"; shift 2 ;;
+		--extras=*) extras="${1#*=}"; shift ;;
+		--no-extras) extras=""; shift ;;
 		--keep-legacy) prune_legacy=false; shift ;;
 		--force) force=true; shift ;;
 		--package-only) package_only=true; shift ;;
@@ -162,8 +148,6 @@ while (($#)); do
 	esac
 done
 
-[[ "$perf_xz_level" =~ ^[0-9]$ ]] || die "--perf-xz-level 需要 0-9：$perf_xz_level"
-
 # 路径统一成绝对路径；--src 相对当前目录。
 abs_dir() { # $1=path $2=默认目录（不存在则相对它）
 	local p="$1"
@@ -174,7 +158,7 @@ abs_dir() { # $1=path $2=默认目录（不存在则相对它）
 
 out_dir="$(abs_dir "$out_dir")"
 if [[ -n "$src" ]]; then
-	src="$(cd "$src" 2>/dev/null && pwd)" || die "--src 不存在：$src"
+	src="$(cd "$src" 2>/dev/null && pwd -P)" || die "--src 不存在：$src"
 fi
 
 is_linux_x86_64() {
@@ -191,52 +175,26 @@ sha256_file() {
 	fi
 }
 
-# 在 <src>/target/tune/ 里挑与本次产物对得上的 run 目录（trace 包的主体）。
-# 上游到 commit 0920e81 那份 release.sh 的 xn.tuned.env 里**没有 run_dir 字段**，
-# 只 sed env 会让 trace 包悄悄少掉整个 run/（v6.0.0 的 trace 就只有 3 个文件）。
-# 输出「来源<TAB>绝对路径」：
-#   sha256 = <run>/03-bolt/xn.final 的 sha256 与 xn.tuned.env 的 sha256 相同（最可靠）；
-#   newest = 该 target/profile 下最新的一份（并提示是按时间猜的）。
-# 都找不到返回 1。
-xn_pick_run_dir() { # $1=xn.tuned.env 里的 sha256（可空）
-	local want="${1:-}" d sha best="" matches=0
-	local -a cands=()
-	for d in "$src"/target/tune/*/; do
-		[[ -d "$d" ]] || continue
-		d="${d%/}"
-		[[ -f "$d/run.env" || -f "$d/manifest.tsv" ]] || continue
-		case "$(basename "$d")" in
-			*"-${target}-"*) ;;
-			*) continue ;;
-		esac
-		cands+=("$d")
-	done
-	((${#cands[@]})) || return 1
-	if [[ -n "$want" ]]; then
-		for d in ${cands[@]+"${cands[@]}"}; do
-			[[ -f "$d/03-bolt/xn.final" ]] || continue
-			sha="$(sha256_file "$d/03-bolt/xn.final" 2>/dev/null || true)"
-			if [[ "$sha" == "$want" ]]; then
-				best="$d"
-				matches=$((matches + 1))
-			fi
-		done
-	fi
-	if [[ -n "$best" ]]; then
-		if ((matches > 1)); then
-			warn "有 ${matches} 个 run 的 03-bolt/xn.final 都等于产物 sha256，取最后一个：$best"
-		fi
-		printf 'sha256\t%s\n' "$best"
-		return 0
-	fi
-	best="$(printf '%s\n' ${cands[@]+"${cands[@]}"} | sort -r | head -n1)"
-	[[ -n "$best" ]] || return 1
-	warn "xn.tuned.env 没有 run_dir，也没有 run 的 03-bolt/xn.final 对得上产物 sha256；取最新的 run：$best"
-	printf 'newest\t%s\n' "$best"
+# 文件字节数（日志里报「多大」用）。
+bytes_of() { wc -c < "$1" | tr -d '[:space:]'; }
+
+# 字节数 → 人读。
+human_bytes() { # $1=字节数
+	awk -v b="${1:-0}" 'BEGIN {
+		split("B K M G T", u, " ")
+		i = 1
+		while (b >= 1024 && i < 5) { b /= 1024; i++ }
+		if (i == 1) printf "%d%s", b, u[i]
+		else printf "%.1f%s", b, u[i]
+	}'
 }
 
 have_tuned() { # $1=src
 	[[ -f "$1/release.sh" ]] && grep -q -- '--tuned' "$1/release.sh"
+}
+
+have_pack() { # $1=src
+	[[ -f "$1/release.sh" ]] && grep -q -- '--pack' "$1/release.sh"
 }
 
 # 直接从上游 Cargo.toml 读 xn 版本号（workspace.package，其次 package）。
@@ -296,22 +254,9 @@ prepare_version() {
 	note "xn 版本：${version}（发布 tag：${tag}）"
 }
 
-# 发布出去的环境文件不要带本地路径 / 主机名：run_dir、workload、host、uname 脱敏。
-# trace 包里的 run_dir 换成相对路径 run（run/ 就在同一个包内），其余照旧脱敏。
-sanitize_env() { # $1=输入 $2=输出 [$3=run_dir 的替换值，默认 <redacted>]
-	local rd="${3:-<redacted>}"
-	awk -v rd="$rd" '
-		/^run_dir=/ { print "run_dir=" rd; next }
-		/^workload=/ { print "workload=<redacted>"; next }
-		/^host=/ { print "host=<redacted>"; next }
-		/^uname=/ { print "uname=<redacted>"; next }
-		{ print }
-	' "$1" > "$2"
-}
-
 require_platform() {
 	is_linux_x86_64 || die "当前只支持原生 Linux x86_64（BOLT 需要 --emit-relocs）；本机 $(uname -s)/$(uname -m)。
-                     macOS 只能用上游 build-tuned.sh 跑到 optimize，不能用 --tuned。"
+                     macOS 只用上游 build-tuned.sh 跑 PGO-only，不走这个 workflow。"
 	command -v rustc >/dev/null 2>&1 || die "找不到 rustc"
 	local h
 	h="$(rustc -vV 2>/dev/null | sed -n 's/^host: //p')"
@@ -325,10 +270,10 @@ require_platform() {
 	fi
 }
 
-
 prepare_source() {
 	if [[ -n "$src" ]]; then
 		have_tuned "$src" || die "$src/release.sh 没有 --tuned；请换一个包含该提交的 --src，或用 --ref 指到对应分支"
+		have_pack "$src" || die "$src/release.sh 没有 --pack（旧版？）；用 --ref 指向含 --pack 的提交"
 		commit="$(git -C "$src" rev-parse HEAD 2>/dev/null || echo unknown)"
 		ref_label="<local HEAD>"
 		$ref_explicit && warn "--src 已指定，忽略 --ref=${ref}，使用当前 HEAD ${commit:0:12}"
@@ -363,14 +308,46 @@ prepare_source() {
 	commit="$(git -C "$src" rev-parse HEAD)"
 	ref_label="$ref"
 	have_tuned "$src" || die "$src 的 release.sh 没有 --tuned（$ref 太旧？）；用 --ref 指向含该提交的分支/tag"
+	have_pack "$src" || die "$src 的 release.sh 没有 --pack；用 --ref 指向含 --pack 的提交"
 	prepare_version
+}
+
+# 本次要传的 extras（bin 名数组）。
+extra_bins=()
+extra_paths=()
+prepare_extras() {
+	local b found cand
+	extra_bins=()
+	[[ -n "${extras// /}" ]] || return 0
+	extra_bins=(${extras//,/ })
+	for b in ${extra_bins[@]+"${extra_bins[@]}"}; do
+		case "$b" in
+			"" | .* | *[!A-Za-z0-9._-]*) die "extras 里的名字不合法：${b}" ;;
+		esac
+	done
+	# 本机 host == target 时上游走普通 cargo build（target/release）；跨编才落到
+	# target/<triple>/release。两个位置都认。
+	for b in ${extra_bins[@]+"${extra_bins[@]}"}; do
+		found=""
+		for cand in "$src/target/$target/release/$b" "$src/target/release/$b"; do
+			if [[ -x "$cand" ]]; then
+				found="$cand"
+				break
+			fi
+		done
+		[[ -n "$found" ]] || die "缺 extras 产物：${b}（$src/target[/$target]/release/${b}）。
+                     --package-only 不编译；先完整构建一次，或加 --no-extras。"
+		extra_paths+=("$b=$found")
+		note "extras 产物：${b} ← ${found}"
+	done
 }
 
 # ---------------------------------------------------------------- dry-run
 # 只打印计划，不 clone、不建目录、不跑 doctor；在 macOS 上也能用。
 print_plan() {
 	local s="${src:-$root/.cache/xn-src}"
-	local rargs=(--tuned --target "$target")
+	local rargs=(--tuned --target "$target" --pack
+		--pack-log "<out-dir>/build.log" --pack-info "<out-dir>/build-info.txt")
 	[[ -n "$features" ]] && rargs+=(--features "$features")
 	[[ -n "$workload" ]] && rargs+=(--workload "$workload")
 	[[ -n "$freq" ]] && rargs+=(--freq "$freq")
@@ -386,25 +363,19 @@ print_plan() {
 		printf '+ # 若 %q 不是分支/tag：git init + git fetch --depth 1 origin %q\n' "$ref" "$ref"
 	fi
 	if $package_only; then
-		echo "# --package-only：跳过构建，直接打包"
+		echo "# --package-only：跳过构建，直接用 $s/target/$target/release/ 里的产物"
 	else
 		printf '+ (cd %q && ./release.sh' "$s"
-		printf ' %q' "${rargs[@]}"
+		printf ' %s' "${rargs[@]}"
 		printf ')\n'
 	fi
-	printf '+ 打包 %s.tar.xz（xn / LICENSE / docs/configuration.md / THIRD-PARTY-NOTICES.txt）\n' "$base"
-	printf '+ 生成 %s.tar.xz.sha256sum\n' "$base"
-	if $perf_data; then
-		printf '+ 打包 %s.tar.xz（build.log / build-info.txt / xn.tuned.env / run/，含 perf.data；xz -T0 -%s）\n' "$trace_base" "$perf_xz_level"
-	else
-		printf '+ 打包 %s.tar.xz（build.log / build-info.txt / xn.tuned.env / run/，不含 perf.data；xz -T0 -%s）\n' "$trace_base" "$perf_xz_level"
-	fi
-	printf '+ 生成 %s.tar.xz.sha256sum\n' "$trace_base"
+	printf '+ 校验并复制 %s/target/%s/release/{xn.*.tar.xz, SHA256SUMS} → %s\n' "$s" "$target" "$out_dir"
+	printf '+ 打包 extras（不调优）：%s\n' "${extras:-<none>}"
 	if $publish; then
 		if [[ -n "$tag" ]]; then
-			printf '+ gh release create/upload %q --repo %q --clobber <两个包 + 两个 .sha256sum>\n' "$tag" "$release_repo"
+			printf '+ gh release create/upload %q --repo %q --clobber <两个包 + SHA256SUMS + extras>\n' "$tag" "$release_repo"
 		else
-			printf '+ gh release create/upload v<Cargo.toml version> --repo %q --clobber <两个包 + 两个 .sha256sum>\n' "$release_repo"
+			printf '+ gh release create/upload v<Cargo.toml version> --repo %q --clobber <两个包 + SHA256SUMS + extras>\n' "$release_repo"
 		fi
 	fi
 }
@@ -438,9 +409,31 @@ fi
 if ! $package_only; then
 	require_platform
 	prepare_source
+	note "上游：${src}（${commit:0:12}，ref=${ref_label}）"
 
-	echo "==> 上游：${src}（${commit:0:12}，ref=${ref_label}）"
-	build_args=(--tuned --target "$target")
+	# 给 release.sh --pack 收进 trace 包的「外部 workflow 记录」。
+	build_info="$out_dir/build-info.txt"
+	{
+		printf 'format=1\n'
+		printf 'packaged_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+		printf 'source_repo=%s\n' "$repo"
+		printf 'source_ref=%s\n' "$ref_label"
+		printf 'source_commit=%s\n' "$commit"
+		printf 'version=%s\n' "$version"
+		printf 'target=%s\n' "$target"
+		printf 'features=%s\n' "${features:-<default>}"
+		printf 'tests=%s\n' "$tests"
+		printf 'event=%s\n' "${event:-<release.sh default>}"
+		printf 'freq=%s\n' "${freq:-<release.sh default>}"
+		printf 'icf=%s\n' "${icf:-all}"
+		printf 'release_repo=%s\n' "$release_repo"
+		printf 'release_tag=%s\n' "${tag:-<none>}"
+		printf 'note=打包由上游 release.sh --tuned --pack 完成（runtime + trace + SHA256SUMS）\n'
+	} > "$build_info"
+
+	build_args=(--tuned --target "$target" --pack
+		--pack-log "$out_dir/build.log"
+		--pack-info "$build_info")
 	[[ -n "$features" ]] && build_args+=(--features "$features")
 	[[ -n "$workload" ]] && build_args+=(--workload "$workload")
 	[[ -n "$freq" ]] && build_args+=(--freq "$freq")
@@ -450,12 +443,22 @@ if ! $package_only; then
 	$tests || build_args+=(--no-tests)
 	$locked && build_args+=(--locked)
 
-	# release.sh --tuned 固定写这两个路径；不另造中间产物。
 	note "release.sh ${build_args[*]}"
 	( cd "$src" && ./release.sh "${build_args[@]}" ) 2>&1 | tee "$out_dir/build.log"
+
+	# extras：cidr / xn-tui 单独打，**不做 PGO/BOLT**（不在 xn 热路径上，普通构建就够）。
+	# 上游明确要求逐包单独调 cargo —— 一次写多个 -p 会做 feature 合并（xn 的 reqwest/rustls
+	# 会被带进 xn-tui，白白胖 2 MB），所以直接用上游 release.sh 的选包逻辑。
+	if [[ -n "${extras// /}" ]]; then
+		extra_sel=(${extras//,/ })
+		note "构建 extras（不调优）：${extra_sel[*]}"
+		extra_args=(--target "$target")
+		$locked && extra_args+=(--locked)
+		( cd "$src" && ./release.sh "${extra_sel[@]}" "${extra_args[@]}" ) \
+			2>&1 | tee -a "$out_dir/build.log"
+	fi
 else
-	# --package-only 不构建，但仍要有源码来拿 LICENSE / 元数据。
-	# 没给 --src 时只认已存在的托管 checkout，不 clone/fetch/checkout，避免换掉产物对应的代码。
+	# --package-only 不构建，但仍要有源码来拿产物与元数据。
 	if [[ -z "$src" ]]; then
 		src="${XN_SRC_CACHE:-$root/.cache/xn-src}"
 		[[ -d "$src/.git" ]] || die "--package-only 需要 --src 或已存在的 $src"
@@ -464,209 +467,73 @@ else
 	note "package-only：使用现有产物，不重新构建"
 fi
 
-bin="$src/target/$target/release/xn"
-envf="$src/target/$target/release/xn.tuned.env"
-[[ -x "$bin" ]] || die "缺产物：${bin}（--tuned 是否成功？）"
-[[ -f "$envf" ]] || die "缺元数据：$envf"
+# ---------------------------------------------------------------- collect
+release_dir="$src/target/$target/release"
+# release.sh --pack 把三个文件放在 target/<triple>/release/：
+#   xn.<triple>.<flavor>.tar.xz / xn.<triple>.<flavor>.trace.tar.xz / SHA256SUMS
+# flavor 在 Linux 上是 pgo-bolt，macOS PGO-only 是 pgo —— 用 glob 认，不写死。
+runtime_tar=""
+trace_tar=""
+sums=""
+shopt -s nullglob
+for f in "$release_dir"/xn.*.tar.xz; do
+	case "$f" in
+		*.trace.tar.xz) trace_tar="$f" ;;
+		*) runtime_tar="$f" ;;
+	esac
+done
+shopt -u nullglob
+[[ -f "$release_dir/SHA256SUMS" ]] && sums="$release_dir/SHA256SUMS"
+[[ -n "$runtime_tar" ]] || die "缺 runtime 包：$release_dir/xn.*.tar.xz（release.sh --pack 是否成功？）"
+[[ -n "$trace_tar" ]] || die "缺 trace 包：$release_dir/xn.*.trace.tar.xz"
+[[ -n "$sums" ]] || die "缺 SHA256SUMS：$release_dir/SHA256SUMS"
 
-# 产物必须真能跑（release.sh 已验一次；这里再挡一次，避免拿到被别的步骤覆盖的二进制）。
-smoke_dir="$(mktemp -d)"
-if ! ( cd "$smoke_dir" && "$bin" --version >/dev/null 2>&1 ); then
-	rm -rf "$smoke_dir"
-	die "产物无法执行：$bin"
-fi
-rm -rf "$smoke_dir"
+note "产物：$(basename "$runtime_tar")（$(human_bytes "$(bytes_of "$runtime_tar")")）"
+note "      $(basename "$trace_tar")（$(human_bytes "$(bytes_of "$trace_tar")")）"
+cp -p "$runtime_tar" "$trace_tar" "$sums" "$out_dir/"
 
-# ---------------------------------------------------------------- run 目录
-# trace 包真正的主体是上游 run 目录：01-collect / 02-optimize / 03-bolt（bolt.env、
-# hot-functions.tsv、xn.fdata、xn.final）/ logs / manifest.tsv / run.env。
-# 上游早期 release.sh 写 xn.tuned.env 时**没有 run_dir 字段**（v6.0.0 就是这样），
-# 只读 env 会让 trace 包悄悄少掉整个 run/，所以按优先级找：
-#   --run-dir / XN_TUNE_RUN_DIR > env 的 run_dir > 产物 sha256 匹配 > 该 target 最新一份。
-env_sha="$(sed -n 's/^sha256=//p' "$envf" | head -n1 | sed 's/[[:space:]]*$//')"
-run_dir=""
-run_dir_source="none"
-if [[ -n "$run_dir_opt" ]]; then
-	run_dir="$run_dir_opt"
-	run_dir_source="explicit"
-	[[ "$run_dir" == /* ]] || run_dir="$PWD/$run_dir"
+# 校验和自检（SHA256SUMS 里是「sha256 filename」，在 out_dir 里核对）。
+if command -v sha256sum >/dev/null 2>&1; then
+	( cd "$out_dir" && sha256sum -c SHA256SUMS >/dev/null ) || die "SHA256SUMS 校验失败（$out_dir）"
 else
-	run_dir="$(sed -n 's/^run_dir=//p' "$envf" | head -n1 | sed 's/[[:space:]]*$//')"
-	if [[ -n "$run_dir" ]]; then
-		run_dir_source="env"
-		[[ "$run_dir" == /* ]] || run_dir="$src/$run_dir"
-	fi
+	( cd "$out_dir" && shasum -a 256 -c SHA256SUMS >/dev/null ) || die "SHA256SUMS 校验失败（$out_dir）"
 fi
-if [[ -n "$run_dir" && ! -d "$run_dir" ]]; then
-	warn "run 目录不存在：${run_dir}（来源 ${run_dir_source}）"
-	run_dir=""
-	run_dir_source="none"
-fi
-if [[ -z "$run_dir" ]]; then
-	pick="$(xn_pick_run_dir "$env_sha")" || pick=""
-	if [[ -n "$pick" ]]; then
-		run_dir_source="${pick%%$'\t'*}"
-		run_dir="${pick#*$'\t'}"
-	fi
-fi
-if [[ -z "$run_dir" ]]; then
-	if $allow_missing_run; then
-		warn "找不到上游 run 目录（$src/target/tune/*）：trace 包只有日志与环境"
+note "SHA256SUMS 校验通过"
+
+# ---------------------------------------------------------------- extras package
+prepare_extras
+for kv in ${extra_paths[@]+"${extra_paths[@]}"}; do
+	eb="${kv%%=*}"
+	ebin="${kv#*=}"
+	estage="$out_dir/.stage-$eb.$target"
+	rm -rf "$estage"
+	mkdir -p "$estage"
+	cp "$ebin" "$estage/$eb"
+	chmod +x "$estage/$eb"
+	cp "$src/LICENSE" "$estage/LICENSE"
+	efiles=("$eb" LICENSE)
+	if [[ -s "$src/target/THIRD-PARTY-NOTICES.txt" ]]; then
+		cp "$src/target/THIRD-PARTY-NOTICES.txt" "$estage/THIRD-PARTY-NOTICES.txt"
+		efiles+=(THIRD-PARTY-NOTICES.txt)
 	else
-		die "找不到上游 run 目录（$src/target/tune/*）：trace 包会缺掉所有步骤文件。
-                     构建用的 run 已被清掉？用 --run-dir 指过去，或加 --allow-missing-run 只打日志。"
+		warn "没有 THIRD-PARTY-NOTICES.txt：$eb.$target.tar.xz 不带许可清单"
 	fi
-fi
-
-# ---------------------------------------------------------------- package
-# 只打两个包：二进制包 + 全过程包（上游 run 目录里的所有步骤与 perf.data）。
-if $publish; then
-	note "目标 release：${release_repo}@${tag}（版本 ${version}）"
-fi
-
-command -v xz >/dev/null 2>&1 || die "找不到 xz"
-
-# 1) 二进制包：xn / LICENSE / docs/configuration.md / THIRD-PARTY-NOTICES.txt。
-#    不带 xn.tuned.env；构建元数据只在过程包里。
-stage="$out_dir/.stage-$base"
-rm -rf "$stage"
-mkdir -p "$stage/docs"
-cp "$bin" "$stage/xn"
-chmod +x "$stage/xn"
-cp "$src/LICENSE" "$stage/LICENSE"
-
-# 上游配置文档随包发布，路径保持不变（docs/configuration.md）。
-docs_file="$src/docs/configuration.md"
-[[ -f "$docs_file" ]] || die "缺文档：${docs_file}（上游 docs/configuration.md 不存在）"
-cp "$docs_file" "$stage/docs/configuration.md"
-
-files=(xn LICENSE docs/configuration.md)
-if $notices; then
-	notices_file="$src/target/THIRD-PARTY-NOTICES.txt"
-	if [[ ! -s "$notices_file" ]]; then
-		note "生成 THIRD-PARTY-NOTICES.txt（需要 cargo-deny；失败可加 --no-notices）"
-		( cd "$src" && bash scripts/patch-deps.sh && cargo fetch && \
-			bash scripts/gen-notices.sh "$notices_file" ) 2>&1 | tee -a "$out_dir/build.log"
-	fi
-	[[ -s "$notices_file" ]] || die "没有生成 ${notices_file}；装 cargo-deny 或加 --no-notices"
-	cp "$notices_file" "$stage/THIRD-PARTY-NOTICES.txt"
-	files+=(THIRD-PARTY-NOTICES.txt)
-else
-	warn "按 --no-notices 跳过第三方声明文件"
-fi
-
-note "打包 $base.tar.xz（${files[*]}）"
-tar -C "$stage" -cJf "$out_dir/$base.tar.xz" "${files[@]}"
-sha="$(sha256_file "$out_dir/$base.tar.xz")"
-rm -rf "$stage"
-
-# 2) 全过程包：上游 run 目录（各步骤日志 / perf.data / manifest.tsv / bolt.env）
-#    + 本脚本的 build.log / build-info.txt / 脱敏的 xn.tuned.env。
-#    run_dir 在打包前就已经定位好（见上面的「run 目录」段）。
-trace_stage="$out_dir/.stage-$trace_base"
-rm -rf "$trace_stage"
-mkdir -p "$trace_stage"
-if [[ -f "$out_dir/build.log" ]]; then
-	cp "$out_dir/build.log" "$trace_stage/build.log"
-else
-	note "没有 $out_dir/build.log（--package-only 且本目录没构建过），trace 包不含构建日志"
-fi
-sanitize_env "$envf" "$trace_stage/xn.tuned.env" "run"
-# 早期 xn.tuned.env 本来就没有 run_dir 字段：补上包内相对路径，别让读的人以为没收录。
-if [[ -n "$run_dir" ]] && ! grep -q '^run_dir=' "$trace_stage/xn.tuned.env"; then
-	printf 'run_dir=run\n' >> "$trace_stage/xn.tuned.env"
-fi
-
-if [[ -n "$run_dir" ]]; then
-	run_dir="$(cd "$run_dir" && pwd -P)"
-	note "收集上游 run 目录：${run_dir}（来源 ${run_dir_source}）"
-	cp -R -p "$run_dir" "$trace_stage/run"
-	if [[ ! -f "$trace_stage/run/manifest.tsv" ]]; then
-		warn "run/ 里没有 manifest.tsv（run 目录不完整？）"
-	fi
-	if [[ ! -f "$trace_stage/run/03-bolt/bolt.env" ]]; then
-		warn "run/ 里没有 03-bolt/bolt.env（BOLT 步骤没跑完？）"
-	fi
-fi
-
-perf_count=0
-perf_total=0
-if [[ -d "$trace_stage/run" ]]; then
-	perf_total="$(find "$trace_stage/run" -type f -name 'perf.data*' -print 2>/dev/null | wc -l | tr -d '[:space:]')" || perf_total=0
-	if $perf_data; then
-		perf_count="$perf_total"
-	else
-		# 只去掉 perf.data*；各步骤日志、perf.fdata、perf.bolt.yaml 等仍保留。
-		find "$trace_stage/run" -type f -name 'perf.data*' -delete 2>/dev/null || true
-	fi
-	note "run 目录：$(du -sh "$trace_stage/run" | awk '{print $1}')（源 perf.data ${perf_total} 个，收录 ${perf_count} 个）"
-fi
-
-run_file_count=0
-run_steps=""
-if [[ -d "$trace_stage/run" ]]; then
-	run_file_count="$(find "$trace_stage/run" -type f 2>/dev/null | wc -l | tr -d '[:space:]')" || run_file_count=0
-	run_steps="$(cd "$trace_stage/run" && ls -1 | paste -sd, -)"
-	note "run 步骤：${run_steps:-<空>}（${run_file_count} 个文件）"
-fi
-
-{
-	printf 'format=1\n'
-	printf 'packaged_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-	printf 'source_repo=%s\n' "$repo"
-	printf 'source_ref=%s\n' "$ref_label"
-	printf 'source_commit=%s\n' "$commit"
-	printf 'version=%s\n' "$version"
-	printf 'target=%s\n' "$target"
-	printf 'profile=pgo+bolt\n'
-	printf 'features=%s\n' "${features:-<default>}"
-	printf 'tests=%s\n' "$tests"
-	printf 'notices=%s\n' "$notices"
-	printf 'event=%s\n' "${event:-<release.sh default>}"
-	printf 'freq=%s\n' "${freq:-<release.sh default>}"
-	printf 'icf=%s\n' "${icf:-all}"
-	printf 'run_dir=run\n'
-	printf 'run_dir_source=%s\n' "$run_dir_source"
-	printf 'run_steps=%s\n' "${run_steps:-<none>}"
-	printf 'run_files=%s\n' "$run_file_count"
-	printf 'tarball=%s\n' "$base.tar.xz"
-	printf 'tarball_sha256=%s\n' "$sha"
-	printf 'trace_tarball=%s\n' "$trace_base.tar.xz"
-	printf 'perf_data=%s\n' "$perf_data"
-	printf 'perf_data_files=%s\n' "$perf_count"
-	printf 'perf_data_files_source=%s\n' "$perf_total"
-	printf 'release_repo=%s\n' "$release_repo"
-	printf 'release_tag=%s\n' "${tag:-<none>}"
-	printf 'trace_note=上游 run 目录按来源 %s 收录（%s）；run_dir / host / uname / workload 已脱敏\n' "$run_dir_source" "${run_steps:-<none>}"
-} > "$trace_stage/build-info.txt"
-
-note "打包 $trace_base.tar.xz（xz -T0 -${perf_xz_level}，perf.data 大时较慢）"
-tar -C "$trace_stage" -cf - . | xz -T0 "-$perf_xz_level" > "$out_dir/$trace_base.tar.xz"
-rm -rf "$trace_stage"
-
-bytes_of() { wc -c < "$1" | tr -d '[:space:]'; }
-bin_bytes="$(bytes_of "$out_dir/$base.tar.xz")"
-trace_bytes="$(bytes_of "$out_dir/$trace_base.tar.xz")"
-trace_sha="$(sha256_file "$out_dir/$trace_base.tar.xz")"
-
-# 校验和随包发布：每个包一个 .sha256sum（与 sha256sum 默认格式一致）。
-printf '%s  %s\n' "$sha" "$base.tar.xz" > "$out_dir/$base.tar.xz.sha256sum"
-printf '%s  %s\n' "$trace_sha" "$trace_base.tar.xz" > "$out_dir/$trace_base.tar.xz.sha256sum"
-
-note "二进制包：$base.tar.xz（${bin_bytes} 字节，sha256 ${sha:0:16}…）"
-note "过程包：$trace_base.tar.xz（${trace_bytes} 字节，sha256 ${trace_sha:0:16}…，perf.data ${perf_count} 个）"
-if ((trace_bytes > 2 * 1024 * 1024 * 1024)); then
-	warn "过程包超过 GitHub release 单资产 2 GiB 上限；用 --no-perf-data 或更高的 --perf-xz-level 再试"
-fi
+	note "打包 $eb.$target.tar.xz（${efiles[*]}，不调优）"
+	tar -C "$estage" -cJf "$out_dir/$eb.$target.tar.xz" "${efiles[@]}"
+	rm -rf "$estage"
+	eb_sha="$(sha256_file "$out_dir/$eb.$target.tar.xz")"
+	printf '%s  %s\n' "$eb_sha" "$eb.$target.tar.xz" > "$out_dir/$eb.$target.tar.xz.sha256sum"
+	extra_assets+=("$out_dir/$eb.$target.tar.xz" "$out_dir/$eb.$target.tar.xz.sha256sum")
+	note "extras 包：$eb.$target.tar.xz（$(human_bytes "$(bytes_of "$out_dir/$eb.$target.tar.xz")")）"
+done
 
 # ---------------------------------------------------------------- publish
-# release 上放：两个包 + 各自的 .sha256sum（共 4 个资产）；
-# env / build-info / manifest / bolt.env 不再单独上传，都在过程包里。
+# release 上放：runtime 包 + trace 包 + SHA256SUMS（3 个文件），再加 extras 的包与校验和。
 assets=(
-	"$out_dir/$base.tar.xz"
-	"$out_dir/$base.tar.xz.sha256sum"
-	"$out_dir/$trace_base.tar.xz"
-	"$out_dir/$trace_base.tar.xz.sha256sum"
+	"$out_dir/$(basename "$runtime_tar")"
+	"$out_dir/$(basename "$trace_tar")"
+	"$out_dir/SHA256SUMS"
+	${extra_assets[@]+"${extra_assets[@]}"}
 )
 
 if $publish; then
@@ -674,7 +541,6 @@ if $publish; then
 	if [[ -z "${GH_TOKEN:-}" && -z "${GITHUB_TOKEN:-}" ]]; then
 		gh auth status >/dev/null 2>&1 || die "gh 未登录；设 GH_TOKEN（contents:write）或 gh auth login"
 	fi
-	# 默认 tag 是 v<Cargo.toml version>：没有 release 就新建（目标 commit = 本次构建的上游 commit）。
 	if ! gh release view "$tag" --repo "$release_repo" >/dev/null 2>&1; then
 		slug="$(repo_slug || true)"
 		[[ -n "$slug" && "$release_repo" == "$slug" ]] \
@@ -684,21 +550,21 @@ if $publish; then
 			--title "xn $version" \
 			--notes "PGO+BOLT x86_64 GNU build of xn $version from ${commit:0:12}.
 
-- \`${base}.tar.xz\`: binary package (xn / LICENSE / docs/configuration.md / THIRD-PARTY-NOTICES.txt)
-- \`${base}.tar.xz.sha256sum\`: SHA-256 of the binary package
-- \`${trace_base}.tar.xz\`: full build trace (all stages, logs, manifest, bolt.env, perf.data)
-- \`${trace_base}.tar.xz.sha256sum\`: SHA-256 of the trace package"
+- \`$(basename "$runtime_tar")\`: runtime package (xn / LICENSE / docs/configuration.md / THIRD-PARTY-NOTICES.txt)
+- \`$(basename "$trace_tar")\`: build trace (trace-files.txt 列出的诊断文件 + xn.tuned.env + 清单 + build.log / build-info.txt)
+- \`SHA256SUMS\`: \`shasum -a 256 -c SHA256SUMS\`"
 	fi
 	note "上传 ${#assets[@]} 个资产到 $release_repo@$tag"
 	gh release upload "$tag" --repo "$release_repo" --clobber "${assets[@]}"
-	# 旧版曾把 env / build-info / manifest / bolt.env 单独发布；默认清掉，
-	# 保持 release 上只有两个包与各自的 .sha256sum。--keep-legacy 可保留（跨版本对比用）。
+	# 旧版曾把 env / build-info / manifest / bolt.env 单独发布；默认清掉。
 	if $prune_legacy; then
+		base_name="$(basename "$runtime_tar")"
+		base_name="${base_name%.tar.xz}"
 		legacy=(
-			"$base.env"
-			"$base.build-info.txt"
-			"$base.manifest.tsv"
-			"$base.bolt.env"
+			"$base_name.env"
+			"$base_name.build-info.txt"
+			"$base_name.manifest.tsv"
+			"$base_name.bolt.env"
 		)
 		names="$(gh release view "$tag" --repo "$release_repo" --json assets --jq '.assets[].name' 2>/dev/null || true)"
 		for name in "${legacy[@]}"; do
@@ -714,4 +580,4 @@ else
 	note "未加 --publish；产物在 $out_dir"
 fi
 
-note "完成：$out_dir/$base.tar.xz 与 $out_dir/$trace_base.tar.xz（各带 .sha256sum）"
+note "完成：$(basename "$runtime_tar") / $(basename "$trace_tar") / SHA256SUMS 在 $out_dir"

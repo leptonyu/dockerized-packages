@@ -223,8 +223,9 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: xn-pgo-bolt
-          # 只留两个包与各自的 .sha256sum；build.log 在过程包里，不再单独上传。
+          # 调优两个包 + extras（cidr / xn-tui）+ 各自的 .sha256sum；build.log 在过程包里。
           path: |
             xn/dist/*.tar.xz
             xn/dist/*.sha256sum
+            xn/dist/SHA256SUMS
           if-no-files-found: ignore

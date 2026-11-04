@@ -3,8 +3,11 @@
 上游：[`leptonyu/xn`](https://github.com/leptonyu/xn)。本模块不复制调优实现，直接调用上游的：
 
 ```bash
-./release.sh --tuned --target x86_64-unknown-linux-gnu
+./release.sh --tuned --target x86_64-unknown-linux-gnu --pack
 ```
+
+`--pack` 会把 runtime 包、trace 包、`SHA256SUMS` 一起生成到 `target/<triple>/release/`；
+本模块**不再自己打包**，只调用、校验、上传。
 
 默认**不加** cargo features（`tun` + `ebpf` 的默认档）；需要 `quic` 等时显式传
 `--features quic`。上游内部走 `scripts/build-tuned.sh all --profile pgo --bolt`：
@@ -15,7 +18,8 @@ target/x86_64-unknown-linux-gnu/release/xn
 target/x86_64-unknown-linux-gnu/release/xn.tuned.env
 ```
 
-[`build.sh`](build.sh) 只负责取源码、跑这条命令、打两个包（二进制包 + 全过程包），
+[`build.sh`](build.sh) 只负责取源码、跑这条命令、校验产物、复制到 `xn/dist/`，外加把
+`cidr` / `xn-tui` 单独打成不调优的小包，
 并发布回 **`XN_REPO`（默认 `leptonyu/xn`）的 `v<Cargo.toml version>` release**。tag
 直接从上游 `Cargo.toml` 的 workspace 版本读取（当前会得到 `v6.0.0`）；release 不存在
 就新建，存在就追加资产。
@@ -36,14 +40,11 @@ target/x86_64-unknown-linux-gnu/release/xn.tuned.env
 ./xn/build.sh --check
 ./xn/build.sh --dry-run
 
-# 构建成功后上传失败：不重编，直接重传（会重新生成两个包）
+# 构建成功后上传失败：不重编，直接用 target/<triple>/release/ 里现成的产物重传
 ./xn/build.sh --package-only --tag v6.0.0 --publish
 
-# 过程包不带 perf.data（只保留各步骤日志）
-./xn/build.sh --package-only --no-perf-data --publish
-
-# 构建机的 target/tune 被清理过：手动指定 run 目录（否则过程包会缺步骤文件，脚本直接报错）
-./xn/build.sh --package-only --run-dir .cache/xn-src/target/tune/<run> --publish
+# 不想要 extras（cidr / xn-tui）
+./xn/build.sh --no-extras --publish
 
 # 需要 quic 时
 ./xn/build.sh --features quic --publish
@@ -102,65 +103,39 @@ GitHub 托管 runner 没有 PMU/LBR，CI 用 software event：
 
 ## 产物
 
-release 上是两个包 + 各自的 `.sha256sum`（共 4 个资产；不再单独发布 `.env` /
-`.build-info.txt` / `.manifest.tsv` / `.bolt.env`）。
-
-**二进制包** `xn.x86_64-unknown-linux-gnu.pgo-bolt.tar.xz`（tar 内，不带 `xn.tuned.env`）：
+打包由上游 `release.sh --tuned --pack` 完成，本模块只调用、校验、上传。产物落在
+`target/x86_64-unknown-linux-gnu/release/`，`build.sh` 再复制到 `--out-dir`（默认 `xn/dist/`）：
 
 ```text
-xn
-LICENSE
-docs/configuration.md
-THIRD-PARTY-NOTICES.txt
+xn.x86_64-unknown-linux-gnu.pgo-bolt.tar.xz        # runtime 包
+xn.x86_64-unknown-linux-gnu.pgo-bolt.trace.tar.xz  # trace 包
+SHA256SUMS                                         # 两行 sha256 filename
 ```
 
-同目录的 `xn.x86_64-unknown-linux-gnu.pgo-bolt.tar.xz.sha256sum` 是它的校验和
-（`sha256sum -c` 可直接用）。
+- **runtime 包**：`xn` / `LICENSE` / `docs/configuration.md` / `THIRD-PARTY-NOTICES.txt`。
+- **trace 包**：`trace-files.txt` 列出的诊断文件（各步骤日志、`manifest.tsv`、`bolt.env`、
+  `hot-functions.tsv`、`xn.fdata` 等）+ `xn.tuned.env` + 两份清单 +（可选）`build.log` /
+  `build-info.txt`。`trace-replay-files.txt` 里列的 `perf.data` / `xn.stage2` **只留清单、
+  不打进包**；需要逐字节重放 BOLT 时另收。
+- **SHA256SUMS**：`(cd xn/dist && shasum -a 256 -c SHA256SUMS)`。
+- flavor：Linux 上是 `pgo-bolt`，macOS PGO-only 自动变 `pgo`。`build.sh` 用
+  `xn.*.tar.xz` / `xn.*.trace.tar.xz` glob 认产物，不写死 flavor。
+- 发布时上传的就是这三份；`build.sh` 还会把 `trace-files.txt` / `trace-replay-files.txt`
+  的生成交给上游（`release.sh --pack`），不在本地做任何裁剪。
 
-**全过程包** `xn.x86_64-unknown-linux-gnu.pgo-bolt.trace.tar.xz`：
+**额外二进制 `cidr` / `xn-tui`（不调优，`build.sh` 自己打）**：
 
 ```text
-build.log          # 本次 release.sh --tuned 的完整输出
-build-info.txt     # 源码 commit / 参数 / tag / 二进制包 sha256 / run 目录来源
-xn.tuned.env       # 上游 xn.tuned.env（run_dir / host / uname / workload 脱敏）
-run/               # 上游 target/tune/<run>/ 原样收录，即“所有步骤”：
-  run.env          #   target / profile / bolt 开关
-  manifest.tsv     #   各步骤产物清单（build-id / size / sha256）
-  01-collect/...   #   instrument 采集、profraw、merged.profdata、nextest 日志
-  02-optimize/...  #   PGO 重建产物、perf.data、xn.tuned / xn.stage2
-  03-bolt/...      #   bolt.env、hot-functions.tsv、xn.fdata、xn.final
-  logs/            #   每条上游命令与耗时（commands.log）
-  **/perf.data     #   PGO / BOLT 的 perf 采样原始数据
-  **/perf.fdata、perf.bolt.yaml 等
+cidr.x86_64-unknown-linux-gnu.tar.xz      (+ .sha256sum)   # cidr / LICENSE / THIRD-PARTY-NOTICES.txt
+xn-tui.x86_64-unknown-linux-gnu.tar.xz    (+ .sha256sum)   # xn-tui / LICENSE / THIRD-PARTY-NOTICES.txt
 ```
 
-`xn.x86_64-unknown-linux-gnu.pgo-bolt.trace.tar.xz.sha256sum` 是过程包的校验和
-（包内写不下自己的 sha256，所以单独发布）。
-
-- 二进制包随包带上游 `docs/configuration.md`（路径不变）；`xn.tuned.env` 只留在过程包里，
-  构建元数据（`build_id`、`size`、`sha256`、工具版本）都可在那里查到。
-- 二进制包的 sha256 记录在 `build-info.txt` 的 `tarball_sha256`。
-- `run/` 原样收录（含 `manifest.tsv` 的绝对构建路径与各步骤日志），便于复现/排查；
-  `xn.tuned.env` 里的 `run_dir` 改成包内相对路径 `run`（原本没有这个字段时会补上），
-  `host` / `uname` / `workload` 置为 `<redacted>`。
-
-`run/` 是**怎么找到的**（顺序固定，`build-info.txt` 的 `run_dir_source` 记录实际命中哪个）：
-
-1. `--run-dir DIR`（或 `XN_TUNE_RUN_DIR`，相对路径按当前目录算）；
-2. `xn.tuned.env` 里的 `run_dir`（绝对路径，或相对上游 checkout）；
-3. 产物 sha256 匹配：`target/tune/*/03-bolt/xn.final` 的 sha256 等于
-   `xn.tuned.env` 的 `sha256` —— 同一份产物必然出自同一个 run，多份 run 并存时最可靠；
-4. 兜底：该 `target` 下最新的一份 run（按目录名的时间戳倒序，脚本会 warn 提示是猜的）。
-
-上游 `release.sh --tuned` 直到 commit `0920e81`（v6.0.0 那次构建）写 `xn.tuned.env` 时
-**没有 `run_dir` 字段**，只按 env 找会让过程包静悄悄少掉整个 `run/`（v6.0.0 的 trace 里
-就只有 `build.log` / `build-info.txt` / `xn.tuned.env` 三个文件）。所以现在四步都找不到时
-**直接报错**，不再产出没有步骤文件的过程包；确实只想留日志就显式加 `--allow-missing-run`。
-
-- perf.data 很大：`--perf-xz-level N` 控制过程包的 xz 级别（默认 3，`0` 最快）；只想留
-  日志时用 `--no-perf-data`。过程包超过 GitHub release 单资产 2 GiB 上限时脚本会警告。
-- `--publish` 时会顺手删掉旧版本单独发布的 `.env` / `.build-info.txt` / `.manifest.tsv` /
-  `.bolt.env`，release 上只留两个包和各自的 `.sha256sum`；要保留加 `--keep-legacy`。
+- 上游 package 分别是 `xn-cidr-bin` / `xn-tui-bin`（交付的 bin 名才是 `cidr` / `xn-tui`）；
+  它们不在 xn 的热路径上，所以只做普通 `release` 构建，不跑 PGO/BOLT。
+- 构建走上游 `./release.sh cidr xn-tui --target <triple>`：上游逐包单独调 cargo
+  （一次写多个 `-p` 会做 feature 合并，`xn` 的 reqwest/rustls 会被带进 `xn-tui`，白胖 2 MB）。
+- `--extras "cidr xn-tui"` 换/加列表，`--no-extras` 全关；`--package-only` 不编译，
+  `target[/<triple>]/release/` 里没有就报错（要跳过用 `--no-extras`）。
 
 ## 独立 workflow
 
@@ -185,8 +160,9 @@ schedule 绑定：
   既要 checkout，也要创建/更新 release）；本仓库只用它自己的 `GITHUB_TOKEN` 更新
   `XN_LAST_MAIN_SHA`（`actions: write`）。
 - 默认**不加** cargo features；需要时在手动触发的 `features` 输入或本地 `build.sh --features quic` 里加。
-- `Upload build outputs` 收集 `xn/dist/*.tar.xz` 和 `xn/dist/*.sha256sum`（两个包 + 校验和），
-  `build.log` 已经在过程包里，不再单独上传。
+- `Upload build outputs` 收集 `xn/dist/*.tar.xz`、`xn/dist/*.sha256sum` 和
+  `xn/dist/SHA256SUMS`（runtime + trace + 校验和，加 extras 两个包），`build.log` 已经在
+  trace 包里，不再单独上传。
 
 `xn` workflow 与 DNS/network 的每日 release 相互独立；它失败不会撤回其它 workflow 的资产。
 
@@ -214,8 +190,7 @@ schedule 绑定：
   存在就追加/覆盖同名资产（`--clobber`）。上游仓库的 tag 若已存在但 release 不存在，
   会在该 tag 上补建 release。
 - `--release-repo` 指向非上游仓库时，只追加到已有 release，不会在别的仓库自动建 tag。
-- `--package-only` 不重跑构建，但会重新生成两个包（sha256、build-info 都在过程包里）；用于上传重试。
-  它同样要能找到上游 run 目录（默认 `xn/.cache/xn-src/target/tune/<run>/`）：构建机的
-  `target/tune` 被清掉了就用 `--run-dir` 指过去，或 `--allow-missing-run` 只打日志。
-- v6.0.0 那份 trace 包没有 `run/`（当时上游 `xn.tuned.env` 还没写 `run_dir`，脚本也就没得可收）；
-  要拿到 `03-bolt/bolt.env` / `hot-functions.tsv` 这些步骤文件，得用新版脚本重跑一次构建。
+- `--package-only` 不重跑构建，直接用 `target/<triple>/release/` 里现成的三个文件重传；
+  缺文件就报错（先跑一次完整构建），也不编译 extras（缺就用 `--no-extras`）。
+- 打包内容（收哪些文件、perf.data 收不收）完全由上游 `trace-files.txt` /
+  `trace-replay-files.txt` 决定，本模块不再有 `--perf-data` / `--trace-exclude` 这类裁剪开关。
