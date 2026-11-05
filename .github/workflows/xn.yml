@@ -173,6 +173,29 @@ jobs:
         run: |
           rustup toolchain install stable --profile minimal
           rustup default stable
+      - name: Install sccache
+        # 上游 docs/dev-environment.md 的装法：`brew install sccache` / `cargo install sccache`，
+        # 目的是让 scripts/cargo-env.sh 在 PATH → $CARGO_HOME/bin → ~/.cargo/bin 里找到它。
+        # CI 用预编译二进制（同样落在 $CARGO_HOME/bin），省掉现场编译 sccache 的几分钟。
+        uses: taiki-e/install-action@sccache
+      - name: Verify sccache
+        # 直接 source 上游的 scripts/cargo-env.sh —— 它就是 release.sh 每次跑时用的探测
+        # 逻辑。确认它真把 RUSTC_WRAPPER 设成 sccache（否则会打「这次构建不套 sccache」），
+        # 再真编一个空程序走一遍 wrapper，别等 60 分钟构建后才发现缓存没生效。
+        run: |
+          set -euo pipefail
+          env_sh="$GITHUB_WORKSPACE/.cache/xn-src/scripts/cargo-env.sh"
+          [[ -f "$env_sh" ]] || { echo "上游 checkout 里没有 scripts/cargo-env.sh"; exit 1; }
+          source "$env_sh"
+          echo "RUSTC_WRAPPER=${RUSTC_WRAPPER:-<unset>}"
+          test "${RUSTC_WRAPPER:-}" = sccache
+          sccache --version
+          tmp="$(mktemp -d)"
+          printf 'fn main() {}\n' > "$tmp/t.rs"
+          RUSTC_WRAPPER=sccache rustc "$tmp/t.rs" -o "$tmp/t"
+          "$tmp/t"
+          sccache --show-stats | sed -n '1,6p'
+          sccache --stop-server || true
       - name: Install cargo-nextest
         # release.sh --tuned 默认用 pgo.sh tests 跑 release 档 nextest 采样。
         uses: taiki-e/install-action@nextest
@@ -185,6 +208,9 @@ jobs:
           LLVM_PROFDATA: /usr/lib/llvm-23/bin/llvm-profdata
           INPUT_FEATURES: ${{ inputs.features }}
           INPUT_TAG: ${{ inputs.tag }}
+          # 缓存目录由 cargo-env.sh 指到 target/sccache（跟检出走）；fresh runner 上
+          # 命中本来就少，压到 1G，免得和 PGO 的 target 抢那 14G 盘。
+          SCCACHE_CACHE_SIZE: 1G
         run: |
           set -euo pipefail
           args=(

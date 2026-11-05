@@ -89,6 +89,7 @@ sudo sysctl --system
 rustup toolchain install stable --profile minimal
 cargo install --locked cargo-nextest
 cargo install --locked cargo-deny   # 只有生成 THIRD-PARTY-NOTICES.txt 时需要
+cargo install --locked sccache      # 可选：上游脚本探测到就 RUSTC_WRAPPER=sccache（缓存 target/sccache）
 ```
 
 `release.sh --tuned` 默认跑 `pgo.sh tests`（release 档 nextest）；没有 `cargo-nextest`
@@ -174,6 +175,15 @@ schedule 绑定：
   `build.sh` 新建，`--target` 是本次构建的上游 commit；存在时只追加资产。
 - `ubuntu-latest` + software event `cpu-clock:u`，不依赖 runner PMU；安装 LLVM 23 /
   `bolt-23` / perf / nextest / cargo-deny 与上游 tag release 同口径。
+- **sccache**：上游 `scripts/cargo-env.sh` 每次启动都按 `PATH` → `$CARGO_HOME/bin` →
+  `~/.cargo/bin` 探测 sccache，找不到就打一行「这次构建不套 sccache」的提示（不是错误）。
+  workflow 用 `taiki-e/install-action@sccache` 装预编译版（落到 `$CARGO_HOME/bin`，
+  等价于上游文档里的 `cargo install sccache`，但不用现场编译）；随后 `source` 上游的
+  `scripts/cargo-env.sh` 断言 `RUSTC_WRAPPER=sccache` 并真编一个空程序——装不上/找不到
+  就直接失败，不会再让那句提示混进构建日志。缓存写上游的 `target/sccache`
+  （`SCCACHE_CACHE_SIZE=1G`，fresh runner 命中本来就少，别和 PGO 的 `target/` 抢盘）。
+  PGO 三阶段换了 RUSTFLAGS、BOLT 又不经过 rustc，真正的重编还是绕不开；
+  要临时关掉用 `XN_SCCACHE=off`。
 - 私有上游需要仓库 secret **`XN_REPO_TOKEN`**（对 `leptonyu/xn` **`contents: write`**：
   既要 checkout，也要创建/更新 release）；本仓库只用它自己的 `GITHUB_TOKEN` 更新
   `XN_LAST_MAIN_SHA`（`actions: write`）。
