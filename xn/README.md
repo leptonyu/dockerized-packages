@@ -9,9 +9,13 @@
 `--pack` 会把 runtime 包、trace 包、`SHA256SUMS` 一起生成到 `target/<triple>/release/`；
 本模块**不再自己打包**，只调用、校验、上传。
 
+> **现状**：`--bolt` 暂不启用（`x86_64-unknown-linux-gnu` 目前只跑 PGO）；`perf` /
+> `bolt-23` 这些 BOLT 依赖照常安装，后续要启用时直接加 `--bolt`，不用再改环境。
+
 默认**不加** cargo features（`tun` + `ebpf` 的默认档）；需要 `quic` 等时显式传
-`--features quic`。上游内部走 `scripts/build-tuned.sh all --profile pgo --bolt`：
-loopback 功能套件 + 常规 nextest 采样 → PGO profile 重建 → BOLT，最后固定写：
+`--features quic`。上游内部走 `scripts/build-tuned.sh all --profile pgo`：
+loopback 功能套件 + 常规 nextest 采样 → PGO profile 重建（加 `--bolt` 时才接 BOLT），
+最后固定写：
 
 ```text
 target/x86_64-unknown-linux-gnu/release/xn
@@ -108,7 +112,8 @@ software event 采样不受影响。
 时加 `--no-tests` 只跑 loopback 套件。`--no-notices` 可跳过第三方声明生成，但发布产物
 默认应带 `THIRD-PARTY-NOTICES.txt`。
 
-GitHub 托管 runner 没有 PMU/LBR，CI 用 software event：
+BOLT 启用时，GitHub 托管 runner 没有 PMU/LBR，用 software event（未启用 BOLT 时
+`--event` 会被上游忽略，构建日志里会提示「本次未加 --bolt」）：
 
 ```bash
 --event cpu-clock:u --freq 999
@@ -174,7 +179,7 @@ xn-tui.x86_64-unknown-linux-gnu.tar.xz    (+ .sha256sum)   # xn-tui / LICENSE / 
 schedule 绑定：
 
 - **不按天编译**：每小时（`:17`）只解析一次上游 `leptonyu/xn` 的 `main` SHA，只有 SHA
-  变化才跑 PGO+BOLT；没有变化时 check job 几秒结束。
+  变化才跑构建（当前 PGO-only）；没有变化时 check job 几秒结束。
 - 已构建的 main SHA 记在仓库变量 **`XN_LAST_MAIN_SHA`**（并用 `actions/cache` 的
   `xn-main-sha-<sha>` 标记兜底）；只在发布成功后更新，失败/取消不会记账，下一轮会重试。
 - 支持上游主动触发：`repository_dispatch`，`event_type: xn-main-updated`，
@@ -185,12 +190,9 @@ schedule 绑定：
   改写 `XN_LAST_MAIN_SHA`。
 - 留空 `tag` 时直接读上游 `Cargo.toml` 的版本（`v<version>`）；release 不存在时由
   `build.sh` 新建，`--target` 是本次构建的上游 commit；存在时只追加资产。
-- `ubuntu-latest` + software event `cpu-clock:u`，不依赖 runner PMU；安装 LLVM 23 /
-  `bolt-23` / perf / nextest / cargo-deny。perf 走 `install-perf.sh`（原因见上），
-  其余与上游 tag release 同口径；装完还会跑一次 `perf record` 自检，**失败只告警、
-  不拦构建** —— 托管 runner 的 `perf_event_open` 有被平台拒绝的先例
-  （[runner-images#4974](https://github.com/actions/runner-images/issues/4974)），
-  而且上游现在默认 PGO-only（不传 `--bolt`）时用不到 perf 采样。
+- `ubuntu-latest`；安装 LLVM 23 / `bolt-23` / perf / nextest / cargo-deny。perf 走
+  `install-perf.sh`（原因见上），其余与上游 tag release 同口径。BOLT 暂不启用，安装
+  步骤只确认 perf 可用、不跑 `perf record`；依赖照装，后续启用时不用改 workflow。
 - **sccache**：上游 `scripts/cargo-env.sh` 每次启动都按 `PATH` → `$CARGO_HOME/bin` →
   `~/.cargo/bin` 探测 sccache，找不到就打一行「这次构建不套 sccache」的提示（不是错误）。
   workflow 用 `taiki-e/install-action@sccache` 装预编译版（落到 `$CARGO_HOME/bin`，

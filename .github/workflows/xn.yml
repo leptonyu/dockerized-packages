@@ -4,6 +4,9 @@ name: Build xn (PGO+BOLT)
 # repository_dispatch）才跑 60–90 分钟的 PGO+BOLT。构建成功后把 SHA 写进仓库变量
 # XN_LAST_MAIN_SHA；下一次看到同一个 SHA 就跳过。
 #
+# 目前不传 --bolt：release.sh 走 PGO-only。perf / bolt-23 仍照装，后续要启用 BOLT
+# 时加参数即可，不用再改环境。
+#
 # 发布目标是 leptonyu/xn 的 v<Cargo.toml version> release：不存在就新建（tag 指向本次
 # 构建的上游 commit），存在就追加资产；需要写权限的 XN_REPO_TOKEN。
 #
@@ -148,8 +151,8 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
       - name: Install system dependencies
-        # 与上游 tag release 同一套：LLVM 23 + bolt-23 + perf。
-        # 托管 runner 没有 PMU/LBR，用 software event cpu-clock:u。
+        # 与上游 tag release 同一套：LLVM 23 + bolt-23 + perf。BOLT 暂时不启用，
+        # perf 装而不用；启用 --bolt 时用 software event cpu-clock:u（托管 runner 没有 PMU/LBR）。
         run: |
           set -euo pipefail
           sudo apt-get update
@@ -170,21 +173,10 @@ jobs:
           echo "/usr/lib/llvm-23/bin" >> "$GITHUB_PATH"
           echo 'kernel.perf_event_paranoid=1' | sudo tee /etc/sysctl.d/99-xn-perf.conf >/dev/null
           sudo sysctl --system
+          # BOLT 没启用，这里只确认 perf 装上了；真要开 --bolt 时再加一次
+          # `perf record -e <event> -- sleep 0.1` 的真采样自检
+          # （托管 runner 的 perf_event_open 有被平台拒绝的先例，runner-images#4974）。
           perf --version
-          # 自检一次真采样，但**不阻塞**：GitHub 托管 runner 的 perf_event_open 有被
-          # 平台拒绝的先例（runner-images#4974，EPERM，root 也一样），而上游当前默认
-          # PGO-only（未加 --bolt）时用不到 perf 采样。这里只把真实报错打出来，方便
-          # 真要开 BOLT 时判断 runner 能不能跑。
-          probe="$(mktemp)"
-          err="$(mktemp)"
-          if perf record -e "${{ inputs.event || 'cpu-clock:u' }}" -o "$probe" -- sleep 0.1 2>"$err"; then
-            echo "perf record 自检通过（$(uname -r)，$(perf --version 2>&1 | head -n1)）"
-          else
-            rc=$?
-            echo "::warning::perf record 失败（exit ${rc}）；BOLT stage2 启用后会失败"
-            sed 's/^/  /' "$err" || true
-          fi
-          rm -f "$probe" "$err"
           /usr/lib/llvm-23/bin/llvm-bolt --version
       - name: Install Rust
         run: |
