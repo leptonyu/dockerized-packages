@@ -65,23 +65,30 @@ CI 用 `actions/checkout` 把上游放到指定目录，再 `--src` 传进来，
 必须是**原生 Linux x86_64**：BOLT 需要链接期 `--emit-relocs` 的重定位节，zig 交叉档
 （macOS、musl 容器）拿不到；`release.sh --tuned` 也会提前拒绝非原生 Linux。
 
-Ubuntu 24.04 / Debian 13 一套（与上游
-[`docs/dev-environment.md`](https://github.com/leptonyu/xn/blob/main/docs/dev-environment.md)
-一致）：
+Ubuntu 24.04 / Debian 13 一套，大体照上游
+[`docs/dev-environment.md`](https://github.com/leptonyu/xn/blob/main/docs/dev-environment.md)，
+只有 perf 的装法不同（见下）：
 
 ```bash
 sudo apt-get update
 sudo apt-get install -y build-essential pkg-config cmake perl nasm \
-  clang lld linux-tools-common linux-tools-generic \
+  clang lld \
   libclang-dev libssl-dev zlib1g-dev liblzma-dev \
   curl git xz-utils file binutils python3 openssl lsb-release
+
+# perf：**不要**装 linux-tools-generic —— 它是 metapackage，按 uname -r 依赖
+# linux-tools-<ver>-<flavor>；Ubuntu archive 的 metapackage 偶尔领先于具体包
+# （pocket 同步滞后），apt 会整体失败：
+#   linux-tools-generic : Depends: linux-tools-6.8.0-149-generic but it is not installable
+#   E: Unable to correct problems, you have held broken packages.
+# 见 Launchpad #2140491。脚本按「内核同版 → 同版不带 flavor → archive 最新版」
+# 挑一个确实存在的具体包（Debian 用 linux-perf），链到 /usr/local/bin/perf。
+./xn/install-perf.sh
 
 curl -fsSL https://apt.llvm.org/llvm.sh -o /tmp/llvm.sh && chmod +x /tmp/llvm.sh
 sudo /tmp/llvm.sh 23
 sudo apt-get install -y llvm-23 llvm-23-tools bolt-23 lld-23 clang-23
 
-# perf：generic 包装不在 PATH 时补一条
-for p in /usr/lib/linux-tools/*/perf; do [ -x "$p" ] && sudo ln -sf "$p" /usr/local/bin/perf && break; done
 echo 'kernel.perf_event_paranoid=1' | sudo tee /etc/sysctl.d/99-xn-perf.conf >/dev/null
 sudo sysctl --system
 
@@ -91,6 +98,11 @@ cargo install --locked cargo-nextest
 cargo install --locked cargo-deny   # 只有生成 THIRD-PARTY-NOTICES.txt 时需要
 cargo install --locked sccache      # 可选：上游脚本探测到就 RUSTC_WRAPPER=sccache（缓存 target/sccache）
 ```
+
+[`install-perf.sh`](install-perf.sh) 可以单独重跑；装完会打印最终选中的 perf 与版本。
+`build.sh` 在编译前也会检查 `perf`，装不上就直接退出，不会等一小时才在 BOLT
+stage2 里失败。内核比 `linux-tools` 包新的时候（archive 还没同步）perf 会略旧于内核，
+software event 采样不受影响。
 
 `release.sh --tuned` 默认跑 `pgo.sh tests`（release 档 nextest）；没有 `cargo-nextest`
 时加 `--no-tests` 只跑 loopback 套件。`--no-notices` 可跳过第三方声明生成，但发布产物
@@ -174,7 +186,8 @@ schedule 绑定：
 - 留空 `tag` 时直接读上游 `Cargo.toml` 的版本（`v<version>`）；release 不存在时由
   `build.sh` 新建，`--target` 是本次构建的上游 commit；存在时只追加资产。
 - `ubuntu-latest` + software event `cpu-clock:u`，不依赖 runner PMU；安装 LLVM 23 /
-  `bolt-23` / perf / nextest / cargo-deny 与上游 tag release 同口径。
+  `bolt-23` / perf / nextest / cargo-deny。perf 走 `install-perf.sh`（原因见上），
+  其余与上游 tag release 同口径；装完还跑一次 `perf record` 真采样自检。
 - **sccache**：上游 `scripts/cargo-env.sh` 每次启动都按 `PATH` → `$CARGO_HOME/bin` →
   `~/.cargo/bin` 探测 sccache，找不到就打一行「这次构建不套 sccache」的提示（不是错误）。
   workflow 用 `taiki-e/install-action@sccache` 装预编译版（落到 `$CARGO_HOME/bin`，

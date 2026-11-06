@@ -308,6 +308,11 @@ require_platform() {
 	is_linux_x86_64 || die "当前只支持原生 Linux x86_64（BOLT 需要 --emit-relocs）；本机 $(uname -s)/$(uname -m)。
                      macOS 只用上游 build-tuned.sh 跑 PGO-only，不走这个 workflow。"
 	command -v rustc >/dev/null 2>&1 || die "找不到 rustc"
+	# perf 装不上时别等一小时：BOLT stage2 的采样全靠它。
+	command -v perf >/dev/null 2>&1 \
+		|| die "找不到 perf（BOLT 采样要用）；Ubuntu 跑 ./xn/install-perf.sh，不要装 linux-tools-generic（archive 滞后会报 broken packages）"
+	perf --version >/dev/null 2>&1 \
+		|| die "perf 在 PATH 里但跑不起来（多半是 linux-tools-common 的包装脚本没找到对应内核的 perf）；跑 ./xn/install-perf.sh 把它链到 /usr/local/bin/perf"
 	local h
 	h="$(rustc -vV 2>/dev/null | sed -n 's/^host: //p')"
 	[[ "$h" == "$target" ]] || die "rustc host 是 ${h:-?}，需要 $target"

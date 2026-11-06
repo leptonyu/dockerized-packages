@@ -154,20 +154,28 @@ jobs:
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y build-essential pkg-config cmake perl nasm \
-            clang lld linux-tools-common linux-tools-generic \
+            clang lld \
             libclang-dev libssl-dev zlib1g-dev liblzma-dev \
             curl git xz-utils file binutils python3 openssl lsb-release
+          # perf 不走 linux-tools-generic：它按 uname -r 依赖
+          # linux-tools-<ver>-<flavor>，Ubuntu archive 的 metapackage 偶尔领先于
+          # 具体包（pocket 同步滞后），apt 会整体报 "held broken packages"
+          # （Launchpad #2140491）。脚本按版本挑一个确实存在的包并链到
+          # /usr/local/bin/perf。
+          ./xn/install-perf.sh
           curl -fsSL https://apt.llvm.org/llvm.sh -o /tmp/llvm.sh
           chmod +x /tmp/llvm.sh
           sudo /tmp/llvm.sh 23
           sudo apt-get install -y llvm-23 llvm-23-tools bolt-23 lld-23 clang-23
           echo "/usr/lib/llvm-23/bin" >> "$GITHUB_PATH"
-          for p in /usr/lib/linux-tools/*/perf; do
-            [ -x "$p" ] && sudo ln -sf "$p" /usr/local/bin/perf && break
-          done
           echo 'kernel.perf_event_paranoid=1' | sudo tee /etc/sysctl.d/99-xn-perf.conf >/dev/null
           sudo sysctl --system
           perf --version
+          # 真采一次样：perf 与内核 ABI 不匹配时 --version 看不出来，record 会先炸；
+          # 别等 60 分钟的 PGO+BOLT 跑到 stage2 才发现。software event 不依赖 PMU。
+          probe="$(mktemp)"
+          sudo "$(command -v perf)" record -q -e cpu-clock:u -o "$probe" -- sleep 0.05
+          sudo rm -f "$probe"
           /usr/lib/llvm-23/bin/llvm-bolt --version
       - name: Install Rust
         run: |
