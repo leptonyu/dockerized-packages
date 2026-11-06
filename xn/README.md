@@ -187,7 +187,10 @@ schedule 绑定：
   `build.sh` 新建，`--target` 是本次构建的上游 commit；存在时只追加资产。
 - `ubuntu-latest` + software event `cpu-clock:u`，不依赖 runner PMU；安装 LLVM 23 /
   `bolt-23` / perf / nextest / cargo-deny。perf 走 `install-perf.sh`（原因见上），
-  其余与上游 tag release 同口径；装完还跑一次 `perf record` 真采样自检。
+  其余与上游 tag release 同口径；装完还会跑一次 `perf record` 自检，**失败只告警、
+  不拦构建** —— 托管 runner 的 `perf_event_open` 有被平台拒绝的先例
+  （[runner-images#4974](https://github.com/actions/runner-images/issues/4974)），
+  而且上游现在默认 PGO-only（不传 `--bolt`）时用不到 perf 采样。
 - **sccache**：上游 `scripts/cargo-env.sh` 每次启动都按 `PATH` → `$CARGO_HOME/bin` →
   `~/.cargo/bin` 探测 sccache，找不到就打一行「这次构建不套 sccache」的提示（不是错误）。
   workflow 用 `taiki-e/install-action@sccache` 装预编译版（落到 `$CARGO_HOME/bin`，

@@ -171,11 +171,20 @@ jobs:
           echo 'kernel.perf_event_paranoid=1' | sudo tee /etc/sysctl.d/99-xn-perf.conf >/dev/null
           sudo sysctl --system
           perf --version
-          # 真采一次样：perf 与内核 ABI 不匹配时 --version 看不出来，record 会先炸；
-          # 别等 60 分钟的 PGO+BOLT 跑到 stage2 才发现。software event 不依赖 PMU。
+          # 自检一次真采样，但**不阻塞**：GitHub 托管 runner 的 perf_event_open 有被
+          # 平台拒绝的先例（runner-images#4974，EPERM，root 也一样），而上游当前默认
+          # PGO-only（未加 --bolt）时用不到 perf 采样。这里只把真实报错打出来，方便
+          # 真要开 BOLT 时判断 runner 能不能跑。
           probe="$(mktemp)"
-          sudo "$(command -v perf)" record -q -e cpu-clock:u -o "$probe" -- sleep 0.05
-          sudo rm -f "$probe"
+          err="$(mktemp)"
+          if perf record -e "${{ inputs.event || 'cpu-clock:u' }}" -o "$probe" -- sleep 0.1 2>"$err"; then
+            echo "perf record 自检通过（$(uname -r)，$(perf --version 2>&1 | head -n1)）"
+          else
+            rc=$?
+            echo "::warning::perf record 失败（exit ${rc}）；BOLT stage2 启用后会失败"
+            sed 's/^/  /' "$err" || true
+          fi
+          rm -f "$probe" "$err"
           /usr/lib/llvm-23/bin/llvm-bolt --version
       - name: Install Rust
         run: |
