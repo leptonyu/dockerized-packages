@@ -70,10 +70,21 @@ jobs:
         run: bash ./xn/tests/run-all.sh
 
   upstream:
-    name: upstream xn suite
-    runs-on: ubuntu-latest
+    name: upstream xn suite (${{ matrix.arch }})
+    # GOAL-112：x86_64 与 aarch64 各一档。eBPF 条目在 hosted runner 上也能真跑 ——
+    # 不是 self-hosted 专属：走 XN_LINUX_VM_CONTAINER=1 的特权 Alpine 容器
+    # （scripts/test/ci-ebpf.sh），内核用宿主的（BTF + cgroup2 + netns）。
+    runs-on: ${{ matrix.runner }}
     # GitHub-hosted 单 job 上限 6h。
     timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
     env:
       CARGO_INCREMENTAL: "0"
       CARGO_PROFILE_DEV_DEBUG: line-tables-only
@@ -107,6 +118,7 @@ jobs:
             echo ""
             echo "- suite: \`${{ inputs.suite }}\`"
             echo "- ref: \`${{ inputs.ref || 'main' }}\`"
+            echo "- arch: \`${{ matrix.arch }}\`"
             echo "- commit: \`$sha\`"
             echo "- subject: $(git log -1 --format=%s)"
           } >> "$GITHUB_STEP_SUMMARY"
@@ -125,6 +137,22 @@ jobs:
 
       - name: Check registry and catalog
         run: scripts/test/run.sh check
+
+      # GOAL-112：先只放开 smoke.ebpf.*（最稳的一档）；稳定后再把 --category 换成
+      # e2e / unit.ebpf.reload。容器镜像 alpine:3.24 与 apk.lock 对齐；工具链
+      # （cargo-zigbuild / zig / <guest target> 的 std）由 ci-ebpf.sh 自动装进
+      # .cargo-home。环境不满足（缺 docker/BTF）时这一步退 2，不静默 skip。
+      - name: eBPF smoke (privileged Alpine container)
+        env:
+          SUITE: ${{ inputs.suite }}
+        run: |
+          set -euo pipefail
+          case "$SUITE" in
+            all|nightly|smoke|manual) ;;
+            *) echo "suite=$SUITE 不含 eBPF 子集，跳过"; exit 0 ;;
+          esac
+          sudo -E env "PATH=$PATH" "HOME=$HOME" \
+            scripts/test/ci-ebpf.sh --category smoke --keep-going
 
       - name: Run unified tests
         env:
@@ -148,7 +176,7 @@ jobs:
           SUITE: ${{ inputs.suite }}
         run: |
           set -euo pipefail
-          out="xn-test-logs-${SUITE}.tar.gz"
+          out="xn-test-logs-${SUITE}-${{ matrix.arch }}.tar.gz"
           if [ ! -d target/test-runs ]; then
             echo "没有 target/test-runs，跳过打包"
             exit 0
@@ -164,7 +192,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: xn-test-logs-${{ inputs.suite }}
-          path: xn-test-logs-${{ inputs.suite }}.tar.gz
+          name: xn-test-logs-${{ inputs.suite }}-${{ matrix.arch }}
+          path: xn-test-logs-${{ inputs.suite }}-${{ matrix.arch }}.tar.gz
           if-no-files-found: warn
           retention-days: 14
