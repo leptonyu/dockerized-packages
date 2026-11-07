@@ -1,11 +1,14 @@
-name: xn-tests
+name: Test xn
+run-name: "Test xn (${{ inputs.tier != 'none' && inputs.tier || inputs.suite }})"
 
 # 两件事，都在手动触发时跑：
 #   - repo tests：跑本仓库的离线测试（xn/tests/run-all.sh，几秒完成）；
 #   - upstream：额外 checkout 上游 leptonyu/xn 的最新 commit，用它的 GOAL-111
 #     统一测试入口（scripts/test/all.sh）跑完整测试套件。
-#     `all` 只跑职能分类（unit/smoke/e2e/bench/perf）；pgo 是派生工作流（引用 tests-all
-#     的条目），不进 all —— 要跑 PGO 用 suite=pgo。
+#     两个下拉：suite（分类）与 tier（档位，none = 按 suite）。`all` 只跑职能分类
+#     （unit/smoke/e2e/bench/perf）；pgo 是派生工作流（引用 tests-all 的条目），不进
+#     all —— 要跑 PGO 选 suite=pgo。choice 下拉的项数有上限：原来 11 项时 pgo 在 UI 里
+#     根本显示不出来，所以拆成 suite（分类）+ tier（档位）两个下拉（各 ≤ 10 项）。
 #
 # 触发方式和 xn.yml 一致：只用 workflow_dispatch，不在 push / PR 上自动跑。
 #
@@ -24,22 +27,29 @@ on:
   workflow_dispatch:
     inputs:
       suite:
-        description: "统一测试 suite（all = registry 里全部 active 职能条目；pgo 除外）"
+        description: "统一测试 suite（分类；all = 所有职能条目，pgo 需显式选）"
         type: choice
         required: true
         default: all
         options:
           - all
-          - nightly
-          - pr
-          - release
-          - manual
           - unit
           - smoke
           - e2e
           - bench
           - perf
           - pgo
+      tier:
+        description: "按 tier 跑（none = 按上面的 suite；选了就忽略 suite 的分类）"
+        type: choice
+        required: true
+        default: none
+        options:
+          - none
+          - pr
+          - nightly
+          - release
+          - manual
       ref:
         description: "上游 ref（留空 = main 的最新 commit）"
         required: false
@@ -119,7 +129,7 @@ jobs:
           {
             echo "### xn-tests"
             echo ""
-            echo "- suite: \`${{ inputs.suite }}\`"
+            echo "- suite: \`${{ inputs.suite }}\` / tier: \`${{ inputs.tier }}\`"
             echo "- ref: \`${{ inputs.ref || 'main' }}\`"
             echo "- arch: \`${{ matrix.arch }}\`"
             echo "- commit: \`$sha\`"
@@ -141,6 +151,21 @@ jobs:
       - name: Check registry and catalog
         run: scripts/test/run.sh check
 
+      - name: Resolve suite
+        id: pick
+        env:
+          SUITE: ${{ inputs.suite }}
+          TIER: ${{ inputs.tier }}
+        run: |
+          set -euo pipefail
+          if [ "$TIER" != "none" ]; then
+            echo "pick=$TIER" >> "$GITHUB_OUTPUT"
+            echo "== 按 tier 跑：$TIER =="
+          else
+            echo "pick=$SUITE" >> "$GITHUB_OUTPUT"
+            echo "== 按分类跑：$SUITE =="
+          fi
+
       # GOAL-112：先只放开 smoke.ebpf.*（最稳的一档）；稳定后再把 --category 换成
       # e2e / unit.ebpf.reload。`ci-ebpf.sh` 按 `env:vm-linux` 起特权 Alpine 容器
       # （镜像 / 包锁在 environments.toml + apk.lock），并在宿主上准备构建工具链：
@@ -148,13 +173,13 @@ jobs:
       # 环境不满足（缺 docker/BTF）时这一步退 2，不静默 skip。
       - name: eBPF smoke (env:vm-linux)
         env:
-          SUITE: ${{ inputs.suite }}
+          PICK: ${{ steps.pick.outputs.pick }}
           XN_TEST_ENV: vm-linux
         run: |
           set -euo pipefail
-          case "$SUITE" in
+          case "$PICK" in
             all|nightly|smoke|manual) ;;
-            *) echo "suite=$SUITE 不含 eBPF 子集，跳过"; exit 0 ;;
+            *) echo "pick=$PICK 不含 eBPF 子集，跳过"; exit 0 ;;
           esac
           sudo -E env "PATH=$PATH" "HOME=$HOME" \
             scripts/test/ci-ebpf.sh --category smoke --keep-going
@@ -167,13 +192,13 @@ jobs:
 
       - name: Run unified tests
         env:
-          SUITE: ${{ inputs.suite }}
+          PICK: ${{ steps.pick.outputs.pick }}
           KEEP_GOING: ${{ inputs.keep_going }}
           STRICT: ${{ inputs.strict }}
         run: |
           set -euo pipefail
           # run --all 不选 pgo（派生工作流）；要跑 PGO 用 suite=pgo。
-          args=("$SUITE")
+          args=("$PICK")
           if [ "$KEEP_GOING" != "true" ]; then
             args+=(--fail-fast)
           fi
@@ -185,10 +210,10 @@ jobs:
       - name: Package test logs
         if: always()
         env:
-          SUITE: ${{ inputs.suite }}
+          PICK: ${{ steps.pick.outputs.pick }}
         run: |
           set -euo pipefail
-          out="xn-test-logs-${SUITE}-${{ matrix.arch }}.tar.gz"
+          out="xn-test-logs-${PICK}-${{ matrix.arch }}.tar.gz"
           if [ ! -d target/test-runs ]; then
             echo "没有 target/test-runs，跳过打包"
             exit 0
@@ -204,7 +229,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: xn-test-logs-${{ inputs.suite }}-${{ matrix.arch }}
-          path: xn-test-logs-${{ inputs.suite }}-${{ matrix.arch }}.tar.gz
+          name: xn-test-logs-${{ steps.pick.outputs.pick }}-${{ matrix.arch }}
+          path: xn-test-logs-${{ steps.pick.outputs.pick }}-${{ matrix.arch }}.tar.gz
           if-no-files-found: warn
           retention-days: 14
