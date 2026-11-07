@@ -215,6 +215,34 @@ schedule 绑定：
 
 `xn` workflow 与 DNS/network 的每日 release 相互独立；它失败不会撤回其它 workflow 的资产。
 
+## 手动测试（Test xn）
+
+[`xn-tests.yml`](../.github/workflows/xn-tests.yml) 是手动触发的测试入口，不在 push / PR
+自动跑。Actions → **Test xn** → **Run workflow** 的菜单配置：
+
+| 输入 | 取值 | 含义 |
+| --- | --- | --- |
+| `scope` | `all`（默认）/ `repo` / `upstream` | `all` = 本仓库离线测试 + 上游套件；`repo` 只跑 `xn/tests/run-all.sh`；`upstream` 只跑上游 |
+| `suite` | `smoke`（默认）/ `all` / `unit` / `e2e` / `bench` / `perf` / `pgo` | 上游分类。`smoke` 是 GOAL-112 的 5 条 `smoke.ebpf.*`（eBPF 最小矩阵）；`all` 是全部职能条目（数小时，不含 pgo） |
+| `tier` | `none`（默认）/ `pr` / `nightly` / `release` / `manual` | 按档位选；不是 `none` 时覆盖 `suite`（两个下拉不能相加） |
+| `arch` | `both`（默认）/ `x86_64` / `aarch64` | 上游 runner 架构；单架构省一半时间 |
+| `ref` | 空（默认）/ 分支 / commit | 上游 ref；空 = `main` 最新 commit |
+| `keep_going` | `true`（默认）/ `false` | 失败后是否继续；eBPF 与 unified 都遵守 |
+| `strict` | `false`（默认）/ `true` | 缺环境是否按 env-error 失败；默认记 skip。unified 以非 root 跑，hosted 上只能跳过 root/VM 条目；eBPF 步骤始终要求环境（root/docker/BTF）可用 |
+
+触发规则：
+
+- `scope=repo` 不 checkout 上游、不需要 `XN_REPO_TOKEN`。
+- `pick = tier`（非 `none`）或 `suite`；`pick=smoke` 只跑 eBPF 步骤
+  （`scripts/test/ci-ebpf.sh --category smoke`），不再跑 unified —— 避免同一批
+  5 条被非 root 的 unified 再选一次（全部 skip），并让 `last-report.md` 保持
+  eBPF 的结果。
+- `pick=all` / `nightly` 先跑 `scripts/test/all.sh`，再跑 eBPF smoke；eBPF 放在
+  最后，`last-report.md` 是 eBPF 的结果，unified 的汇总另存
+  `last-report-unified.md`。
+- 其它分类只跑 unified；整类都因环境跳过时，`strict=false` 只告警，`strict=true`
+  才失败。
+
 ## 与上游的关系
 
 - 只读上游：不修改 `release.sh`、`scripts/`、`Cargo.toml`；`--patch-all` 等上游开关不碰。
@@ -246,9 +274,7 @@ schedule 绑定：
 - 发布路径有离线自测：`./xn/tests/publish-retry.test.sh`（临时假 `gh`，不联网、不构建），
   覆盖 502 重试、4xx 快速失败、自检发现不一致后重传。仓库级入口是
   `./xn/tests/run-all.sh`（顺带 `bash -n` 全仓脚本），新增 `*/tests/*.test.sh` 会被
-  自动发现。手动触发 `xn-tests` workflow 时先跑本仓库测试，再 checkout 上游最新
-  commit，用其 `scripts/test/all.sh` 跑完整测试套件（在 GitHub-hosted `ubuntu-latest` 上跑；需要
-  `XN_REPO_TOKEN`，缺 root/eBPF/VM 的条目默认 skip）。
+  自动发现。手动测试入口与菜单配置见上面的「手动测试（Test xn）」。
 - `--release-repo` 指向非上游仓库时，只追加到已有 release，不会在别的仓库自动建 tag。
 - `--package-only` 不重跑构建，直接用 `target/<triple>/release/` 里现成的三个文件重传；
   缺文件就报错（先跑一次完整构建），也不编译 extras（缺就用 `--no-extras`）。
