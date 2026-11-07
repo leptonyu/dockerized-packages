@@ -1,7 +1,7 @@
 name: xn-tests
 
 # 两件事，都在手动触发时跑：
-#   - repo tests：跑本仓库的离线测试（tests/run-all.sh，几秒完成）；
+#   - repo tests：跑本仓库的离线测试（xn/tests/run-all.sh，几秒完成）；
 #   - upstream：额外 checkout 上游 leptonyu/xn 的最新 commit，用它的 GOAL-111
 #     统一测试入口（scripts/test/all.sh）跑完整测试套件。
 #
@@ -68,7 +68,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Run repository test suite
-        run: bash ./tests/run-all.sh
+        run: bash ./xn/tests/run-all.sh
 
   upstream:
     name: upstream xn suite

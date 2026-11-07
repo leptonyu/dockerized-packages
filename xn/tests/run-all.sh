@@ -2,19 +2,19 @@
 #
 # 仓库级测试入口：先给所有 shell 脚本做语法检查，再跑各模块的离线测试。
 #
-#   ./tests/run-all.sh              # 全部
-#   ./tests/run-all.sh publish      # 只跑路径里含 publish 的测试
+#   ./xn/tests/run-all.sh              # 全部
+#   ./xn/tests/run-all.sh publish      # 只跑路径里含 publish 的测试
 #
 # 约定：任何模块的 `tests/*.test.sh` 都是离线、可独立运行、失败返回非 0 的脚本；
 # 新增测试直接放进对应模块的 tests/，本脚本和 CI workflow 都不用改。测试统一以
 # 仓库根为 cwd 运行，需要的数据/临时目录自己准备（参见 xn/tests/publish-retry.test.sh）。
 set -uo pipefail
 
-root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$root"
 
 if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-	echo "tests/run-all.sh: 需要在 git 工作区里运行（用 git ls-files 发现目录和测试）" >&2
+	echo "xn/tests/run-all.sh: 需要在 git 工作区里运行（用 git ls-files 发现目录和测试）" >&2
 	exit 2
 fi
 
@@ -30,6 +30,8 @@ tests=()
 tests_count=0
 while IFS= read -r f; do
 	[[ -n "$f" ]] || continue
+	# 工作区里已删除、但删除还没提交：git ls-files 仍会列出，跳过。
+	[[ -f "$f" ]] || continue
 	tests[tests_count]="$f"
 	tests_count=$((tests_count + 1))
 done < <(git ls-files -- '*.test.sh' | sort)
@@ -38,6 +40,7 @@ scripts=()
 scripts_count=0
 while IFS= read -r f; do
 	[[ -n "$f" ]] || continue
+	[[ -f "$f" ]] || continue
 	scripts[scripts_count]="$f"
 	scripts_count=$((scripts_count + 1))
 done < <(git ls-files -- '*.sh' | sort)
@@ -73,7 +76,7 @@ printf '\n== 离线测试（%d 个）\n' "$selected_count"
 if ((selected_count == 0)); then
 	printf '  （没有匹配的测试）\n'
 	if [[ -z "$filter" ]]; then
-		printf 'tests/run-all.sh: 没有发现任何 *.test.sh\n' >&2
+		printf 'xn/tests/run-all.sh: 没有发现任何 *.test.sh\n' >&2
 		exit 1
 	fi
 fi
