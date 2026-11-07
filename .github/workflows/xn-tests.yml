@@ -9,12 +9,12 @@ run-name: "Test xn (${{ inputs.scope }}: ${{ inputs.tier != 'none' && inputs.tie
 # 菜单（Actions → Test xn → Run workflow）里的配置：
 #   scope      all = repo + upstream（默认）；repo = 只跑本仓库；
 #              upstream = 只跑上游（仍需 XN_REPO_TOKEN）
-#   suite      smoke = eBPF 最小矩阵（默认；GOAL-112 的 5 条 smoke.ebpf.*，
-#              几十分钟内出结果）；all = 全部职能条目（unit/smoke/e2e/bench/perf，
-#              数小时；pgo 是派生套件，不进 all）；unit/e2e/bench/perf/pgo = 单类目
+#   suite      all = 全部职能条目（默认；unit/smoke/e2e/bench/perf，数小时；
+#              pgo 是派生套件，不进 all）；smoke = eBPF 最小矩阵（GOAL-112 的 5 条
+#              smoke.ebpf.*，几十分钟内出结果）；unit/e2e/bench/perf/pgo = 单类目
 #              最新 GOAL-112 修复（容器 --pid=host / UDP split catch-all）在
-#              ci-ebpf.sh + linux-vm.sh 内，workflow 不重复实现；默认 smoke 就是
-#              验证这 5 条。
+#              ci-ebpf.sh + linux-vm.sh 内，workflow 不重复实现；选 suite=smoke
+#              可单独验证这 5 条。
 #   tier       none = 按 suite（默认）；pr/nightly/release/manual = 该档全部条目。
 #              两个下拉不能相加：tier 不是 none 时覆盖 suite
 #   arch       both = x86_64 + aarch64（默认）；单架构省一半 runner
@@ -53,10 +53,10 @@ on:
           - repo
           - upstream
       suite:
-        description: "上游分类：smoke=eBPF 最小矩阵（推荐）；all=全部职能条目（数小时）；unit/e2e/bench/perf/pgo=单类目"
+        description: "上游分类：all=全部职能条目（默认，数小时，不含 pgo）；smoke=eBPF 最小矩阵（推荐单独验证）；unit/e2e/bench/perf/pgo=单类目"
         type: choice
         required: true
-        default: smoke
+        default: all
         options:
           - all
           - unit

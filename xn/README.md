@@ -223,7 +223,7 @@ schedule 绑定：
 | 输入 | 取值 | 含义 |
 | --- | --- | --- |
 | `scope` | `all`（默认）/ `repo` / `upstream` | `all` = 本仓库离线测试 + 上游套件；`repo` 只跑 `xn/tests/run-all.sh`；`upstream` 只跑上游 |
-| `suite` | `smoke`（默认）/ `all` / `unit` / `e2e` / `bench` / `perf` / `pgo` | 上游分类。`smoke` 是 GOAL-112 的 5 条 `smoke.ebpf.*`（eBPF 最小矩阵）；`all` 是全部职能条目（数小时，不含 pgo） |
+| `suite` | `all`（默认）/ `smoke` / `unit` / `e2e` / `bench` / `perf` / `pgo` | 上游分类。`all` 是全部职能条目（数小时，不含 pgo）；`smoke` 是 GOAL-112 的 5 条 `smoke.ebpf.*`（eBPF 最小矩阵） |
 | `tier` | `none`（默认）/ `pr` / `nightly` / `release` / `manual` | 按档位选；不是 `none` 时覆盖 `suite`（两个下拉不能相加） |
 | `arch` | `both`（默认）/ `x86_64` / `aarch64` | 上游 runner 架构；单架构省一半时间 |
 | `ref` | 空（默认）/ 分支 / commit | 上游 ref；空 = `main` 最新 commit |
@@ -237,9 +237,11 @@ schedule 绑定：
   （`scripts/test/ci-ebpf.sh --category smoke`），不再跑 unified —— 避免同一批
   5 条被非 root 的 unified 再选一次（全部 skip），并让 `last-report.md` 保持
   eBPF 的结果。
-- `pick=all` / `nightly` 先跑 `scripts/test/all.sh`，再跑 eBPF smoke；eBPF 放在
-  最后，`last-report.md` 是 eBPF 的结果，unified 的汇总另存
-  `last-report-unified.md`。
+- `pick=all` / `nightly` 先跑 `scripts/test/all.sh`，再跑 eBPF smoke —— unified 以
+  非 root 跑，会跳过 `smoke.ebpf.*`，eBPF 步骤用特权容器补上；eBPF 放在最后，
+  `last-report.md` 是 eBPF 的结果，unified 的汇总另存 `last-report-unified.md`。
+- `all` 按上游口径**不含 pgo**（`run --all` 会过滤掉 pgo 类目）；要跑 PGO 显式选
+  `suite=pgo`。
 - 其它分类只跑 unified；整类都因环境跳过时，`strict=false` 只告警，`strict=true`
   才失败。
 
