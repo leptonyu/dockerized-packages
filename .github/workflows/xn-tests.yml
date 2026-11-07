@@ -4,6 +4,8 @@ name: xn-tests
 #   - repo tests：跑本仓库的离线测试（xn/tests/run-all.sh，几秒完成）；
 #   - upstream：额外 checkout 上游 leptonyu/xn 的最新 commit，用它的 GOAL-111
 #     统一测试入口（scripts/test/all.sh）跑完整测试套件。
+#     `all` 只跑职能分类（unit/smoke/e2e/bench/perf）；pgo 是派生工作流（引用 tests-all
+#     的条目），不进 all —— 要跑 PGO 用 suite=pgo。
 #
 # 触发方式和 xn.yml 一致：只用 workflow_dispatch，不在 push / PR 上自动跑。
 #
@@ -22,7 +24,7 @@ on:
   workflow_dispatch:
     inputs:
       suite:
-        description: "统一测试 suite（all = registry 里全部 active 条目）"
+        description: "统一测试 suite（all = registry 里全部 active 职能条目；pgo 除外）"
         type: choice
         required: true
         default: all
@@ -72,8 +74,9 @@ jobs:
   upstream:
     name: upstream xn suite (${{ matrix.arch }})
     # GOAL-112：x86_64 与 aarch64 各一档。eBPF 条目在 hosted runner 上也能真跑 ——
-    # 不是 self-hosted 专属：走 XN_LINUX_VM_CONTAINER=1 的特权 Alpine 容器
-    # （scripts/test/ci-ebpf.sh），内核用宿主的（BTF + cgroup2 + netns）。
+    # 不是 self-hosted 专属：环境 `env:vm-linux`（Linux 后端 = 特权 Alpine 容器，
+    # 定义在 scripts/test/environments.toml），由 scripts/test/ci-ebpf.sh 起容器；
+    # 内核用宿主的（BTF + cgroup2 + netns）。
     runs-on: ${{ matrix.runner }}
     # GitHub-hosted 单 job 上限 6h。
     timeout-minutes: 360
@@ -139,12 +142,14 @@ jobs:
         run: scripts/test/run.sh check
 
       # GOAL-112：先只放开 smoke.ebpf.*（最稳的一档）；稳定后再把 --category 换成
-      # e2e / unit.ebpf.reload。容器镜像 alpine:3.24 与 apk.lock 对齐；工具链
-      # （cargo-zigbuild / zig / <guest target> 的 std）由 ci-ebpf.sh 自动装进
-      # .cargo-home。环境不满足（缺 docker/BTF）时这一步退 2，不静默 skip。
-      - name: eBPF smoke (privileged Alpine container)
+      # e2e / unit.ebpf.reload。`ci-ebpf.sh` 按 `env:vm-linux` 起特权 Alpine 容器
+      # （镜像 / 包锁在 environments.toml + apk.lock），并在宿主上准备构建工具链：
+      #   x86_64 → 原生 cargo + musl-tools + lld（不装 zig）；aarch64 / 跨架构才装 zig。
+      # 环境不满足（缺 docker/BTF）时这一步退 2，不静默 skip。
+      - name: eBPF smoke (env:vm-linux)
         env:
           SUITE: ${{ inputs.suite }}
+          XN_TEST_ENV: vm-linux
         run: |
           set -euo pipefail
           case "$SUITE" in
@@ -154,6 +159,12 @@ jobs:
           sudo -E env "PATH=$PATH" "HOME=$HOME" \
             scripts/test/ci-ebpf.sh --category smoke --keep-going
 
+      # eBPF 这一步是 `sudo -E`：cargo 会把 target/ 与 .cargo-home/ 写成 root 所有，
+      # 后面的非 root 步骤（unified tests）再写同一批目录会 Permission denied。
+      - name: Restore workspace ownership after root eBPF step
+        if: always()
+        run: sudo chown -R "$(id -u):$(id -g)" .cargo-home target 2>/dev/null || true
+
       - name: Run unified tests
         env:
           SUITE: ${{ inputs.suite }}
@@ -161,6 +172,7 @@ jobs:
           STRICT: ${{ inputs.strict }}
         run: |
           set -euo pipefail
+          # run --all 不选 pgo（派生工作流）；要跑 PGO 用 suite=pgo。
           args=("$SUITE")
           if [ "$KEEP_GOING" != "true" ]; then
             args+=(--fail-fast)
