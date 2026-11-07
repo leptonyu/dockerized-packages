@@ -1,0 +1,155 @@
+name: xn-tests
+
+# 两件事，都在手动触发时跑：
+#   - repo tests：跑本仓库的离线测试（tests/run-all.sh，几秒完成）；
+#   - upstream：额外 checkout 上游 leptonyu/xn 的最新 commit，用它的 GOAL-111
+#     统一测试入口（scripts/test/all.sh）跑完整测试套件。
+#
+# 触发方式和 xn.yml 一致：只用 workflow_dispatch，不在 push / PR 上自动跑。
+#
+# 这里只跑测试，不构建、不发布；打包仍由 xn.yml 负责（跟踪上游 main）。
+# 上游对应本地 ../rust/xn，CI 里用 XN_REPO_TOKEN checkout leptonyu/xn 的 main。
+#
+# 为什么不自动触发：smoke / e2e / perf / pgo 需要 root、eBPF、VM、perf 等
+# 专用环境，PR 上自动跑只会制造假红或长时间占用 runner。和上游 test.yml 的
+# 触发纪律一致：需要时在 Actions → xn-tests → Run workflow。
+#
+# 上游 job 默认用自托管 runner（标签 [self-hosted, linux, xn-nightly]，与上游
+# test.yml 相同），完整套件需要：Linux + root + eBPF + Alpine 风格 apk + python3 +
+# rustup；缺环境的条目默认记 skip（strict=true 时按 env-error 失败）。需要仓库
+# secret XN_REPO_TOKEN（对 leptonyu/xn 至少 contents:read）。
+
+on:
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: "统一测试 suite（all = registry 里全部 active 条目）"
+        type: choice
+        required: true
+        default: all
+        options:
+          - all
+          - nightly
+          - pr
+          - release
+          - manual
+          - unit
+          - smoke
+          - e2e
+          - bench
+          - perf
+          - pgo
+      ref:
+        description: "上游 ref（留空 = main 的最新 commit）"
+        required: false
+        default: ""
+      keep_going:
+        description: "失败后继续跑完（结果仍按最差状态退出）"
+        type: boolean
+        default: true
+      strict:
+        description: "缺环境按 env-error 失败（默认 false：记 skip，异地可跑）"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: xn-tests-${{ github.ref }}
+  # 手动触发的上游套件可能跑几小时，不要被后一次 run 取消。
+  cancel-in-progress: false
+
+jobs:
+  repo-tests:
+    name: repo tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - name: Run repository test suite
+        run: bash ./tests/run-all.sh
+
+  upstream:
+    name: upstream xn suite
+    runs-on: [self-hosted, linux, xn-nightly]
+    # all 可能跑几小时；GitHub 单 job 上限 24h。
+    timeout-minutes: 1440
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+      # 历史 Linux VM 口径：Linux 宿主直接执行 guest 脚本（不再起 qemu）。
+      XN_LINUX_VM_NATIVE: "1"
+    steps:
+      - name: Check XN_REPO_TOKEN
+        env:
+          TOKEN: ${{ secrets.XN_REPO_TOKEN }}
+        run: |
+          if [ -z "${TOKEN:-}" ]; then
+            echo "::error::需要仓库 secret XN_REPO_TOKEN（对 leptonyu/xn 至少 contents:read）"
+            exit 1
+          fi
+
+      - name: Checkout upstream xn
+        uses: actions/checkout@v7
+        with:
+          repository: leptonyu/xn
+          ref: ${{ inputs.ref || 'main' }}
+          token: ${{ secrets.XN_REPO_TOKEN }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Record upstream commit
+        id: upstream
+        run: |
+          sha="$(git rev-parse HEAD)"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          {
+            echo "### xn-tests"
+            echo ""
+            echo "- suite: \`${{ inputs.suite }}\`"
+            echo "- ref: \`${{ inputs.ref || 'main' }}\`"
+            echo "- commit: \`$sha\`"
+            echo "- subject: $(git log -1 --format=%s)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Install Rust (rust-toolchain.toml)
+        run: |
+          set -euo pipefail
+          toolchain="$(sed -n 's/^channel *= *"\([^"]*\)".*/\1/p' rust-toolchain.toml)"
+          [ -n "$toolchain" ] || { echo "::error::rust-toolchain.toml 里没有 channel"; exit 1; }
+          rustup set profile minimal
+          rustup toolchain install "$toolchain"
+          rustup component add --toolchain "$toolchain" clippy rustfmt
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Check registry and catalog
+        run: scripts/test/run.sh check
+
+      - name: Run unified tests
+        env:
+          SUITE: ${{ inputs.suite }}
+          KEEP_GOING: ${{ inputs.keep_going }}
+          STRICT: ${{ inputs.strict }}
+        run: |
+          set -euo pipefail
+          args=("$SUITE")
+          if [ "$KEEP_GOING" != "true" ]; then
+            args+=(--fail-fast)
+          fi
+          if [ "$STRICT" = "true" ]; then
+            args+=(--strict)
+          fi
+          scripts/test/all.sh "${args[@]}"
+
+      - name: Upload test runs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: xn-test-runs-${{ inputs.suite }}
+          path: target/test-runs
+          if-no-files-found: warn
+          retention-days: 14

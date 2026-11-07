@@ -244,7 +244,11 @@ schedule 绑定：
   不会因为一个 502 就把「传到一半」的 release 留在那里。但消费端不要跨构建 pin hash，
   要稳定就按具体构建钉（tag 带构建号目前还没做）。旧的汇总 `SHA256SUMS` 资产会被删掉。
 - 发布路径有离线自测：`./xn/tests/publish-retry.test.sh`（临时假 `gh`，不联网、不构建），
-  覆盖 502 重试、4xx 快速失败、自检发现不一致后重传。
+  覆盖 502 重试、4xx 快速失败、自检发现不一致后重传。仓库级入口是
+  `./tests/run-all.sh`（顺带 `bash -n` 全仓脚本），新增 `*/tests/*.test.sh` 会被
+  自动发现。手动触发 `xn-tests` workflow 时先跑本仓库测试，再 checkout 上游最新
+  commit，用其 `scripts/test/all.sh` 跑完整测试套件（需要自托管 `xn-nightly`
+  runner 和 `XN_REPO_TOKEN`）。
 - `--release-repo` 指向非上游仓库时，只追加到已有 release，不会在别的仓库自动建 tag。
 - `--package-only` 不重跑构建，直接用 `target/<triple>/release/` 里现成的三个文件重传；
   缺文件就报错（先跑一次完整构建），也不编译 extras（缺就用 `--no-extras`）。
