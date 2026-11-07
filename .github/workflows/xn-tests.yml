@@ -11,13 +11,12 @@ name: xn-tests
 # 上游对应本地 ../rust/xn，CI 里用 XN_REPO_TOKEN checkout leptonyu/xn 的 main。
 #
 # 为什么不自动触发：smoke / e2e / perf / pgo 需要 root、eBPF、VM、perf 等
-# 专用环境，PR 上自动跑只会制造假红或长时间占用 runner。和上游 test.yml 的
-# 触发纪律一致：需要时在 Actions → xn-tests → Run workflow。
+# 专用环境，自动跑只会制造假红或长时间占用 runner。需要时在
+# Actions → xn-tests → Run workflow。
 #
-# 上游 job 默认用自托管 runner（标签 [self-hosted, linux, xn-nightly]，与上游
-# test.yml 相同），完整套件需要：Linux + root + eBPF + Alpine 风格 apk + python3 +
-# rustup；缺环境的条目默认记 skip（strict=true 时按 env-error 失败）。需要仓库
-# secret XN_REPO_TOKEN（对 leptonyu/xn 至少 contents:read）。
+# 上游 job 跑在 GitHub-hosted ubuntu-latest；需要 root / eBPF / VM / perf 的
+# 条目由 all.sh 按环境记 skip（strict=true 时按 env-error 失败）。私有上游
+# 需要仓库 secret XN_REPO_TOKEN（对 leptonyu/xn 至少 contents:read）。
 
 on:
   workflow_dispatch:
@@ -72,15 +71,13 @@ jobs:
 
   upstream:
     name: upstream xn suite
-    runs-on: [self-hosted, linux, xn-nightly]
-    # all 可能跑几小时；GitHub 单 job 上限 24h。
-    timeout-minutes: 1440
+    runs-on: ubuntu-latest
+    # GitHub-hosted 单 job 上限 6h。
+    timeout-minutes: 360
     env:
       CARGO_INCREMENTAL: "0"
       CARGO_PROFILE_DEV_DEBUG: line-tables-only
       CARGO_PROFILE_TEST_DEBUG: line-tables-only
-      # 历史 Linux VM 口径：Linux 宿主直接执行 guest 脚本（不再起 qemu）。
-      XN_LINUX_VM_NATIVE: "1"
     steps:
       - name: Check XN_REPO_TOKEN
         env:

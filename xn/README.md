@@ -247,8 +247,8 @@ schedule 绑定：
   覆盖 502 重试、4xx 快速失败、自检发现不一致后重传。仓库级入口是
   `./xn/tests/run-all.sh`（顺带 `bash -n` 全仓脚本），新增 `*/tests/*.test.sh` 会被
   自动发现。手动触发 `xn-tests` workflow 时先跑本仓库测试，再 checkout 上游最新
-  commit，用其 `scripts/test/all.sh` 跑完整测试套件（需要自托管 `xn-nightly`
-  runner 和 `XN_REPO_TOKEN`）。
+  commit，用其 `scripts/test/all.sh` 跑完整测试套件（在 GitHub-hosted `ubuntu-latest` 上跑；需要
+  `XN_REPO_TOKEN`，缺 root/eBPF/VM 的条目默认 skip）。
 - `--release-repo` 指向非上游仓库时，只追加到已有 release，不会在别的仓库自动建 tag。
 - `--package-only` 不重跑构建，直接用 `target/<triple>/release/` 里现成的三个文件重传；
   缺文件就报错（先跑一次完整构建），也不编译 extras（缺就用 `--no-extras`）。
