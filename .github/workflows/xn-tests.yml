@@ -142,11 +142,29 @@ jobs:
           fi
           scripts/test/all.sh "${args[@]}"
 
-      - name: Upload test runs
+      - name: Package test logs
+        if: always()
+        env:
+          SUITE: ${{ inputs.suite }}
+        run: |
+          set -euo pipefail
+          out="xn-test-logs-${SUITE}.tar.gz"
+          if [ ! -d target/test-runs ]; then
+            echo "没有 target/test-runs，跳过打包"
+            exit 0
+          fi
+          # 只收 result.json / stdout.log / stderr.log；artifacts/ 可能很大，排除。
+          tar -czf "$out" \
+            --exclude='target/test-runs/*/artifacts' \
+            --exclude='target/test-runs/*/artifacts/*' \
+            target/test-runs
+          du -h "$out"
+
+      - name: Upload test logs
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: xn-test-runs-${{ inputs.suite }}
-          path: target/test-runs
+          name: xn-test-logs-${{ inputs.suite }}
+          path: xn-test-logs-${{ inputs.suite }}.tar.gz
           if-no-files-found: warn
           retention-days: 14
