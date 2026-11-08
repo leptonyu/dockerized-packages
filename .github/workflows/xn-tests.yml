@@ -10,8 +10,7 @@ run-name: "Test xn (${{ inputs.mode }})"
 #   pgo      上游编 PGO（control + 优化产物）并跑 pgo.compare：bin 尺寸 + t1 同机 A/B
 #            （root + linux-native；跑不了 perf rig 自动退 pgo.compare.size）
 #
-# 固定跑 x86_64 + aarch64 两个架构（两个 job 的 matrix 都在文件里写死）；上游 ref 固定
-# main。没有别的输入。
+# 架构固定为 **x86_64 Linux + aarch64 macOS**；上游 ref 固定 main。没有别的输入。
 
 on:
   workflow_dispatch:
@@ -62,7 +61,7 @@ jobs:
         include:
           - runner: ubuntu-24.04
             arch: x86_64
-          - runner: ubuntu-24.04-arm
+          - runner: macos-14
             arch: aarch64
     steps:
       - name: Check XN_REPO_TOKEN
@@ -125,7 +124,7 @@ jobs:
       # eBPF：`ci-ebpf.sh` 按 env:vm-linux 起特权 Alpine 容器，并在宿主准备构建工具链
       # （x86_64 → 原生 cargo + musl-tools + lld；aarch64 / 跨架构才装 zig）。
       - name: eBPF smoke (env:vm-linux)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && runner.os == 'Linux' }}
         env:
           XN_TEST_ENV: vm-linux
         run: |
@@ -135,7 +134,7 @@ jobs:
       # eBPF 步骤是 sudo：cargo 会把 target/ 与 .cargo-home/ 写成 root 所有，后面的
       # 非 root 步骤（打包 / 上传）再读同一批目录会 Permission denied。
       - name: Restore workspace ownership after root eBPF step
-        if: always()
+        if: always() && runner.os == 'Linux'
         run: sudo chown -R "$(id -u):$(id -g)" .cargo-home target 2>/dev/null || true
       - name: Package test logs
         if: always()
@@ -180,7 +179,7 @@ jobs:
         include:
           - runner: ubuntu-24.04
             arch: x86_64
-          - runner: ubuntu-24.04-arm
+          - runner: macos-14
             arch: aarch64
     steps:
       - name: Check XN_REPO_TOKEN
@@ -208,6 +207,7 @@ jobs:
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
       - name: Install build dependencies
+        if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends lld clang
       - name: Check registry and catalog
         run: scripts/test/run.sh check
