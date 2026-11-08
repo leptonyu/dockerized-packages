@@ -372,6 +372,14 @@ jobs:
             echo "没有 target/test-runs，跳过打包"
             exit 0
           fi
+          # 汇总原文进 job 日志（artifact 之外一眼可见）。eBPF 步骤会把 unified 的
+          # last-report.md 顶掉，所以 unified 那份（改名保留的）也一起打。
+          for report in target/test-runs/last-report.md target/test-runs/last-report-unified.md; do
+            [[ -f "$report" ]] || continue
+            echo "::group::$report"
+            cat "$report"
+            echo "::endgroup::"
+          done
           # 只收 result.json / stdout.log / stderr.log；artifacts/ 可能很大，排除。
           tar -czf "$out" \
             --exclude='target/test-runs/*/artifacts' \
