@@ -328,9 +328,9 @@ require_platform() {
 		# 交叉：目前只支持 x86_64 Linux 宿主 → armv7 Linux musl（其它目标没有采样来源）。
 		cross=true
 		[[ "$host_triple" == x86_64-unknown-linux-gnu ]] \
-			|| die "交叉构建目前只支持 x86_64 Linux 宿主（当前 $host_triple）"
+			|| die "交叉构建目前只支持 x86_64 Linux 宿主（当前 ${host_triple}）"
 		[[ "$target" == armv7-unknown-linux-musleabihf ]] \
-			|| die "交叉构建目前只支持 armv7-unknown-linux-musleabihf（当前 $target）"
+			|| die "交叉构建目前只支持 armv7-unknown-linux-musleabihf（当前 ${target}）"
 		return 0
 	fi
 	cross=false

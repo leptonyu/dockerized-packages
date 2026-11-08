@@ -100,6 +100,8 @@ jobs:
           rustup component add --toolchain "$toolchain" clippy rustfmt
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
+      - name: Install sccache
+        uses: taiki-e/install-action@sccache
       - name: Check registry and catalog
         run: scripts/test/run.sh check
       - name: Run unified tests
@@ -209,6 +211,8 @@ jobs:
           rustup component add --toolchain "$toolchain" llvm-tools-preview
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
+      - name: Install sccache
+        uses: taiki-e/install-action@sccache
       - name: Install build dependencies
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends lld clang
@@ -222,7 +226,7 @@ jobs:
           set -euo pipefail
           report=target/test-runs/last-report.md
           if [[ ! -f "$report" ]]; then
-            echo "没有 $report（没跑到汇总就退出了）"
+            echo "没有 ${report}（没跑到汇总就退出了）"
             exit 0
           fi
           echo "::group::$report"
