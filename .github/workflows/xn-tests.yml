@@ -64,7 +64,7 @@ jobs:
         include:
           - runner: ubuntu-24.04
             arch: x86_64
-          - runner: macos-14
+          - runner: macos-15
             arch: aarch64
     steps:
       - name: Check XN_REPO_TOKEN
@@ -182,7 +182,7 @@ jobs:
         include:
           - runner: ubuntu-24.04
             arch: x86_64
-          - runner: macos-14
+          - runner: macos-15
             arch: aarch64
     steps:
       - name: Check XN_REPO_TOKEN

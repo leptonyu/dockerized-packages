@@ -6,7 +6,7 @@ run-name: "发布 XN · ${{ inputs.target || 'all' }}"
 #   x86_64-linux-gnu         ubuntu-latest，原生 PGO（BOLT 默认不开）
 #   armv7-linux-musleabihf   ubuntu-latest，交叉；PGO profile 复用同 job 里 x86_64 那轮采样
 #                            （armv7 二进制任何 runner 都跑不了，没法自采；只出 runtime 包）
-#   aarch64-macos            macos-14（Apple silicon），原生 PGO（BOLT 不可用）
+#   aarch64-macos            macos-15（Apple silicon），原生 PGO（BOLT 不可用）
 #
 # 触发：每小时检查上游 main SHA（未变就跳过）；手动 force；repository_dispatch
 # `xn-main-updated`。构建成功把 SHA 记到 XN_LAST_MAIN_SHA；发布到上游 v<Cargo.toml version>
@@ -274,7 +274,7 @@ jobs:
       needs.check.outputs.changed == 'true' && (
         needs.check.outputs.target == 'all' ||
         needs.check.outputs.target == 'aarch64-macos')
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 180
     steps:
       - uses: actions/checkout@v7
