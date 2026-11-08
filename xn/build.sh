@@ -27,8 +27,13 @@
 # 另外（同样 release.sh --pack，不调优；老版本才回退手工打）：
 #   cidr.<triple>.tar.xz / xn-tui.<triple>.tar.xz（各带 .sha256sum）
 #
-# 为什么必须原生 Linux x86_64：BOLT 需要 --emit-relocs 的重定位节，zig 交叉档
-# （macOS / musl 容器）拿不到。macOS 只能用 PGO-only（flavor 会变成 pgo）。
+# 平台（`--target`，默认 x86_64-unknown-linux-gnu）：
+#   * x86_64-unknown-linux-gnu：原生；BOLT 要 --emit-relocs，zig 交叉档拿不到。
+#   * aarch64-apple-darwin：在 macOS runner 上原生跑，PGO-only（flavor 变成 pgo）。
+#   * armv7-unknown-linux-musleabihf：任何 runner 都不是它的 host ⇒ 走交叉：用
+#     `--profile` 指定一份已有的 merged.profdata（缺省取 src/target/tune/ 下最新的
+#     x86_64 run），`pgo.sh use` 出二进制；**没有 trace 包**（跨架构没有 build-tuned 的
+#     采样目录），只打 runtime 包。
 #
 # 典型用法：
 #   ./xn/build.sh                     # 构建 + 打包（不发布）
@@ -68,7 +73,10 @@ prune_legacy=true
 extras="${XN_EXTRAS-cidr xn-tui}"
 extra_assets=()
 
-target="x86_64-unknown-linux-gnu"
+target="${XN_TARGET:-x86_64-unknown-linux-gnu}"
+profile_file="${XN_PGO_PROFILE:-}"
+host_triple=""
+cross=false
 
 die() { echo "xn/build.sh: $*" >&2; exit 2; }
 note() { echo "==> $*" >&2; }
@@ -116,6 +124,10 @@ usage() {
   --src DIR            本地 xn checkout（CI 里由 actions/checkout 提供；给了就不再 clone）
   --repo URL           上游仓库，默认 git@github.com:leptonyu/xn.git
   --ref REF            分支 / tag / commit，默认 main（须包含 release.sh --tuned --pack）
+  --target TRIPLE      构建目标，默认 x86_64-unknown-linux-gnu；macOS 用
+                       aarch64-apple-darwin，交叉 armv7 用 armv7-unknown-linux-musleabihf
+  --profile FILE       交叉目标的 PGO profile（merged.profdata）；缺省取 src/target/tune/
+                       下最新的 x86_64 run（armv7 二进制跑不了，只能复用采样）
   --out-dir DIR        产物目录，默认 xn/dist
   --release-repo R     release 所在仓库；默认 = --repo / XN_REPO 的 owner/repo
   --tag TAG            目标 release tag；默认直接读 Cargo.toml 的 v<version>
@@ -157,6 +169,10 @@ while (($#)); do
 		--repo=*) repo="${1#*=}"; shift ;;
 		--ref) need_value "$1" "$#"; ref="$2"; ref_explicit=true; shift 2 ;;
 		--ref=*) ref="${1#*=}"; ref_explicit=true; shift ;;
+		--target) need_value "$1" "$#"; target="$2"; shift 2 ;;
+		--target=*) target="${1#*=}"; shift ;;
+		--profile) need_value "$1" "$#"; profile_file="$2"; shift 2 ;;
+		--profile=*) profile_file="${1#*=}"; shift ;;
 		--out-dir) need_value "$1" "$#"; out_dir="$2"; shift 2 ;;
 		--out-dir=*) out_dir="${1#*=}"; shift ;;
 		--release-repo) need_value "$1" "$#"; release_repo="$2"; shift 2 ;;
@@ -305,22 +321,31 @@ prepare_version() {
 }
 
 require_platform() {
-	is_linux_x86_64 || die "当前只支持原生 Linux x86_64（BOLT 需要 --emit-relocs）；本机 $(uname -s)/$(uname -m)。
-                     macOS 只用上游 build-tuned.sh 跑 PGO-only，不走这个 workflow。"
 	command -v rustc >/dev/null 2>&1 || die "找不到 rustc"
-	# perf 装不上时别等一小时：BOLT stage2 的采样全靠它。
-	command -v perf >/dev/null 2>&1 \
-		|| die "找不到 perf（BOLT 采样要用）；Ubuntu 跑 ./xn/install-perf.sh，不要装 linux-tools-generic（archive 滞后会报 broken packages）"
-	perf --version >/dev/null 2>&1 \
-		|| die "perf 在 PATH 里但跑不起来（多半是 linux-tools-common 的包装脚本没找到对应内核的 perf）；跑 ./xn/install-perf.sh 把它链到 /usr/local/bin/perf"
-	local h
-	h="$(rustc -vV 2>/dev/null | sed -n 's/^host: //p')"
-	[[ "$h" == "$target" ]] || die "rustc host 是 ${h:-?}，需要 $target"
-	if [[ -r /proc/sys/kernel/perf_event_paranoid ]]; then
-		local p
-		p="$(cat /proc/sys/kernel/perf_event_paranoid 2>/dev/null || echo '?')"
-		if [[ "$p" =~ ^[0-9]+$ ]] && ((p > 2)); then
-			die "kernel.perf_event_paranoid=${p}，perf record 会被拒绝；先 sudo sysctl kernel.perf_event_paranoid=1"
+	host_triple="$(rustc -vV 2>/dev/null | sed -n 's/^host: //p')"
+	[[ -n "$host_triple" ]] || die "拿不到 rustc host"
+	if [[ "$target" != "$host_triple" ]]; then
+		# 交叉：目前只支持 x86_64 Linux 宿主 → armv7 Linux musl（其它目标没有采样来源）。
+		cross=true
+		[[ "$host_triple" == x86_64-unknown-linux-gnu ]] \
+			|| die "交叉构建目前只支持 x86_64 Linux 宿主（当前 $host_triple）"
+		[[ "$target" == armv7-unknown-linux-musleabihf ]] \
+			|| die "交叉构建目前只支持 armv7-unknown-linux-musleabihf（当前 $target）"
+		return 0
+	fi
+	cross=false
+	# 原生。Linux 上 BOLT 采样要 perf（PGO-only 用不到，但保持原口径）；macOS 走 PGO-only。
+	if [[ "$(uname -s)" == Linux ]]; then
+		command -v perf >/dev/null 2>&1 \
+			|| die "找不到 perf（BOLT 采样要用）；Ubuntu 跑 ./xn/install-perf.sh，不要装 linux-tools-generic（archive 滞后会报 broken packages）"
+		perf --version >/dev/null 2>&1 \
+			|| die "perf 在 PATH 里但跑不起来（多半是 linux-tools-common 的包装脚本没找到对应内核的 perf）；跑 ./xn/install-perf.sh 把它链到 /usr/local/bin/perf"
+		if [[ -r /proc/sys/kernel/perf_event_paranoid ]]; then
+			local p
+			p="$(cat /proc/sys/kernel/perf_event_paranoid 2>/dev/null || echo '?')"
+			if [[ "$p" =~ ^[0-9]+$ ]] && ((p > 2)); then
+				die "kernel.perf_event_paranoid=${p}，perf record 会被拒绝；先 sudo sysctl kernel.perf_event_paranoid=1"
+			fi
 		fi
 	fi
 }
@@ -482,20 +507,39 @@ if ! $package_only; then
 	$tests || build_args+=(--no-tests)
 	$locked && build_args+=(--locked)
 
-	# extras 先编：cidr / xn-tui **不做 PGO/BOLT**（不在 xn 热路径上，普通构建就够），
-	# 而且**必须逐包单独调用** release.sh —— 一次写多个包（或用多个 -p）会做 feature
-	# 合并：xn 的 reqwest/rustls 会被带进 xn-tui，白胖 2 MB，构建产物也不是同一套。
-	if [[ -n "${extras// /}" ]]; then
-		extra_args=(--target "$target" --pack)
-		$locked && extra_args+=(--locked)
-		for b in ${extras//,/ }; do
-			note "构建 extras（不调优）：${b}（单独调用 release.sh --pack）"
-			( cd "$src" && ./release.sh "$b" "${extra_args[@]}" ) 2>&1 | tee -a "$out_dir/build.log"
-		done
-	fi
+	if $cross; then
+		# 交叉：profile 只能复用。缺省取 src/target/tune/ 下最新的 x86_64 run。
+		prof="${profile_file:-}"
+		if [[ -z "$prof" ]]; then
+			prof="$(ls -dt "$src"/target/tune/*/01-collect/merged.profdata 2>/dev/null | head -1 || true)"
+		fi
+		[[ -n "$prof" && -f "$prof" ]] \
+			|| die "交叉构建需要 --profile FILE（或先在同一个 checkout 里跑一遍 x86_64 的 build-tuned，留出 target/tune/*/01-collect/merged.profdata）"
+		note "交叉构建：pgo.sh use --target ${target}（profile=${prof}）"
+		use_args=(--target "$target" --cargo-profile release --profile "$prof")
+		[[ -n "$features" ]] && use_args+=(--features "$features")
+		$locked && use_args+=(--locked)
+		( cd "$src" && ./scripts/pgo.sh use "${use_args[@]}" ) 2>&1 | tee -a "$out_dir/build.log"
+		# 只有 runtime 包：跨架构没有 build-tuned 的 trace 目录。
+		note "交叉打包：pack-release.sh（runtime 包，无 trace）"
+		pack_args=(--release-dir "target/$target/release" --target "$target" --bin xn --flavor tuned)
+		( cd "$src" && ./scripts/pack-release.sh "${pack_args[@]}" ) 2>&1 | tee -a "$out_dir/build.log"
+	else
+		# extras 先编：cidr / xn-tui **不做 PGO/BOLT**（不在 xn 热路径上，普通构建就够），
+		# 而且**必须逐包单独调用** release.sh —— 一次写多个包（或用多个 -p）会做 feature
+		# 合并：xn 的 reqwest/rustls 会被带进 xn-tui，白胖 2 MB，构建产物也不是同一套。
+		if [[ -n "${extras// /}" ]]; then
+			extra_args=(--target "$target" --pack)
+			$locked && extra_args+=(--locked)
+			for b in ${extras//,/ }; do
+				note "构建 extras（不调优）：${b}（单独调用 release.sh --pack）"
+				( cd "$src" && ./release.sh "$b" "${extra_args[@]}" ) 2>&1 | tee -a "$out_dir/build.log"
+			done
+		fi
 
-	note "release.sh ${build_args[*]}"
-	( cd "$src" && ./release.sh "${build_args[@]}" ) 2>&1 | tee "$out_dir/build.log"
+		note "release.sh ${build_args[*]}"
+		( cd "$src" && ./release.sh "${build_args[@]}" ) 2>&1 | tee "$out_dir/build.log"
+	fi
 else
 	# --package-only 不构建，但仍要有源码来拿产物与元数据。
 	if [[ -z "$src" ]]; then
@@ -524,17 +568,27 @@ done
 shopt -u nullglob
 [[ -f "$release_dir/SHA256SUMS" ]] && sums="$release_dir/SHA256SUMS"
 [[ -n "$runtime_tar" ]] || die "缺 runtime 包：$release_dir/xn.*.tar.xz（release.sh --pack 是否成功？）"
-[[ -n "$trace_tar" ]] || die "缺 trace 包：$release_dir/xn.*.trace.tar.xz"
+if $cross; then
+	# 交叉目标没有 build-tuned 的 trace 目录；pack-release.sh 只出 runtime 包。
+	trace_tar=""
+else
+	[[ -n "$trace_tar" ]] || die "缺 trace 包：$release_dir/xn.*.trace.tar.xz"
+fi
 [[ -n "$sums" ]] || die "缺 SHA256SUMS：$release_dir/SHA256SUMS"
 
 runtime_base="$(basename "$runtime_tar")"
-trace_base="$(basename "$trace_tar")"
+trace_base=""
 runtime_out="$out_dir/xn.$target.tuned.tar.xz"
-trace_out="$out_dir/xn.$target.tuned.trace.tar.xz"
-
+trace_out=""
 note "产物：${runtime_base}（$(human_bytes "$(bytes_of "$runtime_tar")")）"
-note "      ${trace_base}（$(human_bytes "$(bytes_of "$trace_tar")")）"
-cp -p "$runtime_tar" "$trace_tar" "$sums" "$out_dir/"
+if [[ -n "$trace_tar" ]]; then
+	trace_base="$(basename "$trace_tar")"
+	trace_out="$out_dir/xn.$target.tuned.trace.tar.xz"
+	note "      ${trace_base}（$(human_bytes "$(bytes_of "$trace_tar")")）"
+	cp -p "$runtime_tar" "$trace_tar" "$sums" "$out_dir/"
+else
+	cp -p "$runtime_tar" "$sums" "$out_dir/"
+fi
 
 # 校验和自检：只对两个 xn 包按 SHA256SUMS 里的行核对（extras 的 pack 若也写
 # SHA256SUMS，行数/内容可能被动过，别让 extras 的行把 xn 的校验搞成假阴性）。
@@ -547,15 +601,17 @@ verify_sum() { # $1=文件
 	[[ "$got" == "$want" ]] || die "${base} 校验失败（期望 ${want}，实际 ${got}）"
 }
 verify_sum "$out_dir/$runtime_base"
-verify_sum "$out_dir/$trace_base"
-note "SHA256SUMS 校验通过（runtime + trace）"
+if [[ -n "$trace_base" ]]; then
+	verify_sum "$out_dir/$trace_base"
+fi
+note "SHA256SUMS 校验通过（runtime${trace_base:+ + trace}）"
 
 # 发布名固定成 .tuned.：不把上游的 flavor（pgo-bolt / pgo）暴露给消费端。
 # 本地校验在改名前已经做完，SHA256SUMS 只用于这一步。
 if [[ "$out_dir/$runtime_base" != "$runtime_out" ]]; then
 	mv -f "$out_dir/$runtime_base" "$runtime_out"
 fi
-if [[ "$out_dir/$trace_base" != "$trace_out" ]]; then
+if [[ -n "$trace_base" && "$out_dir/$trace_base" != "$trace_out" ]]; then
 	mv -f "$out_dir/$trace_base" "$trace_out"
 fi
 runtime_tar="$runtime_out"
@@ -617,18 +673,23 @@ done
 # ---------------------------------------------------------------- publish
 # release 上放：runtime / trace / extras 各自一个包 + 同名的 <asset>.sha256sum。
 # 不再发汇总的 SHA256SUMS：校验和与资产一一对应，消费端按 <asset>.sha256sum 校验。
-for f in "$(basename "$runtime_tar")" "$(basename "$trace_tar")"; do
+publish_sums=("$(basename "$runtime_tar")")
+if [[ -n "$trace_tar" ]]; then
+	publish_sums+=("$(basename "$trace_tar")")
+fi
+for f in "${publish_sums[@]}"; do
 	printf '%s  %s\n' "$(sha256_file "$out_dir/$f")" "$f" > "$out_dir/$f.sha256sum"
 done
 
 assets=(
 	"$out_dir/$(basename "$runtime_tar")"
-	"$out_dir/$(basename "$trace_tar")"
 	${extra_assets[@]+"${extra_assets[@]}"}
 	# runtime/trace 的校验和最后传：消费端最坏看到旧包 + 旧校验和，不会新校验和配旧包
 	"$out_dir/$(basename "$runtime_tar").sha256sum"
-	"$out_dir/$(basename "$trace_tar").sha256sum"
 )
+if [[ -n "$trace_tar" ]]; then
+	assets+=("$out_dir/$(basename "$trace_tar")" "$out_dir/$(basename "$trace_tar").sha256sum")
+fi
 
 # 逐个资产上传：一个文件 502 不该让后面的（尤其是排在最后的 .sha256sum）传不上去，
 # 每个文件单独重试 + 退避。gh --clobber 会先删同名旧资产再传，重试是幂等的。

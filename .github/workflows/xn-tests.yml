@@ -16,7 +16,10 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "all / repo / smoke / nightly / pgo（含义见文件头）"
+        description: >-
+          all=本仓库离线测试+上游全部（不含 pgo）+eBPF |
+          repo=只跑本仓库离线测试 | smoke=只跑 eBPF smoke（5 条） |
+          nightly=上游 nightly 档+eBPF | pgo=编 PGO 并跑 pgo.compare（跑不了 rig 自动退 size）
         type: choice
         required: true
         default: all

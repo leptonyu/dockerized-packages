@@ -1,55 +1,60 @@
-name: Build xn (PGO+BOLT)
+name: 发布 XN
+run-name: "发布 XN · ${{ inputs.target || 'all' }}"
 
-# 不按天编译：每小时只检查上游 leptonyu/xn 的 main SHA，只有 SHA 变化（或手动 force /
-# repository_dispatch）才跑 60–90 分钟的 PGO+BOLT。构建成功后把 SHA 写进仓库变量
-# XN_LAST_MAIN_SHA；下一次看到同一个 SHA 就跳过。
+# 交付目标（`target` 下拉，默认 all，可单编一个）：
+#   all                      三个都编（x86_64 Linux + armv7 Linux + aarch64 macOS）
+#   x86_64-linux-gnu         ubuntu-latest，原生 PGO（BOLT 默认不开）
+#   armv7-linux-musleabihf   ubuntu-latest，交叉；PGO profile 复用同 job 里 x86_64 那轮采样
+#                            （armv7 二进制任何 runner 都跑不了，没法自采；只出 runtime 包）
+#   aarch64-macos            macos-14（Apple silicon），原生 PGO（BOLT 不可用）
 #
-# 目前不传 --bolt：release.sh 走 PGO-only。perf / bolt-23 仍照装，后续要启用 BOLT
-# 时加参数即可，不用再改环境。
-#
-# 发布目标是 leptonyu/xn 的 v<Cargo.toml version> release：不存在就新建（tag 指向本次
-# 构建的上游 commit），存在就追加资产；需要写权限的 XN_REPO_TOKEN。
-#
-# 上游想立即触发，可在自己的 workflow 里发：
-#   repository_dispatch:
-#     event_type: xn-main-updated
-#     client_payload: { sha: <commit> }
-# 没有 dispatch 时，最多晚一小时发现 main 更新；也可手动 workflow_dispatch。
+# 触发：每小时检查上游 main SHA（未变就跳过）；手动 force；repository_dispatch
+# `xn-main-updated`。构建成功把 SHA 记到 XN_LAST_MAIN_SHA；发布到上游 v<Cargo.toml version>
+# release（需要写权限的 XN_REPO_TOKEN）。
 
 on:
   schedule:
-    - cron: "17 * * * *" # 每小时 :17 检查一次，不编译
+    - cron: "17 * * * *"
   workflow_dispatch:
     inputs:
       force:
-        description: 即使 main SHA 未变化也编译
+        description: "true=即使 main SHA 未变化也编译；false=只在 main 有新提交时编译"
         type: choice
         options:
           - "false"
           - "true"
         default: "false"
+      target:
+        description: >-
+          all=三个目标都编 | x86_64-linux-gnu=Ubuntu x86_64 原生 PGO |
+          armv7-linux-musleabihf=Ubuntu 交叉 armv7（复用 x86_64 的 profile，只出 runtime 包） |
+          aarch64-macos=macOS arm64 原生 PGO（BOLT 不可用）
+        type: choice
+        required: true
+        default: all
+        options:
+          - all
+          - x86_64-linux-gnu
+          - armv7-linux-musleabihf
+          - aarch64-macos
       ref:
-        description: 指定上游 ref（留空 = main；用于 --tuned 尚未合入 main）
+        description: 指定上游 ref（留空 = main）
         required: false
         default: ""
       tag:
         description: 目标 release tag（留空 = Cargo.toml 的 v<version>）
         required: false
         default: ""
-      event:
-        description: BOLT stage2 的 perf event
-        required: false
-        default: cpu-clock:u
       features:
-        description: cargo features（留空 = 默认，不加 quic）
+        description: cargo features（留空 = 默认）
         required: false
         default: ""
   repository_dispatch:
     types: [xn-main-updated]
 
 permissions:
-  contents: read  # 只读本仓库；xn release 用 XN_REPO_TOKEN 写
-  actions: write  # gh variable set 记录已构建的 main SHA
+  contents: read
+  actions: write
 
 concurrency:
   group: xn-pgo-bolt
@@ -62,6 +67,7 @@ jobs:
       sha: ${{ steps.resolve.outputs.sha }}
       ref: ${{ steps.resolve.outputs.ref }}
       changed: ${{ steps.decide.outputs.changed }}
+      target: ${{ steps.target.outputs.target }}
     steps:
       - name: Check XN_REPO_TOKEN
         env:
@@ -77,6 +83,14 @@ jobs:
             echo "::error::XN_REPO_TOKEN 对 leptonyu/xn 没有写权限；创建/更新 v<version> release 需要 contents:write"
             exit 1
           fi
+      - name: Resolve target
+        id: target
+        env:
+          INPUT_TARGET: ${{ inputs.target }}
+        run: |
+          set -euo pipefail
+          # schedule / repository_dispatch 没有 inputs：按 all 处理。
+          echo "target=${INPUT_TARGET:-all}" >> "$GITHUB_OUTPUT"
       - name: Resolve upstream ref
         id: resolve
         env:
@@ -88,7 +102,6 @@ jobs:
           ref="${INPUT_REF:-main}"
           sha="${PAYLOAD_SHA:-}"
           if [ -z "$sha" ]; then
-            # 用 query 参数解析 ref：分支名里的 / 不需要手工 URL 编码。
             sha="$(gh api --method GET repos/leptonyu/xn/commits \
               -f "sha=$ref" -f per_page=1 --jq ".[0].sha")"
           fi
@@ -101,7 +114,6 @@ jobs:
         run: mkdir -p .xn-built-sha
       - name: Restore built marker
         id: built
-        # 变量之外的第二道“已构建”标记；变量写失败时也不会每小时重编。
         continue-on-error: true
         uses: actions/cache/restore@v6
         with:
@@ -129,16 +141,20 @@ jobs:
             echo "### upstream"
             echo "- ref: \`$REF\`"
             echo "- sha: \`$SHA\`"
-            echo "- last built (variable): \`${LAST_SHA:-<未记录>}\`"
-            echo "- cache marker: \`${CACHE_HIT:-false}\`"
+            echo "- target: \`${{ steps.target.outputs.target }}\`"
             echo "- build: \`$changed\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
-  build:
+  linux:
+    name: build linux（x86_64 + armv7）
     needs: check
-    if: needs.check.outputs.changed == 'true'
+    if: |
+      needs.check.outputs.changed == 'true' && (
+        needs.check.outputs.target == 'all' ||
+        needs.check.outputs.target == 'x86_64-linux-gnu' ||
+        needs.check.outputs.target == 'armv7-linux-musleabihf')
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 240
     steps:
       - uses: actions/checkout@v7
       - name: Checkout upstream xn
@@ -151,8 +167,7 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
       - name: Install system dependencies
-        # 与上游 tag release 同一套：LLVM 23 + bolt-23 + perf。BOLT 暂时不启用，
-        # perf 装而不用；启用 --bolt 时用 software event cpu-clock:u（托管 runner 没有 PMU/LBR）。
+        # BOLT 默认不开（PGO-only），但 perf / LLVM 23 / bolt-23 保持装好，打开 --bolt 不用再改环境。
         run: |
           set -euo pipefail
           sudo apt-get update
@@ -160,11 +175,6 @@ jobs:
             clang lld \
             libclang-dev libssl-dev zlib1g-dev liblzma-dev \
             curl git xz-utils file binutils python3 openssl lsb-release
-          # perf 不走 linux-tools-generic：它按 uname -r 依赖
-          # linux-tools-<ver>-<flavor>，Ubuntu archive 的 metapackage 偶尔领先于
-          # 具体包（pocket 同步滞后），apt 会整体报 "held broken packages"
-          # （Launchpad #2140491）。脚本按版本挑一个确实存在的包并链到
-          # /usr/local/bin/perf。
           ./xn/install-perf.sh
           curl -fsSL https://apt.llvm.org/llvm.sh -o /tmp/llvm.sh
           chmod +x /tmp/llvm.sh
@@ -173,24 +183,18 @@ jobs:
           echo "/usr/lib/llvm-23/bin" >> "$GITHUB_PATH"
           echo 'kernel.perf_event_paranoid=1' | sudo tee /etc/sysctl.d/99-xn-perf.conf >/dev/null
           sudo sysctl --system
-          # BOLT 没启用，这里只确认 perf 装上了；真要开 --bolt 时再加一次
-          # `perf record -e <event> -- sleep 0.1` 的真采样自检
-          # （托管 runner 的 perf_event_open 有被平台拒绝的先例，runner-images#4974）。
           perf --version
           /usr/lib/llvm-23/bin/llvm-bolt --version
       - name: Install Rust
         run: |
           rustup toolchain install stable --profile minimal
           rustup default stable
+          # armv7 交叉要它的 std；llvm-tools 提供与 rustc 同版本的 llvm-profdata。
+          rustup target add armv7-unknown-linux-musleabihf
+          rustup component add llvm-tools-preview
       - name: Install sccache
-        # 上游 docs/dev-environment.md 的装法：`brew install sccache` / `cargo install sccache`，
-        # 目的是让 scripts/cargo-env.sh 在 PATH → $CARGO_HOME/bin → ~/.cargo/bin 里找到它。
-        # CI 用预编译二进制（同样落在 $CARGO_HOME/bin），省掉现场编译 sccache 的几分钟。
         uses: taiki-e/install-action@sccache
       - name: Verify sccache
-        # 直接 source 上游的 scripts/cargo-env.sh —— 它就是 release.sh 每次跑时用的探测
-        # 逻辑。确认它真把 RUSTC_WRAPPER 设成 sccache（否则会打「这次构建不套 sccache」），
-        # 再真编一个空程序走一遍 wrapper，别等 60 分钟构建后才发现缓存没生效。
         run: |
           set -euo pipefail
           env_sh="$GITHUB_WORKSPACE/.cache/xn-src/scripts/cargo-env.sh"
@@ -206,10 +210,8 @@ jobs:
           sccache --show-stats | sed -n '1,6p'
           sccache --stop-server || true
       - name: Install cargo-nextest
-        # release.sh --tuned 默认用 pgo.sh tests 跑 release 档 nextest 采样。
         uses: taiki-e/install-action@nextest
       - name: Install cargo-deny
-        # 只为打包时生成 THIRD-PARTY-NOTICES.txt。
         uses: taiki-e/install-action@cargo-deny
       - name: Build tuned xn and publish
         env:
@@ -217,26 +219,29 @@ jobs:
           LLVM_PROFDATA: /usr/lib/llvm-23/bin/llvm-profdata
           INPUT_FEATURES: ${{ inputs.features }}
           INPUT_TAG: ${{ inputs.tag }}
-          # 缓存目录由 cargo-env.sh 指到 target/sccache（跟检出走）；fresh runner 上
-          # 命中本来就少，压到 1G，免得和 PGO 的 target 抢那 14G 盘。
+          INPUT_TARGET: ${{ needs.check.outputs.target }}
           SCCACHE_CACHE_SIZE: 1G
         run: |
           set -euo pipefail
           args=(
             --src "$GITHUB_WORKSPACE/.cache/xn-src"
             --publish
-            --event "${{ inputs.event || 'cpu-clock:u' }}"
           )
-          if [ -n "${INPUT_TAG:-}" ]; then args+=(--tag "$INPUT_TAG"); fi
-          if [ -n "${INPUT_FEATURES:-}" ]; then args+=(--features "$INPUT_FEATURES"); fi
-          ./xn/build.sh "${args[@]}"
+          [ -n "${INPUT_TAG:-}" ] && args+=(--tag "$INPUT_TAG")
+          [ -n "${INPUT_FEATURES:-}" ] && args+=(--features "$INPUT_FEATURES")
+          # x86_64 总是编：armv7 的 PGO profile 复用这一轮的采样。
+          ./xn/build.sh --target x86_64-unknown-linux-gnu "${args[@]}"
+          case "$INPUT_TARGET" in
+            all|armv7-linux-musleabihf)
+              ./xn/build.sh --target armv7-unknown-linux-musleabihf "${args[@]}" --no-extras
+              ;;
+          esac
       - name: Prepare built marker
         if: success() && needs.check.outputs.ref == 'main'
         run: |
           mkdir -p .xn-built-sha
           printf '%s\n' "${{ needs.check.outputs.sha }}" > .xn-built-sha/sha
       - name: Save built marker
-        # 与仓库变量并存：变量写不了时，下一轮靠这个 cache 跳过重编。
         if: success() && needs.check.outputs.ref == 'main'
         continue-on-error: true
         uses: actions/cache/save@v6
@@ -244,7 +249,6 @@ jobs:
           path: .xn-built-sha
           key: xn-main-sha-${{ needs.check.outputs.sha }}
       - name: Record built main SHA
-        # 只有 main 的构建才更新状态；手动指定 ref 时不污染 main 的已构建 SHA。
         if: success() && needs.check.outputs.ref == 'main'
         continue-on-error: true
         env:
@@ -257,8 +261,64 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: xn-pgo-bolt
-          # 调优两个包 + extras（cidr / xn-tui）+ 各自的 .sha256sum；build.log 在过程包里。
+          name: xn-pgo-bolt-linux
+          path: |
+            xn/dist/*.tar.xz
+            xn/dist/*.sha256sum
+          if-no-files-found: ignore
+
+  macos:
+    name: build macos（aarch64）
+    needs: check
+    if: |
+      needs.check.outputs.changed == 'true' && (
+        needs.check.outputs.target == 'all' ||
+        needs.check.outputs.target == 'aarch64-macos')
+    runs-on: macos-14
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v7
+      - name: Checkout upstream xn
+        uses: actions/checkout@v7
+        with:
+          repository: leptonyu/xn
+          ref: ${{ needs.check.outputs.sha }}
+          token: ${{ secrets.XN_REPO_TOKEN }}
+          path: .cache/xn-src
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup component add llvm-tools-preview
+      - name: Install sccache
+        uses: taiki-e/install-action@sccache
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@cargo-deny
+      - name: Build tuned xn and publish
+        env:
+          GH_TOKEN: ${{ secrets.XN_REPO_TOKEN }}
+          INPUT_FEATURES: ${{ inputs.features }}
+          INPUT_TAG: ${{ inputs.tag }}
+          SCCACHE_CACHE_SIZE: 1G
+        run: |
+          set -euo pipefail
+          args=(
+            --src "$GITHUB_WORKSPACE/.cache/xn-src"
+            --target aarch64-apple-darwin
+            --publish
+          )
+          [ -n "${INPUT_TAG:-}" ] && args+=(--tag "$INPUT_TAG")
+          [ -n "${INPUT_FEATURES:-}" ] && args+=(--features "$INPUT_FEATURES")
+          ./xn/build.sh "${args[@]}"
+      - name: Upload build outputs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: xn-pgo-bolt-macos
           path: |
             xn/dist/*.tar.xz
             xn/dist/*.sha256sum
