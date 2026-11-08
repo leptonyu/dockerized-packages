@@ -41,6 +41,10 @@ env:
   CARGO_INCREMENTAL: "0"
   CARGO_PROFILE_DEV_DEBUG: line-tables-only
   CARGO_PROFILE_TEST_DEBUG: line-tables-only
+  # sccache 的预编译包要从 GitHub release 下载；CI 上实测 504 重试会卡住
+  # `Install sccache`（macOS 靠重试 70s 过关，Linux 卡 30+ 分钟）。PGO 对照只跑
+  # 一次，慢几分钟可以接受：整个 workflow 不套 sccache，换确定性。
+  XN_SCCACHE: "off"
 
 jobs:
   repo-tests:
@@ -100,8 +104,6 @@ jobs:
           rustup component add --toolchain "$toolchain" clippy rustfmt
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
-      - name: Install sccache
-        uses: taiki-e/install-action@sccache
       - name: Check registry and catalog
         run: scripts/test/run.sh check
       - name: Run unified tests
@@ -211,8 +213,6 @@ jobs:
           rustup component add --toolchain "$toolchain" llvm-tools-preview
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
-      - name: Install sccache
-        uses: taiki-e/install-action@sccache
       - name: Install build dependencies
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends lld clang
