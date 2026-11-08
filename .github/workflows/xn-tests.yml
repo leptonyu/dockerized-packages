@@ -1,227 +1,49 @@
 name: Test xn
-run-name: "Test xn (${{ inputs.scope }}: ${{ inputs.tier != 'none' && inputs.tier || inputs.suite }})"
+run-name: "Test xn (${{ inputs.mode }})"
 
-# 手动测试入口。两件事按 `scope` 组合，默认都跑：
-#   - repo tests：本仓库离线测试（xn/tests/run-all.sh，几秒完成）；
-#   - upstream：checkout 上游 leptonyu/xn，用它的 GOAL-111 统一入口
-#     scripts/test/all.sh 跑套件。
+# 一个参数：mode。每个值只做一件事，不再组合 scope / suite / tier。
 #
-# 菜单（Actions → Test xn → Run workflow）里的配置：
-#   scope      all = repo + upstream（默认）；repo = 只跑本仓库；
-#              upstream = 只跑上游（仍需 XN_REPO_TOKEN）
-#   suite      all = 全部职能条目（默认；unit/smoke/e2e/bench/perf，数小时；
-#              pgo 是派生套件，不进 all）；smoke = eBPF 最小矩阵（GOAL-112 的 5 条
-#              smoke.ebpf.*，几十分钟内出结果）；unit/e2e/bench/perf/pgo = 单类目
-#              最新 GOAL-112 修复（容器 --pid=host / UDP split catch-all）在
-#              ci-ebpf.sh + linux-vm.sh 内，workflow 不重复实现；选 suite=smoke
-#              可单独验证这 5 条。
-#   tier       none = 按 suite（默认）；pr/nightly/release/manual = 该档全部条目。
-#              两个下拉不能相加：tier 不是 none 时覆盖 suite
-#   arch       both = x86_64 + aarch64（默认）；单架构省一半 runner
-#   ref        上游 ref；空 = main 的最新 commit
-#   keep_going 失败后继续（eBPF 与 unified 都遵守；最终仍按最差状态退出）
-#   strict     缺环境是否按 env-error 失败；默认 false = 记 skip。
-#              注意 unified 以非 root 跑，hosted 上只能跳过 root/VM 条目；
-#              eBPF 步骤始终要求 root/docker/BTF，环境不满足直接失败（不静默 skip）。
+#   all      本仓库离线测试 + 上游全部职能条目（不含 pgo）+ eBPF smoke
+#   repo     只跑本仓库离线测试（xn/tests/run-all.sh，几秒）
+#   smoke    只跑上游 eBPF smoke 矩阵（5 条 smoke.ebpf.*，几十分钟）
+#   nightly  上游 nightly 档（unit + e2e）+ eBPF smoke
+#   pgo      上游编 PGO（control + 优化产物）并跑 pgo.compare：bin 尺寸 + t1 同机 A/B
+#            （root + linux-native；跑不了 perf rig 自动退 pgo.compare.size）
 #
-# 触发规则（由 plan job 解析，后续 job 只看解析结果）：
-#   - scope=repo 不跑 upstream；scope=upstream 跳过 repo tests；
-#   - pick = tier != none ? tier : suite；
-#   - eBPF smoke 只在 pick ∈ {all, nightly, smoke} 时跑 —— manual 档没有 smoke
-#     条目，不再顺手跑 nightly 的 eBPF；
-#   - pick=smoke 时 eBPF 步骤就是整个套件，不再跑 unified：避免同一批 5 条被非 root
-#     再选一次（全部 skip），并让 last-report.md 保持 eBPF 的结果；
-#   - 其它 pick 跑 unified；整类都因环境跳过时 strict=false 只告警（strict=true 才红）；
-#   - eBPF 放在 unified 之后：last-report.md 收尾的是 eBPF 结果；unified 的汇总
-#     另存为 last-report-unified.md（两份都在 artifact 里）。
-#
-# 只在 workflow_dispatch 触发，不在 push / PR 自动跑：smoke / e2e / perf / pgo
-# 需要 root / eBPF / VM / perf，自动跑只会制造假红或长时间占用 runner。私有上游
-# 需要仓库 secret XN_REPO_TOKEN（对 leptonyu/xn 至少 contents:read）。这里只跑
-# 测试，不构建、不发布；打包仍由 xn.yml 负责（跟踪上游 main）。
+# 固定跑 x86_64 + aarch64 两个架构（两个 job 的 matrix 都在文件里写死）；上游 ref 固定
+# main。没有别的输入。
 
 on:
   workflow_dispatch:
     inputs:
-      scope:
-        description: "跑哪部分：all=本仓库测试+上游套件；repo=只跑本仓库；upstream=只跑上游"
+      mode:
+        description: "all / repo / smoke / nightly / pgo（含义见文件头）"
         type: choice
         required: true
         default: all
         options:
           - all
           - repo
-          - upstream
-      suite:
-        description: "上游分类：all=全部职能条目（默认，数小时，不含 pgo）；smoke=eBPF 最小矩阵（推荐单独验证）；unit/e2e/bench/perf/pgo=单类目"
-        type: choice
-        required: true
-        default: all
-        options:
-          - all
-          - unit
           - smoke
-          - e2e
-          - bench
-          - perf
-          - pgo
-      tier:
-        description: "上游档位：none=按 suite；pr/nightly/release/manual=该档全部条目（覆盖 suite）"
-        type: choice
-        required: true
-        default: none
-        options:
-          - none
-          - pr
           - nightly
-          - release
-          - manual
-      arch:
-        description: "上游 runner 架构：both=x86_64+aarch64（默认）；单架构省一半时间"
-        type: choice
-        required: true
-        default: both
-        options:
-          - both
-          - x86_64
-          - aarch64
-      ref:
-        description: "上游 ref（留空 = main 的最新 commit）"
-        required: false
-        default: ""
-      keep_going:
-        description: "失败后继续跑完（eBPF 与 unified 都遵守；最终按最差状态退出）"
-        type: boolean
-        default: true
-      strict:
-        description: "缺环境按 env-error 失败（默认 false：unified 记 skip；eBPF 始终要求 root/docker/BTF）"
-        type: boolean
-        default: false
+          - pgo
 
 permissions:
   contents: read
 
 concurrency:
   group: xn-tests-${{ github.ref }}
-  # 手动触发的上游套件可能跑几小时，不要被后一次 run 取消。
   cancel-in-progress: false
 
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
+
 jobs:
-  plan:
-    name: plan
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    outputs:
-      run_repo: ${{ steps.resolve.outputs.run_repo }}
-      run_upstream: ${{ steps.resolve.outputs.run_upstream }}
-      run_unified: ${{ steps.resolve.outputs.run_unified }}
-      pick: ${{ steps.resolve.outputs.pick }}
-      ebpf: ${{ steps.resolve.outputs.ebpf }}
-      keep_going: ${{ steps.resolve.outputs.keep_going }}
-      strict: ${{ steps.resolve.outputs.strict }}
-      matrix: ${{ steps.resolve.outputs.matrix }}
-    steps:
-      - name: Resolve configuration
-        id: resolve
-        env:
-          SCOPE: ${{ inputs.scope }}
-          SUITE: ${{ inputs.suite }}
-          TIER: ${{ inputs.tier }}
-          ARCH: ${{ inputs.arch }}
-          REF: ${{ inputs.ref }}
-          KEEP_GOING: ${{ inputs.keep_going }}
-          STRICT: ${{ inputs.strict }}
-        run: |
-          set -euo pipefail
-
-          # 1) 哪些 job 跑。
-          run_repo=true
-          run_upstream=true
-          case "$SCOPE" in
-            all) ;;
-            repo) run_upstream=false ;;
-            upstream) run_repo=false ;;
-            *) echo "::error::未知 scope：$SCOPE"; exit 1 ;;
-          esac
-
-          # 2) suite / tier 合成一个 pick；tier 优先（两个下拉不能相加）。
-          if [ "$TIER" != "none" ]; then
-            pick="$TIER"
-            pick_note="tier 档位（suite=$SUITE 被覆盖）"
-          else
-            pick="$SUITE"
-            pick_note="suite 分类"
-          fi
-
-          # 3) 只有含 smoke 的 pick 才跑 eBPF；manual 没有 smoke 条目。
-          ebpf=false
-          case "$pick" in
-            all | nightly | smoke) ebpf=true ;;
-          esac
-
-          # 4) pick=smoke 由 eBPF 步骤单独承担整个套件（见文件头注释）。
-          run_unified=true
-          if [ "$pick" = "smoke" ] && [ "$ebpf" = "true" ]; then
-            run_unified=false
-          fi
-
-          # 5) 布尔输入统一成字符串输出，后续 job / step 不再猜 `inputs` 的类型。
-          if [ "$KEEP_GOING" = "true" ]; then keep_going=true; else keep_going=false; fi
-          if [ "$STRICT" = "true" ]; then strict=true; else strict=false; fi
-
-          # 6) 架构矩阵；由 upstream job 的 fromJSON 读取。
-          case "$ARCH" in
-            both) matrix='{"include":[{"runner":"ubuntu-24.04","arch":"x86_64"},{"runner":"ubuntu-24.04-arm","arch":"aarch64"}]}' ;;
-            x86_64) matrix='{"include":[{"runner":"ubuntu-24.04","arch":"x86_64"}]}' ;;
-            aarch64) matrix='{"include":[{"runner":"ubuntu-24.04-arm","arch":"aarch64"}]}' ;;
-            *) echo "::error::未知 arch：$ARCH"; exit 1 ;;
-          esac
-
-          {
-            echo "run_repo=$run_repo"
-            echo "run_upstream=$run_upstream"
-            echo "run_unified=$run_unified"
-            echo "pick=$pick"
-            echo "ebpf=$ebpf"
-            echo "keep_going=$keep_going"
-            echo "strict=$strict"
-            echo "matrix=$matrix"
-          } >> "$GITHUB_OUTPUT"
-
-          # 7) 把「配置 → 实际触发」写进 run 页面，菜单之外也能自查。
-          if [ "$run_repo" = true ]; then repo_note="跑 repo tests"; else repo_note="跳过 repo tests"; fi
-          if [ "$run_upstream" = true ]; then upstream_note="跑 upstream"; else upstream_note="跳过 upstream"; fi
-          if [ "$run_upstream" = true ]; then
-            if [ "$ebpf" = true ]; then ebpf_note="跑（--category smoke）"; else ebpf_note="跳过（该选择不含 smoke）"; fi
-            if [ "$run_unified" = true ]; then unified_note="跑（scripts/test/all.sh ${pick}）"; else unified_note="跳过（由 eBPF 步骤承担）"; fi
-          else
-            ebpf_note="不跑（upstream 已跳过）"
-            unified_note="不跑（upstream 已跳过）"
-          fi
-          if [ "$ARCH" = both ]; then arch_note="x86_64 + aarch64"; else arch_note="$ARCH"; fi
-          if [ "$keep_going" = true ]; then keep_going_note="失败后继续"; else keep_going_note="失败即停"; fi
-          if [ "$strict" = true ]; then strict_note="缺环境按 env-error 失败"; else strict_note="缺环境记 skip"; fi
-
-          {
-            echo "### 本次触发配置"
-            echo ""
-            echo "| 输入 | 值 | 含义 / 实际触发 |"
-            echo "| --- | --- | --- |"
-            echo "| scope | \`$SCOPE\` | ${repo_note}；${upstream_note} |"
-            echo "| suite | \`$SUITE\` | 上游分类（tier=none 时生效） |"
-            echo "| tier | \`$TIER\` | $pick_note |"
-            echo "| arch | \`$ARCH\` | $arch_note |"
-            echo "| ref | \`${REF:-}\` | 空 = main 最新 commit |"
-            echo "| keep_going | \`$keep_going\` | $keep_going_note |"
-            echo "| strict | \`$strict\` | $strict_note |"
-            echo ""
-            echo "**解析结果**：pick=\`$pick\`；eBPF=${ebpf_note}；unified=${unified_note}。"
-          } >> "$GITHUB_STEP_SUMMARY"
-
   repo-tests:
     name: repo tests
-    needs: plan
-    if: needs.plan.outputs.run_repo == 'true'
+    if: inputs.mode == 'all' || inputs.mode == 'repo'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -230,23 +52,18 @@ jobs:
         run: bash ./xn/tests/run-all.sh
 
   upstream:
-    name: upstream xn suite (${{ matrix.arch }})
-    needs: plan
-    if: needs.plan.outputs.run_upstream == 'true'
-    # GOAL-112：x86_64 与 aarch64 各一档。eBPF 条目在 hosted runner 上也能真跑 ——
-    # 不是 self-hosted 专属：环境 `env:vm-linux`（Linux 后端 = 特权 Alpine 容器，
-    # 定义在 scripts/test/environments.toml），由 scripts/test/ci-ebpf.sh 起容器；
-    # 内核用宿主的（BTF + cgroup2 + netns）。
+    name: upstream (${{ matrix.arch }})
+    if: inputs.mode == 'all' || inputs.mode == 'nightly' || inputs.mode == 'smoke'
     runs-on: ${{ matrix.runner }}
-    # GitHub-hosted 单 job 上限 6h。
     timeout-minutes: 360
     strategy:
       fail-fast: false
-      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
-    env:
-      CARGO_INCREMENTAL: "0"
-      CARGO_PROFILE_DEV_DEBUG: line-tables-only
-      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
     steps:
       - name: Check XN_REPO_TOKEN
         env:
@@ -256,142 +73,165 @@ jobs:
             echo "::error::需要仓库 secret XN_REPO_TOKEN（对 leptonyu/xn 至少 contents:read）"
             exit 1
           fi
-
       - name: Checkout upstream xn
         uses: actions/checkout@v7
         with:
           repository: leptonyu/xn
-          ref: ${{ inputs.ref || 'main' }}
+          ref: main
           token: ${{ secrets.XN_REPO_TOKEN }}
           fetch-depth: 1
           persist-credentials: false
-
       - name: Record upstream commit
-        id: upstream
         run: |
           sha="$(git rev-parse HEAD)"
-          echo "sha=$sha" >> "$GITHUB_OUTPUT"
           {
             echo "### xn-tests"
             echo ""
-            echo "- scope: \`${{ inputs.scope }}\` / suite: \`${{ inputs.suite }}\` / tier: \`${{ inputs.tier }}\` → pick: \`${{ needs.plan.outputs.pick }}\`"
-            echo "- ref: \`${{ inputs.ref || 'main' }}\`"
-            echo "- arch: \`${{ matrix.arch }}\`"
-            echo "- commit: \`$sha\`"
-            echo "- subject: $(git log -1 --format=%s)"
+            echo "- mode: \`${{ inputs.mode }}\` · arch: \`${{ matrix.arch }}\`"
+            echo "- commit: \`$sha\` · subject: $(git log -1 --format=%s)"
           } >> "$GITHUB_STEP_SUMMARY"
-
       - name: Install Rust (rust-toolchain.toml)
         run: |
-          set -euo pipefail
           toolchain="$(sed -n 's/^channel *= *"\([^"]*\)".*/\1/p' rust-toolchain.toml)"
-          [ -n "$toolchain" ] || { echo "::error::rust-toolchain.toml 里没有 channel"; exit 1; }
           rustup set profile minimal
           rustup toolchain install "$toolchain"
           rustup component add --toolchain "$toolchain" clippy rustfmt
-
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
-
       - name: Check registry and catalog
         run: scripts/test/run.sh check
-
       - name: Run unified tests
-        if: needs.plan.outputs.run_unified == 'true'
-        env:
-          PICK: ${{ needs.plan.outputs.pick }}
-          KEEP_GOING: ${{ needs.plan.outputs.keep_going }}
-          STRICT: ${{ needs.plan.outputs.strict }}
+        if: inputs.mode == 'all' || inputs.mode == 'nightly'
         run: |
           set -euo pipefail
-          # run --all 不选 pgo（派生工作流）；要跑 PGO 用 suite=pgo。
-          args=("$PICK")
-          if [ "$KEEP_GOING" != "true" ]; then
-            args+=(--fail-fast)
-          fi
-          if [ "$STRICT" = "true" ]; then
-            args+=(--strict)
-          fi
-          # strict=false 时，整类条目全部因环境被跳过是 hosted runner 的正常情况
-          # （没有 root / VM）；run.sh 在这里退 2 是为了防止假绿，workflow 把它降级
-          # 成告警。真正的失败（1）和 strict=true 的 env-error（2）仍然红。
+          if [ "${{ inputs.mode }}" = "nightly" ]; then suite=nightly; else suite=all; fi
+          # 整类都因环境不满足被跳过是 hosted runner 的正常情况（没有 root / VM）；
+          # run.sh 退 2 是为了防假绿，这里降级成告警。真正的失败（1）仍然红。
           set +e
-          scripts/test/all.sh "${args[@]}"
+          scripts/test/all.sh "$suite" --keep-going
           code=$?
           set -e
-          if [ "$code" -eq 2 ] && [ "$STRICT" != "true" ]; then
-            echo "::warning::$PICK 的条目全部因环境不满足被跳过（hosted runner 没有 root/VM）；strict=false 按 skip 处理"
+          if [ "$code" -eq 2 ]; then
+            echo "::warning::$suite 的条目全部因环境不满足被跳过（hosted runner 没有 root/VM）"
             exit 0
           fi
           exit "$code"
-
       - name: Preserve unified report
-        if: always() && needs.plan.outputs.run_unified == 'true'
+        if: always() && (inputs.mode == 'all' || inputs.mode == 'nightly')
         run: |
           if [ -f target/test-runs/last-report.md ]; then
             cp target/test-runs/last-report.md target/test-runs/last-report-unified.md 2>/dev/null || true
           fi
-
-      # GOAL-112：先只放开 smoke.ebpf.*（最稳的一档）；稳定后再把 --category 换成
-      # e2e / unit.ebpf.reload。`ci-ebpf.sh` 按 `env:vm-linux` 起特权 Alpine 容器
-      # （镜像 / 包锁在 environments.toml + apk.lock），并在宿主上准备构建工具链：
-      #   x86_64 → 原生 cargo + musl-tools + lld（不装 zig）；aarch64 / 跨架构才装 zig。
-      # 环境不满足（缺 docker/BTF）时这一步退 2，不静默 skip。
+      # eBPF：`ci-ebpf.sh` 按 env:vm-linux 起特权 Alpine 容器，并在宿主准备构建工具链
+      # （x86_64 → 原生 cargo + musl-tools + lld；aarch64 / 跨架构才装 zig）。
       - name: eBPF smoke (env:vm-linux)
-        if: ${{ !cancelled() && needs.plan.outputs.ebpf == 'true' && (needs.plan.outputs.keep_going == 'true' || success()) }}
+        if: ${{ !cancelled() }}
         env:
-          PICK: ${{ needs.plan.outputs.pick }}
-          KEEP_GOING: ${{ needs.plan.outputs.keep_going }}
           XN_TEST_ENV: vm-linux
-          XN_CI_STRICT: ${{ needs.plan.outputs.strict == 'true' && '1' || '0' }}
         run: |
           set -euo pipefail
-          echo "== eBPF smoke：pick=$PICK =="
-          # run.sh 默认遇到第一条非 pass 就停；keep_going=true 时才显式加 --keep-going。
-          args=(--category smoke)
-          if [ "$KEEP_GOING" = "true" ]; then
-            args+=(--keep-going)
-          fi
-          sudo -E env "PATH=$PATH" "HOME=$HOME" "XN_CI_STRICT=$XN_CI_STRICT" \
-            scripts/test/ci-ebpf.sh "${args[@]}"
-
-      # eBPF 这一步是 `sudo -E`：cargo 会把 target/ 与 .cargo-home/ 写成 root 所有，
-      # 后面的非 root 步骤（打包 / 上传）再读同一批目录会 Permission denied。
+          sudo -E env "PATH=$PATH" "HOME=$HOME" \
+            scripts/test/ci-ebpf.sh --category smoke --keep-going
+      # eBPF 步骤是 sudo：cargo 会把 target/ 与 .cargo-home/ 写成 root 所有，后面的
+      # 非 root 步骤（打包 / 上传）再读同一批目录会 Permission denied。
       - name: Restore workspace ownership after root eBPF step
         if: always()
         run: sudo chown -R "$(id -u):$(id -g)" .cargo-home target 2>/dev/null || true
-
       - name: Package test logs
         if: always()
-        env:
-          PICK: ${{ needs.plan.outputs.pick }}
         run: |
           set -euo pipefail
-          out="xn-test-logs-${PICK}-${{ matrix.arch }}.tar.gz"
+          out="xn-test-logs-${{ inputs.mode }}-${{ matrix.arch }}.tar.gz"
           if [ ! -d target/test-runs ]; then
             echo "没有 target/test-runs，跳过打包"
             exit 0
           fi
-          # 汇总原文进 job 日志（artifact 之外一眼可见）。eBPF 步骤会把 unified 的
-          # last-report.md 顶掉，所以 unified 那份（改名保留的）也一起打。
+          # 汇总原文进 job 日志（artifact 之外一眼可见）。
           for report in target/test-runs/last-report.md target/test-runs/last-report-unified.md; do
             [[ -f "$report" ]] || continue
             echo "::group::$report"
             cat "$report"
             echo "::endgroup::"
           done
-          # 只收 result.json / stdout.log / stderr.log；artifacts/ 可能很大，排除。
           tar -czf "$out" \
             --exclude='target/test-runs/*/artifacts' \
             --exclude='target/test-runs/*/artifacts/*' \
             target/test-runs
           du -h "$out"
-
       - name: Upload test logs
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: xn-test-logs-${{ needs.plan.outputs.pick }}-${{ matrix.arch }}
-          path: xn-test-logs-${{ needs.plan.outputs.pick }}-${{ matrix.arch }}.tar.gz
+          name: xn-test-logs-${{ inputs.mode }}-${{ matrix.arch }}
+          path: xn-test-logs-${{ inputs.mode }}-${{ matrix.arch }}.tar.gz
+          if-no-files-found: warn
+          retention-days: 14
+
+  # pgo：编译（普通用户）+ 跑 compare（脚本自己探测能力并按需 sudo）；报告与原始数据
+  # 一起上传。跑不了 perf rig 时自动退 pgo.compare.size，不会把整条记成 skip。
+  pgo-compare:
+    name: pgo.compare (${{ matrix.arch }})
+    if: inputs.mode == 'pgo'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+    steps:
+      - name: Check XN_REPO_TOKEN
+        env:
+          TOKEN: ${{ secrets.XN_REPO_TOKEN }}
+        run: |
+          if [ -z "${TOKEN:-}" ]; then
+            echo "::error::需要仓库 secret XN_REPO_TOKEN（对 leptonyu/xn 至少 contents:read）"
+            exit 1
+          fi
+      - name: Checkout upstream xn
+        uses: actions/checkout@v7
+        with:
+          repository: leptonyu/xn
+          ref: main
+          token: ${{ secrets.XN_REPO_TOKEN }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Install Rust (rust-toolchain.toml)
+        run: |
+          toolchain="$(sed -n 's/^channel *= *"\([^"]*\)".*/\1/p' rust-toolchain.toml)"
+          rustup set profile minimal
+          rustup toolchain install "$toolchain"
+          rustup component add --toolchain "$toolchain" llvm-tools-preview
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends lld clang
+      - name: Check registry and catalog
+        run: scripts/test/run.sh check
+      - name: Build & run pgo.compare (capability-aware)
+        run: scripts/test/pgo/compare-ci.sh --rounds 4
+      - name: Print test report
+        if: always()
+        run: |
+          set -euo pipefail
+          report=target/test-runs/last-report.md
+          if [[ ! -f "$report" ]]; then
+            echo "没有 $report（没跑到汇总就退出了）"
+            exit 0
+          fi
+          echo "::group::$report"
+          cat "$report"
+          echo "::endgroup::"
+      - name: Upload pgo compare artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: xn-pgo-compare-${{ matrix.arch }}
+          path: |
+            target/test-runs
+            target/pgo
           if-no-files-found: warn
           retention-days: 14
