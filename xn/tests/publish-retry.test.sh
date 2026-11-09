@@ -56,7 +56,17 @@ case "$cmd" in
 	release)
 		sub="${1:-}"; shift || true
 		case "$sub" in
-			view) exit 0 ;;
+			view)
+				# build.sh 用 `--json assets --jq` 读资产名来刷新 release 说明
+				if [[ "$*" == *"--json assets"* ]]; then
+					for f in "$state/remote"/*; do
+						[[ -f "$f" ]] || continue
+						basename "$f"
+					done
+				fi
+				exit 0
+				;;
+			edit) printf '%s\n' "$*" >>"$state/edits.log" ;;
 			upload)
 				file=""
 				for a in "$@"; do case "$a" in /*) file="$a" ;; esac; done
@@ -191,6 +201,8 @@ check "6 个资产（3 包 + 3 校验和）" test "$(ls "$state/remote" | wc -l 
 check "普通包和 tuned 包都在远端" test -f "$state/remote/xn.$target.tar.xz" -a -f "$state/remote/xn.$target.tuned.tar.xz"
 check "普通包也有自己的 .sha256sum" test -f "$state/remote/xn.$target.tar.xz.sha256sum"
 check "校验和最后传（tuned 然后 trace）" test "$(grep 'release upload' "$state/calls.log" | awk '{print $NF}' | tail -2 | while read -r p; do basename "$p"; done | tr '\n' ' ')" = "xn.$target.tuned.tar.xz.sha256sum xn.$target.tuned.trace.tar.xz.sha256sum "
+check "release 说明刷新，含普通包" grep -q "xn.$target.tar.xz" "$state/edits.log"
+check "release 说明含 tuned 包和 trace" test "$(grep -c 'tuned' "$state/edits.log")" -ge 1
 
 # ---------------------------------------------------------------- 5) 两步发布
 printf '== 5) 两步发布：先普通包，再 tuned（同一个 release）\n'

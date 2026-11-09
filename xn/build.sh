@@ -765,6 +765,41 @@ for f in ${trace_assets[@]+"${trace_assets[@]}"}; do assets+=("$f"); done
 for n in ${runtime_names[@]+"${runtime_names[@]}"}; do assets+=("$out_dir/$n.sha256sum"); done
 for n in ${trace_names[@]+"${trace_names[@]}"}; do assets+=("$out_dir/$n.sha256sum"); done
 
+# 发布说明：按 release 上**实际存在的资产**生成。两档是两个 job 并发发的，谁先建
+# release 都无所谓；已经在的 release（重传/老 tag）也会被补上说明。
+release_notes_from() { # stdin: 资产名，每行一个
+	local n
+	while IFS= read -r n; do
+		[[ -n "$n" ]] || continue
+		case "$n" in
+			*.sha256sum) continue ;;
+			*.tuned.trace.tar.xz)
+				printf -- '- `%s` — tuned 的构建 trace（trace-files.txt 列出的诊断文件 + xn.tuned.env + 清单 + build.log / build-info.txt）\n' "$n" ;;
+			*.tuned.tar.xz)
+				printf -- '- `%s` — PGO/BOLT 编译（xn / LICENSE / docs/configuration.md / THIRD-PARTY-NOTICES.txt）\n' "$n" ;;
+			xn.*.tar.xz)
+				printf -- '- `%s` — 普通 release 编译（xn / cidr / xn-tui / xns / LICENSE / docs/configuration.md / THIRD-PARTY-NOTICES.txt）\n' "$n" ;;
+			*)
+				printf -- '- `%s`\n' "$n" ;;
+		esac
+	done
+}
+
+refresh_release_notes() {
+	local names body
+	names="$(gh release view "$tag" --repo "$release_repo" --json assets \
+		--jq '.assets[].name' 2>/dev/null | LC_ALL=C sort)" || names=""
+	if [[ -z "$names" ]]; then
+		names="$(for a in ${assets[@]+"${assets[@]}"}; do basename "$a"; done | LC_ALL=C sort)"
+	fi
+	body="$(printf 'xn %s · 上游 `%s`\n\n' "$version" "${commit:0:12}")"
+	body+="$(printf '%s\n' "$names" | release_notes_from)"
+	body+=$'\n'
+	body+="每个包配一个同名 \`.sha256sum\`：\`shasum -a 256 -c <asset>.sha256sum\`。"
+	retry "更新 release 说明" gh release edit "$tag" --repo "$release_repo" --notes "$body" >/dev/null ||
+		warn "release 说明没更新（不影响资产）"
+}
+
 # 逐个资产上传：一个文件 502 不该让后面的（尤其是排在最后的 .sha256sum）传不上去，
 # 每个文件单独重试 + 退避。gh --clobber 会先删同名旧资产再传，重试是幂等的。
 upload_assets() {
@@ -883,6 +918,7 @@ if $publish; then
 			fi
 		done
 	fi
+	refresh_release_notes
 	echo "https://github.com/$release_repo/releases/tag/$tag"
 else
 	note "未加 --publish；产物在 $out_dir"

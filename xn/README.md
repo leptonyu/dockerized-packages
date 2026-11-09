@@ -236,6 +236,9 @@ schedule 绑定：
 - 发布上传逐资产 + 自动重试（见上），GitHub 偶发的 502 不再让 job 停在
   「8 个资产传到一半」；`XN_LAST_MAIN_SHA` 仍只在发布成功后记账，最终失败的话
   下一轮会重新构建并重传。
+- **release 说明每次发布后自动刷新**：按 release 上**实际存在**的资产生成（普通包 /
+  tuned 包 / trace / 校验和各自的用途），`gh release edit --notes` 覆盖。所以两个档位
+  并发发到同一个 release、谁先建都行；老 tag 重传也会把说明补上。
 
 `xn` workflow 与 DNS/network 的每日 release 相互独立；它失败不会撤回其它 workflow 的资产。
 
