@@ -7,8 +7,9 @@ run-name: "Test xn (${{ inputs.mode }})"
 #   repo     只跑本仓库离线测试（xn/tests/run-all.sh，几秒）
 #   smoke    只跑上游 eBPF smoke 矩阵（5 条 smoke.ebpf.*，几十分钟）
 #   nightly  上游 nightly 档（unit + e2e）+ eBPF smoke
-#   pgo      上游编 PGO（control + 优化产物）并跑 pgo.compare：bin 尺寸 + t1 同机 A/B
-#            （root + linux-native；跑不了 perf rig 自动退 pgo.compare.size）
+#
+# PGO 构建 + `pgo.compare` 不在这个 workflow 里：那是发布链路，入口是 `发布 XN`
+# （xn.yml）的 `compare` 下拉。这里只保留测试。
 #
 # 架构固定为 **x86_64 Linux + aarch64 macOS**；上游 ref 固定 main。没有别的输入。
 
@@ -19,7 +20,7 @@ on:
         description: >-
           all=本仓库离线测试+上游全部（不含 pgo）+eBPF |
           repo=只跑本仓库离线测试 | smoke=只跑 eBPF smoke（5 条） |
-          nightly=上游 nightly 档+eBPF | pgo=编 PGO 并跑 pgo.compare（跑不了 rig 自动退 size）
+          nightly=上游 nightly 档+eBPF
         type: choice
         required: true
         default: all
@@ -28,7 +29,6 @@ on:
           - repo
           - smoke
           - nightly
-          - pgo
 
 permissions:
   contents: read
@@ -42,8 +42,8 @@ env:
   CARGO_PROFILE_DEV_DEBUG: line-tables-only
   CARGO_PROFILE_TEST_DEBUG: line-tables-only
   # sccache 的预编译包要从 GitHub release 下载；CI 上实测 504 重试会卡住
-  # `Install sccache`（macOS 靠重试 70s 过关，Linux 卡 30+ 分钟）。PGO 对照只跑
-  # 一次，慢几分钟可以接受：整个 workflow 不套 sccache，换确定性。
+  # `Install sccache`（macOS 靠重试 70s 过关，Linux 卡 30+ 分钟）。测试对编译速度
+  # 不敏感：整个 workflow 不套 sccache，换确定性。
   XN_SCCACHE: "off"
 
 jobs:
@@ -170,75 +170,5 @@ jobs:
         with:
           name: xn-test-logs-${{ inputs.mode }}-${{ matrix.arch }}
           path: xn-test-logs-${{ inputs.mode }}-${{ matrix.arch }}.tar.gz
-          if-no-files-found: warn
-          retention-days: 14
-
-  # pgo：编译（普通用户）+ 跑 compare（脚本自己探测能力并按需 sudo）；报告与原始数据
-  # 一起上传。跑不了 perf rig 时自动退 pgo.compare.size，不会把整条记成 skip。
-  pgo-compare:
-    name: pgo.compare (${{ matrix.arch }})
-    if: inputs.mode == 'pgo'
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 240
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: ubuntu-24.04
-            arch: x86_64
-          - runner: macos-15
-            arch: aarch64
-    steps:
-      - name: Check XN_REPO_TOKEN
-        env:
-          TOKEN: ${{ secrets.XN_REPO_TOKEN }}
-        run: |
-          if [ -z "${TOKEN:-}" ]; then
-            echo "::error::需要仓库 secret XN_REPO_TOKEN（对 leptonyu/xn 至少 contents:read）"
-            exit 1
-          fi
-      - name: Checkout upstream xn
-        uses: actions/checkout@v7
-        with:
-          repository: leptonyu/xn
-          ref: main
-          token: ${{ secrets.XN_REPO_TOKEN }}
-          fetch-depth: 1
-          persist-credentials: false
-      - name: Install Rust (rust-toolchain.toml)
-        run: |
-          toolchain="$(sed -n 's/^channel *= *"\([^"]*\)".*/\1/p' rust-toolchain.toml)"
-          rustup set profile minimal
-          rustup toolchain install "$toolchain"
-          rustup component add --toolchain "$toolchain" llvm-tools-preview
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@nextest
-      - name: Install build dependencies
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends lld clang
-      - name: Check registry and catalog
-        run: scripts/test/run.sh check
-      - name: Build & run pgo.compare (capability-aware)
-        run: scripts/test/pgo/compare-ci.sh --rounds 4
-      - name: Print test report
-        if: always()
-        run: |
-          set -euo pipefail
-          report=target/test-runs/last-report.md
-          if [[ ! -f "$report" ]]; then
-            echo "没有 ${report}（没跑到汇总就退出了）"
-            exit 0
-          fi
-          echo "::group::$report"
-          cat "$report"
-          echo "::endgroup::"
-      - name: Upload pgo compare artifacts
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: xn-pgo-compare-${{ matrix.arch }}
-          path: |
-            target/test-runs
-            target/pgo
           if-no-files-found: warn
           retention-days: 14

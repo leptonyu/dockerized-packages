@@ -4,9 +4,17 @@ run-name: "发布 XN · ${{ inputs.target || 'all' }}"
 # 交付目标（`target` 下拉，默认 all，可单编一个）：
 #   all                      三个都编（x86_64 Linux + armv7 Linux + aarch64 macOS）
 #   x86_64-linux-gnu         ubuntu-latest，原生 PGO（BOLT 默认不开）
-#   armv7-linux-musleabihf   ubuntu-latest，交叉；PGO profile 复用同 job 里 x86_64 那轮采样
-#                            （armv7 二进制任何 runner 都跑不了，没法自采；只出 runtime 包）
+#   armv7-linux-musleabihf   ubuntu-latest，交叉；PGO profile 从 x86_64 任务上传的
+#                            `xn-pgo-profile` artifact 取（armv7 二进制任何 runner 都跑不了，
+#                            没法自采；只出 runtime 包）
 #   aarch64-macos            macos-15（Apple silicon），原生 PGO（BOLT 不可用）
+#
+# **每个目标一个 job**：x86_64 / armv7 / macOS 各自构建、各自上传 artifact；重跑某一档
+# 不会带着另外两档一起重跑。`target=armv7-linux-musleabihf` 会先跑 x86_64 job 采一份
+# profile（交叉档唯一的采样来源），但那一轮不发布 x86_64 包、也不打 extras。
+#
+# `compare` 下拉（默认 false）：构建完成后在本 runner 跑 `pgo.compare`（bin 大小 + t1 同机
+# A/B；macOS 自动退 `pgo.compare.size`）。armv7 交叉档没有同机 control / 采样，不跑。
 #
 # 触发：每小时检查上游 main SHA（未变就跳过）；手动 force；repository_dispatch
 # `xn-main-updated`。构建成功把 SHA 记到 XN_LAST_MAIN_SHA；发布到上游 v<Cargo.toml version>
@@ -37,6 +45,15 @@ on:
           - x86_64-linux-gnu
           - armv7-linux-musleabihf
           - aarch64-macos
+      compare:
+        description: >-
+          true=构建后跑 pgo.compare（x86_64 完整 A/B；macOS 自动退 bin 尺寸；armv7 交叉档不跑）
+        type: choice
+        required: true
+        default: "false"
+        options:
+          - "false"
+          - "true"
       ref:
         description: 指定上游 ref（留空 = main）
         required: false
@@ -145,9 +162,10 @@ jobs:
             echo "- build: \`$changed\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
-  linux:
-    name: build linux（x86_64 + armv7）
+  linux-x86_64:
+    name: build x86_64-linux-gnu
     needs: check
+    # target=armv7 也要跑这一档：交叉档只能复用 x86_64 这台原生机器采出来的 profile。
     if: |
       needs.check.outputs.changed == 'true' && (
         needs.check.outputs.target == 'all' ||
@@ -186,12 +204,14 @@ jobs:
           perf --version
           /usr/lib/llvm-23/bin/llvm-bolt --version
       - name: Install Rust
+        # 按仓库的 rust-toolchain.toml 装精确版本：x86_64 采的 profile 与 armv7 消费它的
+        # 工具链必须是同一版。
         run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
-          # armv7 交叉要它的 std；llvm-tools 提供与 rustc 同版本的 llvm-profdata。
-          rustup target add armv7-unknown-linux-musleabihf
-          rustup component add llvm-tools-preview
+          toolchain="$(sed -n 's/^channel *= *"\([^"]*\)".*/\1/p' "$GITHUB_WORKSPACE/.cache/xn-src/rust-toolchain.toml")"
+          rustup set profile minimal
+          rustup toolchain install "$toolchain"
+          rustup default "$toolchain"
+          rustup component add --toolchain "$toolchain" llvm-tools-preview
       - name: Install sccache
         uses: taiki-e/install-action@sccache
       - name: Verify sccache
@@ -213,7 +233,7 @@ jobs:
         uses: taiki-e/install-action@nextest
       - name: Install cargo-deny
         uses: taiki-e/install-action@cargo-deny
-      - name: Build tuned xn and publish
+      - name: Build tuned xn
         env:
           GH_TOKEN: ${{ secrets.XN_REPO_TOKEN }}
           LLVM_PROFDATA: /usr/lib/llvm-23/bin/llvm-profdata
@@ -225,50 +245,142 @@ jobs:
           set -euo pipefail
           args=(
             --src "$GITHUB_WORKSPACE/.cache/xn-src"
-            --publish
           )
+          # armv7 单选时这一 job 只负责采 profile：不发布、也不打 extras（那些由 armv7 job
+          # 自己决定，而交叉档只出 runtime 包）。
+          if [ "${INPUT_TARGET}" = "armv7-linux-musleabihf" ]; then
+            args+=(--no-extras)
+          else
+            args+=(--publish)
+          fi
           [ -n "${INPUT_TAG:-}" ] && args+=(--tag "$INPUT_TAG")
           [ -n "${INPUT_FEATURES:-}" ] && args+=(--features "$INPUT_FEATURES")
-          # x86_64 总是编：armv7 的 PGO profile 复用这一轮的采样。
           ./xn/build.sh --target x86_64-unknown-linux-gnu "${args[@]}"
-          case "$INPUT_TARGET" in
-            all|armv7-linux-musleabihf)
-              ./xn/build.sh --target armv7-unknown-linux-musleabihf "${args[@]}" --no-extras
-              ;;
-          esac
-      - name: Prepare built marker
-        if: success() && needs.check.outputs.ref == 'main'
+      - name: Export PGO profile for cross targets
+        # armv7 job 只拿这一份 artifact；没有 merged.profdata 说明 PGO 降级成了普通
+        # release，宁可在这里报错，也不要让 armv7 悄悄用不上 profile。
         run: |
-          mkdir -p .xn-built-sha
-          printf '%s\n' "${{ needs.check.outputs.sha }}" > .xn-built-sha/sha
-      - name: Save built marker
-        if: success() && needs.check.outputs.ref == 'main'
-        continue-on-error: true
-        uses: actions/cache/save@v6
+          set -euo pipefail
+          prof="$(ls -dt "$GITHUB_WORKSPACE"/.cache/xn-src/target/tune/*/01-collect/merged.profdata 2>/dev/null | head -1 || true)"
+          if [ -z "$prof" ] || [ ! -f "$prof" ]; then
+            echo "::error::没有 merged.profdata（PGO 构建可能降级成了普通 release）"
+            exit 1
+          fi
+          cp "$prof" xn/dist/merged.profdata
+          ls -lh xn/dist/merged.profdata
+      - name: Upload PGO profile
+        uses: actions/upload-artifact@v7
         with:
-          path: .xn-built-sha
-          key: xn-main-sha-${{ needs.check.outputs.sha }}
-      - name: Record built main SHA
-        if: success() && needs.check.outputs.ref == 'main'
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          name: xn-pgo-profile
+          path: xn/dist/merged.profdata
+          retention-days: 7
+      - name: Run pgo.compare
+        if: ${{ inputs.compare == 'true' && needs.check.outputs.target != 'armv7-linux-musleabihf' }}
         run: |
-          gh variable set XN_LAST_MAIN_SHA \
-            --repo "$GITHUB_REPOSITORY" \
-            --body "${{ needs.check.outputs.sha }}"
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE/.cache/xn-src"
+          scripts/test/pgo/compare-ci.sh --rounds 4
+      - name: Upload pgo compare artifacts
+        if: always() && inputs.compare == 'true' && needs.check.outputs.target != 'armv7-linux-musleabihf'
+        uses: actions/upload-artifact@v7
+        with:
+          name: xn-pgo-compare-x86_64-linux-gnu
+          path: |
+            .cache/xn-src/target/test-runs
+            .cache/xn-src/target/pgo
+          if-no-files-found: warn
+          retention-days: 14
       - name: Upload build outputs
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: xn-pgo-bolt-linux
+          name: xn-pgo-bolt-x86_64-linux-gnu
           path: |
             xn/dist/*.tar.xz
             xn/dist/*.sha256sum
           if-no-files-found: ignore
 
-  macos:
-    name: build macos（aarch64）
+  linux-armv7:
+    name: build armv7-linux-musleabihf
+    needs: [check, linux-x86_64]
+    if: |
+      needs.check.outputs.changed == 'true' && (
+        needs.check.outputs.target == 'all' ||
+        needs.check.outputs.target == 'armv7-linux-musleabihf')
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    env:
+      # 只编一次交叉档；sccache 的下载/启动（macOS 的 SUN_LEN、GitHub release 504）
+      # 不值得再引入一个失败点。
+      XN_SCCACHE: "off"
+    steps:
+      - uses: actions/checkout@v7
+      - name: Checkout upstream xn
+        uses: actions/checkout@v7
+        with:
+          repository: leptonyu/xn
+          ref: ${{ needs.check.outputs.sha }}
+          token: ${{ secrets.XN_REPO_TOKEN }}
+          path: .cache/xn-src
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Install system dependencies
+        # 交叉档的 C 依赖由 cargo-zigbuild 用 zig cc 编；这里只装 bindgen（libclang）与
+        # pack-release 需要的工具，不装 perf / LLVM 23 / BOLT。
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config cmake perl nasm \
+            clang lld libclang-dev libssl-dev zlib1g-dev liblzma-dev \
+            curl git xz-utils file binutils python3 openssl
+      - name: Install Rust
+        run: |
+          toolchain="$(sed -n 's/^channel *= *"\([^"]*\)".*/\1/p' "$GITHUB_WORKSPACE/.cache/xn-src/rust-toolchain.toml")"
+          rustup set profile minimal
+          rustup toolchain install "$toolchain"
+          rustup default "$toolchain"
+          rustup target add --toolchain "$toolchain" armv7-unknown-linux-musleabihf
+      - name: Install cargo-deny
+        # pack-release.sh 会调 gen-notices.sh（需要 cargo-deny）。
+        uses: taiki-e/install-action@cargo-deny
+      - name: Download x86_64 PGO profile
+        uses: actions/download-artifact@v8
+        with:
+          name: xn-pgo-profile
+          path: xn/dist
+      - name: Build tuned armv7 and publish
+        env:
+          GH_TOKEN: ${{ secrets.XN_REPO_TOKEN }}
+          INPUT_FEATURES: ${{ inputs.features }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          args=(
+            --src "$GITHUB_WORKSPACE/.cache/xn-src"
+            --target armv7-unknown-linux-musleabihf
+            --profile "$GITHUB_WORKSPACE/xn/dist/merged.profdata"
+            --no-extras
+            --publish
+          )
+          [ -n "${INPUT_TAG:-}" ] && args+=(--tag "$INPUT_TAG")
+          [ -n "${INPUT_FEATURES:-}" ] && args+=(--features "$INPUT_FEATURES")
+          ./xn/build.sh "${args[@]}"
+      - name: pgo.compare not applicable
+        if: ${{ inputs.compare == 'true' }}
+        run: |
+          echo "::notice::armv7-linux-musleabihf 是交叉目标，没有同机 control / profile 采样；pgo.compare 只在 x86_64 / macOS 原生任务上跑"
+      - name: Upload build outputs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: xn-pgo-bolt-armv7-linux-musleabihf
+          path: |
+            xn/dist/*.tar.xz
+            xn/dist/*.sha256sum
+          if-no-files-found: ignore
+
+  macos-aarch64:
+    name: build aarch64-macos
     needs: check
     if: |
       needs.check.outputs.changed == 'true' && (
@@ -289,9 +401,11 @@ jobs:
           persist-credentials: false
       - name: Install Rust
         run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
-          rustup component add llvm-tools-preview
+          toolchain="$(sed -n 's/^channel *= *"\([^"]*\)".*/\1/p' "$GITHUB_WORKSPACE/.cache/xn-src/rust-toolchain.toml")"
+          rustup set profile minimal
+          rustup toolchain install "$toolchain"
+          rustup default "$toolchain"
+          rustup component add --toolchain "$toolchain" llvm-tools-preview
       - name: Install sccache
         uses: taiki-e/install-action@sccache
       - name: Install cargo-nextest
@@ -314,12 +428,62 @@ jobs:
           [ -n "${INPUT_TAG:-}" ] && args+=(--tag "$INPUT_TAG")
           [ -n "${INPUT_FEATURES:-}" ] && args+=(--features "$INPUT_FEATURES")
           ./xn/build.sh "${args[@]}"
+      - name: Run pgo.compare (size-only on macOS)
+        if: ${{ inputs.compare == 'true' }}
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE/.cache/xn-src"
+          scripts/test/pgo/compare-ci.sh --rounds 4
+      - name: Upload pgo compare artifacts
+        if: always() && inputs.compare == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: xn-pgo-compare-aarch64-macos
+          path: |
+            .cache/xn-src/target/test-runs
+            .cache/xn-src/target/pgo
+          if-no-files-found: warn
+          retention-days: 14
       - name: Upload build outputs
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: xn-pgo-bolt-macos
+          name: xn-pgo-bolt-aarch64-macos
           path: |
             xn/dist/*.tar.xz
             xn/dist/*.sha256sum
           if-no-files-found: ignore
+
+  # 所有选中目标都成功后才记 main SHA：拆成三个 job 后，早完成的 x86_64 不能代表
+  # armv7 / macOS 也过了。
+  record:
+    name: record built main SHA
+    needs: [check, linux-x86_64, linux-armv7, macos-aarch64]
+    if: |
+      always() &&
+      needs.check.outputs.changed == 'true' &&
+      needs.check.outputs.ref == 'main' &&
+      needs.check.outputs.target == 'all' &&
+      needs.linux-x86_64.result == 'success' &&
+      needs.linux-armv7.result == 'success' &&
+      needs.macos-aarch64.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Prepare built marker
+        run: |
+          mkdir -p .xn-built-sha
+          printf '%s\n' "${{ needs.check.outputs.sha }}" > .xn-built-sha/sha
+      - name: Save built marker
+        continue-on-error: true
+        uses: actions/cache/save@v6
+        with:
+          path: .xn-built-sha
+          key: xn-main-sha-${{ needs.check.outputs.sha }}
+      - name: Record built main SHA
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh variable set XN_LAST_MAIN_SHA \
+            --repo "$GITHUB_REPOSITORY" \
+            --body "${{ needs.check.outputs.sha }}"
