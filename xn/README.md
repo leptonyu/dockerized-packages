@@ -49,9 +49,6 @@ target/x86_64-unknown-linux-gnu/release/xn.tuned.env
 # 构建成功后上传失败：不重编，直接用 target/<triple>/release/ 里现成的产物重传
 ./xn/build.sh --package-only --tag v6.0.0 --publish
 
-# 不想要 extras（cidr / xn-tui）
-./xn/build.sh --no-extras --publish
-
 # 需要 quic 时
 ./xn/build.sh --features quic --publish
 ```
@@ -125,10 +122,11 @@ BOLT 启用时，GitHub 托管 runner 没有 PMU/LBR，用 software event（未�
 
 打包由上游 `release.sh --pack`（tuned 档加 `--tuned`）完成，本模块只调用、校验、上传。
 `build.sh --flavors` 决定编哪几档：`release,tuned`（gnu / macOS 默认）、`release`、`tuned`。
-产物落在 `target/<triple>/release/`，`build.sh` 再改名复制到 `--out-dir`（默认 `xn/dist/`）：
+产物落在 `target/<triple>/release/`（**host 的普通档落在 `target/release/`** —— 上游 host 构建
+不传 `--target`），`build.sh` 两处都扫，再改名复制到 `--out-dir`（默认 `xn/dist/`）：
 
 ```text
-xn.x86_64-unknown-linux-gnu.tar.xz                # 普通 runtime 包（所有目标）
+xn.x86_64-unknown-linux-gnu.tar.xz                # 普通 runtime 包（xn/cidr/xn-tui/xns，所有目标）
 xn.x86_64-unknown-linux-gnu.tar.xz.sha256sum
 xn.x86_64-unknown-linux-gnu.tuned.tar.xz          # tuned runtime 包（PGO/BOLT）
 xn.x86_64-unknown-linux-gnu.tuned.tar.xz.sha256sum
@@ -137,7 +135,10 @@ xn.x86_64-unknown-linux-gnu.tuned.trace.tar.xz.sha256sum
 SHA256SUMS                                        # 上游生成的汇总，只做本地校验，不发布
 ```
 
-- **runtime 包**：`xn` / `LICENSE` / `docs/configuration.md` / `THIRD-PARTY-NOTICES.txt`。
+- **普通 runtime 包**：`xn` / `cidr` / `xn-tui` / `xns` / `LICENSE` / `docs/configuration.md` /
+  `THIRD-PARTY-NOTICES.txt`（一次 workspace 构建，四个 bin 全在里面；不再单独发
+  `cidr.*` / `xn-tui.*` 包）。
+- **tuned runtime 包**：只有 `xn`（上游 `--tuned` 只编 xn）+ 同样的 LICENSE / docs / notices。
 - **trace 包**：`trace-files.txt` 列出的诊断文件（各步骤日志、`manifest.tsv`、`bolt.env`、
   `hot-functions.tsv`、`xn.fdata` 等）+ `xn.tuned.env` + 两份清单 +（可选）`build.log` /
   `build-info.txt`。`trace-replay-files.txt` 里列的 `perf.data` / `xn.stage2` **只留清单、
@@ -160,23 +161,10 @@ SHA256SUMS                                        # 上游生成的汇总，只�
 - 上传后自检：重新下载 `*.sha256sum` 比对内容，并按 `digest` 核对每个资产；
   不一致才整体重传一次，仍不一致就让 job 失败。
 
-**额外二进制 `cidr` / `xn-tui`（不调优，同样走 `release.sh --pack`）**：
-
-```text
-cidr.x86_64-unknown-linux-gnu.tar.xz      (+ .sha256sum)   # cidr / LICENSE / THIRD-PARTY-NOTICES.txt
-xn-tui.x86_64-unknown-linux-gnu.tar.xz    (+ .sha256sum)   # xn-tui / LICENSE / THIRD-PARTY-NOTICES.txt
-```
-
-- 上游 package 分别是 `xn-cidr-bin` / `xn-tui-bin`（交付的 bin 名才是 `cidr` / `xn-tui`）；
-  它们不在 xn 的热路径上，所以只做普通 `release` 构建，不跑 PGO/BOLT。
-- 构建**逐包单独调用**：`./release.sh cidr --target <triple> --pack`、`./release.sh xn-tui --target <triple> --pack`
-  各一次（一次写多个包/多个 `-p` 会做 feature 合并，`xn` 的 reqwest/rustls 会被带进 `xn-tui`，
-  白胖 2 MB）。两包跟着 **release 档**编（`--flavors tuned` 单独跑时不重复打），包和
-  `.sha256sum` 由 release.sh 放到 `target/<triple>/release/`，`build.sh` 只复制。
-- 老 release.sh 不支持 extras 的 `--pack` 时回退到手工打（bin / LICENSE / NOTICES），日志里会标
-  `手工回退`。
-- `--extras "cidr xn-tui"` 换/加列表，`--no-extras` 全关；`--package-only` 不编译，
-  `target[/<triple>]/release/` 里没有就报错（要跳过用 `--no-extras`）。
+**普通包里的二进制**：`release.sh --target <triple> --pack` 一次 workspace 构建就把四个交付
+bin 全编出来（`xn` / `cidr` / `xn-tui` / `xns`），打进**同一个** `xn.<triple>.tar.xz`，
+不再单独发 `cidr.*` / `xn-tui.*` 包（`network/ci.sh` 就是从普通包里解 `cidr` 的）。
+tuned 档只带 `xn`（上游 `--tuned` 只编 xn）。
 
 ## 独立 workflow
 
@@ -189,8 +177,8 @@ schedule 绑定：
   `linux-armv7` / `macos-aarch64`（普通）/ `macos-aarch64-tuned`（PGO）都只依赖 `check`，
   `check` 一过同时开跑。普通包走轻量依赖（装完就编、编完就发），PGO job 才装
   LLVM/perf/BOLT，所以普通包比之前早一大截；tuned 挂了也不影响普通包。
-- **普通包和 tuned 包进同一个 release，资产名不重叠**：`xn.<triple>.tar.xz`（普通 + extras）
-  和 `xn.<triple>.tuned[.trace].tar.xz`（PGO/BOLT）。两个 job 并发往同一个 release 追加，
+- **普通包和 tuned 包进同一个 release，资产名不重叠**：`xn.<triple>.tar.xz`（普通档，
+  含 xn / cidr / xn-tui / xns）和 `xn.<triple>.tuned[.trace].tar.xz`（PGO/BOLT，只含 xn）。两个 job 并发往同一个 release 追加，
   `gh release create` 的竞态由 `build.sh` 兜住（已存在就继续追加）。
 - **armv7 是普通编译，没有 PGO**：armv7 二进制在 x86 runner 上跑不起来，采不了 PGO
   样本，所以交叉档直接走 `release.sh --target armv7-unknown-linux-musleabihf --pack`
@@ -326,6 +314,6 @@ workflow 作为 artifact 上传。
   自动发现。手动测试入口与菜单配置见上面的「手动测试（测试 XN）」。
 - `--release-repo` 指向非上游仓库时，只追加到已有 release，不会在别的仓库自动建 tag。
 - `--package-only` 不重跑构建，直接用 `target/<triple>/release/` 里现成的三个文件重传；
-  缺文件就报错（先跑一次完整构建），也不编译 extras（缺就用 `--no-extras`）。
+  缺文件就报错（先跑一次完整构建）。
 - 打包内容（收哪些文件、perf.data 收不收）完全由上游 `trace-files.txt` /
   `trace-replay-files.txt` 决定，本模块不再有 `--perf-data` / `--trace-exclude` 这类裁剪开关。

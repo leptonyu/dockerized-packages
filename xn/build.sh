@@ -4,13 +4,12 @@
 #
 # 上游仓库：git@github.com:leptonyu/xn.git
 #
-# 本脚本**不打包**：打包交给上游 release.sh（runtime 包 + trace 包 + SHA256SUMS 都落在
-# target/<triple>/release/）。这里只负责：
+# 本脚本**不打包**：打包交给上游 release.sh（runtime 包 + trace 包 + SHA256SUMS 落在
+# target/<triple>/release/；host 的普通档落在 target/release/）。这里只负责：
 #   1) 取上游源码、按档位跑 `release.sh --pack`（tuned 档加 `--tuned`）；
 #   2) 把 build.log / build-info.txt 交给 tuned 构建收进 trace 包（--pack-log / --pack-info）；
 #   3) 校验产物、改成稳定的发布名、复制到 --out-dir；
-#   4) 额外把 cidr / xn-tui 单独打好（不调优，见下）；
-#   5) 需要时 gh release upload（逐资产上传；5xx / 网络抖动自动退避重试）。
+#   4) 需要时 gh release upload（逐资产上传；5xx / 网络抖动自动退避重试）。
 #
 # 发布不是原子操作：GitHub 的 release asset API 偶发 502/503/504，一个资产失败
 # 不该连累其余的。所以上传是**逐个文件**做的（所有 .sha256sum 排最后），
@@ -18,7 +17,8 @@
 #
 # 交付档位（`--flavors`，同一 release 里合并发布）：
 #   release  xn.<triple>.tar.xz           普通 release 编译（所有目标都出）
-#   tuned    xn.<triple>.tuned.tar.xz     PGO/BOLT（gnu / macOS）
+#            **一次 workspace 构建**，包里带全部交付 bin：xn / cidr / xn-tui / xns
+#   tuned    xn.<triple>.tuned.tar.xz     PGO/BOLT（gnu / macOS），只带 xn
 #            xn.<triple>.tuned.trace.tar.xz  构建 trace + xn.tuned.env + 清单 + build.log
 # 每个包配一个 <asset>.sha256sum（发布用，最后传）；SHA256SUMS 只做本地校验，不发布。
 #
@@ -64,18 +64,14 @@ force=false
 tests=true
 locked=true
 prune_legacy=true
-# 额外单独打包、**不做 PGO/BOLT** 的 bin（上游 bin 名：cidr <- xn-cidr-bin、
-# xn-tui <- xn-tui-bin）。它们不在 xn 的热路径上，普通 release 构建就够。
-extras="${XN_EXTRAS-cidr xn-tui}"
-extra_assets=()
-
 target="${XN_TARGET:-x86_64-unknown-linux-gnu}"
 profile_file="${XN_PGO_PROFILE:-}"
 host_triple=""
 cross=false
 # 交付档位（逗号分隔）：release = 普通 release 编译；tuned = PGO/BOLT。
 # 空 = 按目标取默认：gnu / macOS 出 release,tuned（普通包和 tuned 包各自发布），
-# armv7 只出 release。--package-only 时按 target/<triple>/release/ 里现成的产物自动识别。
+# armv7 只出 release。--package-only 时按 target/release/ 与 target/<triple>/release/
+# 里现成的产物自动识别。
 flavors="${XN_FLAVORS:-}"
 
 die() { echo "xn/build.sh: $*" >&2; exit 2; }
@@ -171,22 +167,18 @@ usage() {
   --no-tests           PGO 采样只跑 loopback 套件，不跑 nextest
   --no-locked          不向 cargo 传 --locked
   --force              让 build-tuned 重做已有 run 目录
-  --extras "A B"       额外单独打包的 bin（上游 bin 名，默认 "cidr xn-tui"）：
-                       只做普通 release 构建，不跑 PGO/BOLT
-  --no-extras          不打包这些额外 bin
   --keep-legacy        发布时不删除旧版单独上传的 .env / .build-info 等
-  --package-only       不构建，只拿 target/<triple>/release/ 里现成的产物去发布
+  --package-only       不构建，只拿 target/{release,<triple>/release}/ 里现成的产物去发布
   --publish            通过 gh 发布到 --tag；release 不存在时新建（默认上游 xn）
   --check              只检查工具链与 release.sh 能力，不构建
   --dry-run            只打印命令，不 clone / 不构建 / 不上传
   -h, --help           本帮助
 
 打包由上游 release.sh 完成（`--pack`；tuned 档加 `--tuned`），本脚本只上传：
-  xn.<triple>.tar.xz                 普通 release 编译（所有目标）
-  xn.<triple>.tuned.tar.xz            PGO/BOLT（gnu/macOS）
-  xn.<triple>.tuned.trace.tar.xz      构建 trace（仅 tuned）
-  每个包一份同名 .sha256sum；另外 cidr.<triple>.tar.xz / xn-tui.<triple>.tar.xz
-  （release.sh --pack，不调优，各带 .sha256sum）
+  xn.<triple>.tar.xz                 普通档：xn / cidr / xn-tui / xns（一次构建，所有目标）
+  xn.<triple>.tuned.tar.xz           tuned 档：只带 xn（PGO/BOLT，gnu/macOS）
+  xn.<triple>.tuned.trace.tar.xz     构建 trace（仅 tuned）
+  每个包一份同名 .sha256sum
 EOF
 }
 
@@ -227,9 +219,6 @@ while (($#)); do
 		--workload=*) workload="${1#*=}"; shift ;;
 		--no-tests) tests=false; shift ;;
 		--no-locked) locked=false; shift ;;
-		--extras) need_value "$1" "$#"; extras="$2"; shift 2 ;;
-		--extras=*) extras="${1#*=}"; shift ;;
-		--no-extras) extras=""; shift ;;
 		--keep-legacy) prune_legacy=false; shift ;;
 		--force) force=true; shift ;;
 		--package-only) package_only=true; shift ;;
@@ -430,20 +419,6 @@ prepare_source() {
 	prepare_version
 }
 
-# 找 extras 的可执行文件（release.sh --pack 没出包时的回退路径要用）。
-find_extra_bin() { # $1=bin 名 → stdout 路径，失败返回 1
-	local b="$1" cand found=""
-	for cand in "$src/target/$target/release/$b" "$src/target/release/$b"; do
-		if [[ -x "$cand" ]]; then
-			printf '%s\n' "$cand"
-			return 0
-		fi
-	done
-	found="$(find "$src/target" -maxdepth 3 -type f -name "$b" -perm -u+x 2>/dev/null | head -n1)"
-	[[ -n "$found" ]] || return 1
-	printf '%s\n' "$found"
-}
-
 # ---------------------------------------------------------------- dry-run
 # 只打印计划，不 clone、不建目录、不跑 doctor；在 macOS 上也能用。
 print_plan() {
@@ -465,7 +440,7 @@ print_plan() {
 		printf '+ # 若 %q 不是分支/tag：git init + git fetch --depth 1 origin %q\n' "$ref" "$ref"
 	fi
 	if $package_only; then
-		echo "# --package-only：跳过构建，直接用 $s/target/$target/release/ 里的产物（档位 ${flavors}）"
+		echo "# --package-only：跳过构建，直接用 $s/target/{release,$target/release}/ 里的产物（档位 ${flavors}）"
 	else
 		for flavor in ${flavors//,/ }; do
 			case "$flavor" in
@@ -490,16 +465,15 @@ print_plan() {
 			esac
 		done
 	fi
-	printf '+ 校验并复制 %s/target/%s/release/{xn.*.tar.xz, SHA256SUMS} → %s\n' "$s" "$target" "$out_dir"
+	printf '+ 校验并复制 %s/target/{release,%s/release}/{xn.*.tar.xz, SHA256SUMS} → %s\n' "$s" "$target" "$out_dir"
 	printf '+ 发布名：xn.%s.tar.xz（release）' "$target"
 	[[ "$flavors" == *tuned* ]] && printf ' + xn.%s.tuned[.trace].tar.xz（tuned）' "$target"
 	printf '\n'
-	printf '+ 打包 extras（不调优）：%s\n' "${extras:-<none>}"
 	if $publish; then
 		if [[ -n "$tag" ]]; then
-			printf '+ gh release create/upload %q --repo %q --clobber <包 + 各自的 .sha256sum + extras>\n' "$tag" "$release_repo"
+			printf '+ gh release create/upload %q --repo %q --clobber <包 + 各自的 .sha256sum>\n' "$tag" "$release_repo"
 		else
-			printf '+ gh release create/upload v<Cargo.toml version> --repo %q --clobber <包 + 各自的 .sha256sum + extras>\n' "$release_repo"
+			printf '+ gh release create/upload v<Cargo.toml version> --repo %q --clobber <包 + 各自的 .sha256sum>\n' "$release_repo"
 		fi
 	fi
 }
@@ -544,7 +518,7 @@ if $check; then
 fi
 
 # ---------------------------------------------------------------- collect
-# 把某个档位在 release_dir 里产出的包复制到 out_dir，改成稳定的发布名，并按上游写的
+# 把某个档位在上游产物目录里产出的包复制到 out_dir，改成稳定的发布名，并按上游写的
 # SHA256SUMS 校验一遍：
 #   release 档 -> xn.<triple>.tar.xz
 #   tuned 档   -> xn.<triple>.tuned.tar.xz（+ .tuned.trace.tar.xz）
@@ -554,59 +528,77 @@ trace_assets=()
 seen_bases=()
 
 collect_flavor() { # $1 = release | tuned
-	local flavor="$1" f b out want got is_trace is_tuned any=false
-	local files=()
-	shopt -s nullglob
-	files=("$release_dir"/xn.*.tar.xz)
-	shopt -u nullglob
-	for f in ${files[@]+"${files[@]}"}; do
-		b="$(basename "$f")"
-		is_trace=false
-		is_tuned=false
-		case "$b" in *.trace.tar.xz) is_trace=true ;; esac
-		case "$b" in *pgo*|*bolt*|*tuned*) is_tuned=true ;; esac
-		if [[ "$flavor" == tuned ]]; then
-			[[ "$is_tuned" == true ]] || continue
-		else
-			[[ "$is_tuned" == true || "$is_trace" == true ]] && continue
-		fi
-		if [[ "$flavor" == tuned ]]; then
-			if $is_trace; then
-				out="$out_dir/xn.$target.tuned.trace.tar.xz"
+	# 上游 release.sh 的落点：host 普通档在 target/release（cargo build 不传 --target），
+	# tuned / 交叉档在 target/<triple>/release。两处都扫，按包名去重。
+	local flavor="$1" d f b out want got is_trace is_tuned any=false seen=" "
+	local files=() dirs=("$src/target/$target/release" "$src/target/release")
+	for d in "${dirs[@]}"; do
+		[[ -d "$d" ]] || continue
+		shopt -s nullglob
+		files=("$d"/xn.*.tar.xz)
+		shopt -u nullglob
+		for f in ${files[@]+"${files[@]}"}; do
+			b="$(basename "$f")"
+			case "$seen" in *" $b "*) continue ;; esac
+			seen="$seen$b "
+			is_trace=false
+			is_tuned=false
+			case "$b" in *.trace.tar.xz) is_trace=true ;; esac
+			case "$b" in *pgo*|*bolt*|*tuned*) is_tuned=true ;; esac
+			if [[ "$flavor" == tuned ]]; then
+				[[ "$is_tuned" == true ]] || continue
 			else
-				out="$out_dir/xn.$target.tuned.tar.xz"
+				[[ "$is_tuned" == true || "$is_trace" == true ]] && continue
 			fi
-		else
-			out="$out_dir/xn.$target.tar.xz"
-		fi
-		want="$(awk -v n="$b" '$2 == n { print $1; exit }' "$release_dir/SHA256SUMS" 2>/dev/null || true)"
-		got="$(sha256_file "$f")"
-		if [[ -n "$want" ]]; then
-			[[ "$got" == "$want" ]] || die "${b} 与 SHA256SUMS 不一致（期望 ${want}，实际 ${got}）"
-		elif $package_only; then
-			warn "SHA256SUMS 里没有 ${b}，跳过校验（--package-only）"
-		else
-			die "SHA256SUMS 里没有 ${b}（$release_dir/SHA256SUMS）"
-		fi
-		cp -p "$f" "$out"
-		note "产物（${flavor}）：${b} → $(basename "$out")（$(human_bytes "$(bytes_of "$out")")）"
-		seen_bases+=("$b")
-		if $is_trace; then
-			trace_assets+=("$out")
-		else
-			runtime_assets+=("$out")
-		fi
-		any=true
+			if [[ "$flavor" == tuned ]]; then
+				if $is_trace; then
+					out="$out_dir/xn.$target.tuned.trace.tar.xz"
+				else
+					out="$out_dir/xn.$target.tuned.tar.xz"
+				fi
+			else
+				out="$out_dir/xn.$target.tar.xz"
+			fi
+			want="$(awk -v n="$b" '$2 == n { print $1; exit }' "$d/SHA256SUMS" 2>/dev/null || true)"
+			got="$(sha256_file "$f")"
+			if [[ -n "$want" ]]; then
+				[[ "$got" == "$want" ]] || die "${b} 与 SHA256SUMS 不一致（期望 ${want}，实际 ${got}）"
+			elif $package_only; then
+				warn "SHA256SUMS 里没有 ${b}，跳过校验（--package-only）"
+			else
+				die "SHA256SUMS 里没有 ${b}（$d/SHA256SUMS）"
+			fi
+			cp -p "$f" "$out"
+			note "产物（${flavor}）：${b} → $(basename "$out")（$(human_bytes "$(bytes_of "$out")")）"
+			seen_bases+=("$b")
+			if $is_trace; then
+				trace_assets+=("$out")
+			else
+				runtime_assets+=("$out")
+			fi
+			any=true
+		done
 	done
-	$any || die "缺 ${flavor} 档的包：$release_dir/xn.*.tar.xz（release.sh --pack 是否成功？）"
+	$any || die "缺 ${flavor} 档的包：${dirs[0]}/xn.*.tar.xz 或 ${dirs[1]}/xn.*.tar.xz（release.sh --pack 是否成功？）"
 }
 
 # 把本次编出来的 xn 二进制留一份到 out-dir：`xn/compare.sh` 直接拿它和另一档做
 # 同机 A/B，不用让上游 compare 再重编一遍。
 keep_bin() { # $1 = release | tuned
-	local flavor="$1" bin="$src/target/$target/release/xn" out="$out_dir/xn.$target.$flavor.bin"
-	if [[ ! -f "$bin" ]]; then
-		warn "没找到 ${flavor} 档的 xn 二进制（${bin}）；compare 会缺这一组"
+	# host 的普通档走 cargo build（不传 --target），产物在 target/release；
+	# tuned / 交叉档在 target/<triple>/release。按档位定优先顺序。
+	local flavor="$1" out="$out_dir/xn.$target.$flavor.bin" bin="" c
+	local cands=()
+	if [[ "$flavor" == tuned ]]; then
+		cands=("$src/target/$target/release/xn" "$src/target/release/xn")
+	else
+		cands=("$src/target/release/xn" "$src/target/$target/release/xn")
+	fi
+	for c in "${cands[@]}"; do
+		if [[ -x "$c" ]]; then bin="$c"; break; fi
+	done
+	if [[ -z "$bin" ]]; then
+		warn "没找到 ${flavor} 档的 xn 二进制（试过：${cands[*]}）；compare 会缺这一组"
 		return 0
 	fi
 	cp -p "$bin" "$out"
@@ -633,7 +625,6 @@ if ! $package_only; then
 	resolve_flavors
 	require_platform
 	prepare_source
-	release_dir="$src/target/$target/release"
 	: > "$out_dir/build.log"
 	note "上游：${src}（${commit:0:12}，ref=${ref_label}）"
 	note "档位：${flavors}（release = 普通编译；tuned = PGO/BOLT）"
@@ -675,19 +666,6 @@ if ! $package_only; then
 	[[ -n "$features" ]] && release_args+=(--features "$features")
 	$locked && release_args+=(--locked)
 
-	# extras 先编：cidr / xn-tui **不做 PGO/BOLT**（不在 xn 热路径上，普通构建就够），
-	# 而且**必须逐包单独调用** release.sh —— 一次写多个包（或用多个 -p）会做 feature
-	# 合并：xn 的 reqwest/rustls 会被带进 xn-tui，白胖 2 MB，构建产物也不是同一套。
-	# extras 跟着 release 档走：tuned 档单独跑时不重复打。
-	if ! $cross && [[ "$flavors" == *release* ]] && [[ -n "${extras// /}" ]]; then
-		extra_args=(--target "$target" --pack)
-		$locked && extra_args+=(--locked)
-		for b in ${extras//,/ }; do
-			note "构建 extras（不调优）：${b}（单独调用 release.sh --pack）"
-			( cd "$src" && ./release.sh "$b" "${extra_args[@]}" ) 2>&1 | tee -a "$out_dir/build.log"
-		done
-	fi
-
 	# 档位依次构建、就地收集：每档一打完就把包改好名搬走，免得后一档覆盖 SHA256SUMS。
 	# 先 release 后 tuned：tuned 挂了也不影响已经产出的普通包。
 	for flavor in ${flavors//,/ }; do
@@ -721,12 +699,11 @@ else
 		[[ -d "$src/.git" ]] || die "--package-only 需要 --src 或已存在的 $src"
 	fi
 	prepare_source
-	release_dir="$src/target/$target/release"
 	if [[ -z "${XN_FLAVORS:-}" ]]; then
-		# 没显式指定就按现成产物识别：普通包、tuned 包有哪个重传哪个。
+		# 没显式指定就按现成产物识别：普通包、tuned 包有哪个重传哪个（host / 交叉两处都看）。
 		flavors=""
 		shopt -s nullglob
-		for f in "$release_dir"/xn.*.tar.xz; do
+		for f in "$src/target/$target/release"/xn.*.tar.xz "$src/target/release"/xn.*.tar.xz; do
 			b="$(basename "$f")"
 			case "$b" in *.trace.tar.xz) continue ;; esac
 			case "$b" in
@@ -735,7 +712,7 @@ else
 			esac
 		done
 		shopt -u nullglob
-		[[ -n "$flavors" ]] || die "没有可发布的产物：$release_dir/xn.*.tar.xz"
+		[[ -n "$flavors" ]] || die "没有可发布的产物（target/release 或 target/$target/release 下没有 xn.*.tar.xz）"
 	fi
 	resolve_flavors
 	note "package-only：使用现有产物，不重新构建（档位 ${flavors}）"
@@ -744,66 +721,8 @@ else
 	done
 fi
 
-# ---------------------------------------------------------------- extras package
-# cidr / xn-tui 也支持 release.sh --pack：包直接落在 target/<triple>/release/，
-# 名字是 <bin>.<triple>.tar.xz（可能有配套的 .sha256sum）。找不到才回退手工打。
-if $package_only || [[ "$flavors" == *release* ]]; then
-	extra_list=(${extras//,/ })
-else
-	# tuned 单独发布时不重复上传 extras（它们在 release 那一轮已经发过）。
-	extra_list=()
-fi
-for eb in ${extra_list[@]+"${extra_list[@]}"}; do
-	epkg=""
-	shopt -s nullglob
-	for f in "$release_dir/$eb".*.tar.xz; do
-		case "$f" in
-			*.trace.tar.xz) continue ;;
-		esac
-		epkg="$f"
-		break
-	done
-	shopt -u nullglob
-	if [[ -n "$epkg" ]]; then
-		ename="$(basename "$epkg")"
-		cp -p "$epkg" "$out_dir/"
-		if [[ -f "$epkg.sha256sum" ]]; then
-			cp -p "$epkg.sha256sum" "$out_dir/"
-		else
-			printf '%s  %s\n' "$(sha256_file "$out_dir/$ename")" "$ename" > "$out_dir/$ename.sha256sum"
-		fi
-		extra_assets+=("$out_dir/$ename" "$out_dir/$ename.sha256sum")
-		note "extras 包：${ename}（release.sh --pack，$(human_bytes "$(bytes_of "$out_dir/$ename")")）"
-		continue
-	fi
-	# 回退：老 release.sh 不带 --pack，或这步没编出包 —— 手工打 bin / LICENSE / NOTICES。
-	ebin="$(find_extra_bin "$eb")" || die "缺 extras 产物：${eb}。找过：${src}/target/${target}/release/${eb}、${src}/target/release/${eb}，
-                     以及 ${src}/target 下 3 层内的同名可执行文件；release.sh 也没给出 ${eb}.*.tar.xz。
-                     --package-only 不编译；也可以加 --no-extras 跳过。"
-	estage="$out_dir/.stage-$eb.$target"
-	rm -rf "$estage"
-	mkdir -p "$estage"
-	cp "$ebin" "$estage/$eb"
-	chmod +x "$estage/$eb"
-	cp "$src/LICENSE" "$estage/LICENSE"
-	efiles=("$eb" LICENSE)
-	if [[ -s "$src/target/THIRD-PARTY-NOTICES.txt" ]]; then
-		cp "$src/target/THIRD-PARTY-NOTICES.txt" "$estage/THIRD-PARTY-NOTICES.txt"
-		efiles+=(THIRD-PARTY-NOTICES.txt)
-	else
-		warn "没有 THIRD-PARTY-NOTICES.txt：$eb.$target.tar.xz 不带许可清单"
-	fi
-	note "打包 $eb.$target.tar.xz（${efiles[*]}，不调优，手工回退）"
-	tar -C "$estage" -cJf "$out_dir/$eb.$target.tar.xz" "${efiles[@]}"
-	rm -rf "$estage"
-	eb_sha="$(sha256_file "$out_dir/$eb.$target.tar.xz")"
-	printf '%s  %s\n' "$eb_sha" "$eb.$target.tar.xz" > "$out_dir/$eb.$target.tar.xz.sha256sum"
-	extra_assets+=("$out_dir/$eb.$target.tar.xz" "$out_dir/$eb.$target.tar.xz.sha256sum")
-	note "extras 包：$eb.$target.tar.xz（$(human_bytes "$(bytes_of "$out_dir/$eb.$target.tar.xz")")）"
-done
-
 # ---------------------------------------------------------------- publish
-# release 上放：release / tuned / trace / extras 各自一个包 + 同名的 <asset>.sha256sum。
+# release 上放：release / tuned / trace 各自一个包 + 同名的 <asset>.sha256sum。
 # 不再发汇总的 SHA256SUMS：校验和与资产一一对应，消费端按 <asset>.sha256sum 校验。
 # 顺序：所有包先传，所有 .sha256sum 最后传 —— 消费端最坏看到旧包 + 旧校验和，
 # 不会出现「新校验和配旧包」。
@@ -822,7 +741,6 @@ done
 
 assets=()
 for f in ${runtime_assets[@]+"${runtime_assets[@]}"}; do assets+=("$f"); done
-assets+=(${extra_assets[@]+"${extra_assets[@]}"})
 for f in ${trace_assets[@]+"${trace_assets[@]}"}; do assets+=("$f"); done
 for n in ${runtime_names[@]+"${runtime_names[@]}"}; do assets+=("$out_dir/$n.sha256sum"); done
 for n in ${trace_names[@]+"${trace_names[@]}"}; do assets+=("$out_dir/$n.sha256sum"); done
@@ -896,7 +814,7 @@ if $publish; then
 		for n in ${runtime_names[@]+"${runtime_names[@]}"}; do
 			case "$n" in
 				*.tuned.tar.xz) notes="$notes$(printf -- '- `%s`: PGO/BOLT 编译（xn / LICENSE / docs/configuration.md / THIRD-PARTY-NOTICES.txt）\n' "$n")" ;;
-				*) notes="$notes$(printf -- '- `%s`: 普通 release 编译（xn / LICENSE / docs/configuration.md / THIRD-PARTY-NOTICES.txt）\n' "$n")" ;;
+				*) notes="$notes$(printf -- '- `%s`: 普通 release 编译（xn / cidr / xn-tui / xns / LICENSE / docs/configuration.md / THIRD-PARTY-NOTICES.txt）\n' "$n")" ;;
 			esac
 		done
 		for n in ${trace_names[@]+"${trace_names[@]}"}; do

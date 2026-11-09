@@ -444,7 +444,6 @@ jobs:
           args=(
             --src "$GITHUB_WORKSPACE/.cache/xn-src"
             --target armv7-unknown-linux-musleabihf
-            --no-extras
             --publish
           )
           [ -n "${INPUT_TAG:-}" ] && args+=(--tag "$INPUT_TAG")
