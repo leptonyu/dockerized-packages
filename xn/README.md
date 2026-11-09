@@ -179,9 +179,22 @@ xn-tui.x86_64-unknown-linux-gnu.tar.xz    (+ .sha256sum)   # xn-tui / LICENSE / 
 schedule 绑定：
 
 - **不按天编译**：每小时（`:17`）只解析一次上游 `leptonyu/xn` 的 `main` SHA，只有 SHA
-  变化才跑构建（当前 PGO-only）；没有变化时 check job 几秒结束。
+  变化才跑构建；没有变化时 check job 几秒结束。（x86_64 / macOS 是 PGO，armv7 普通编译。）
+- **每个目标一个 job、彼此并发**：`x86_64-linux-gnu` / `armv7-linux-musleabihf` /
+  `aarch64-macos` 都只依赖 `check`，`check` 一过同时开跑，谁都不等谁；`target` 只决定
+  开哪几个，重跑某一档不会带上另外两档。
+- **armv7 是普通编译，没有 PGO**：armv7 二进制在 x86 runner 上跑不起来，采不了 PGO
+  样本，所以交叉档直接走 `release.sh --target armv7-unknown-linux-musleabihf --pack`
+  （cargo-zigbuild 交叉），只出 runtime 包，发布名是
+  `xn.armv7-unknown-linux-musleabihf.tar.xz`（没调优就不叫 `.tuned.`）。
+  `build.sh --profile FILE` 仍保留 `pgo.sh use` 的 PGO 交叉路径，仅本地手动用。
+  注意别用 `pgo.sh use` 直接当 zig 调交叉链接：它会和 rustc 的 self-contained
+  `crt*.o` 撞 `_start`（duplicate symbol），普通 `release.sh --target` 不会。
 - 已构建的 main SHA 记在仓库变量 **`XN_LAST_MAIN_SHA`**（并用 `actions/cache` 的
   `xn-main-sha-<sha>` 标记兜底）；只在发布成功后更新，失败/取消不会记账，下一轮会重试。
+  记账门槛是**本次选中的目标全部 success**（`all` 时 x86_64 / armv7 / macOS 三个都要过），
+  所以任何一个目标挂掉，这个 SHA 就一直不会被记——armv7 链接失败那段时间就是这样。
+  记完会读回 `XN_LAST_MAIN_SHA` 确认并写进 job summary，没记上会打 `::error::`。
 - 支持上游主动触发：`repository_dispatch`，`event_type: xn-main-updated`，
   `client_payload.sha` 可选；没有 dispatch 时最多晚一小时发现更新。
 - 默认跟踪 `main`；需要临时从别的分支构建时，用手动 `workflow_dispatch` 的 `ref` 输入。

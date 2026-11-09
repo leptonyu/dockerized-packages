@@ -20,7 +20,7 @@
 #   xn.<triple>.tuned.tar.xz        runtime：xn / LICENSE / docs/configuration.md / THIRD-PARTY-NOTICES.txt
 #   xn.<triple>.tuned.trace.tar.xz  trace：trace-files.txt 列出的诊断文件 + xn.tuned.env
 #   （上游 release.sh 产出的名字带 flavor（Linux 是 pgo-bolt、macOS 是 pgo），
-#    发布前统一改名成 .tuned.）
+#    PGO/BOLT 构建发布前统一改名成 .tuned.；交叉档普通编译则叫 xn.<triple>.tar.xz）
 #                                      + 两份清单 + build.log / build-info.txt
 #   SHA256SUMS                         两行 sha256 filename（本地校验用，不发布）
 #   *.tar.xz.sha256sum                 每个包自己的校验和（发布用）
@@ -30,10 +30,11 @@
 # 平台（`--target`，默认 x86_64-unknown-linux-gnu）：
 #   * x86_64-unknown-linux-gnu：原生；BOLT 要 --emit-relocs，zig 交叉档拿不到。
 #   * aarch64-apple-darwin：在 macOS runner 上原生跑，PGO-only（flavor 变成 pgo）。
-#   * armv7-unknown-linux-musleabihf：任何 runner 都不是它的 host ⇒ 走交叉：用
-#     `--profile` 指定一份已有的 merged.profdata（缺省取 src/target/tune/ 下最新的
-#     x86_64 run），`pgo.sh use` 出二进制；**没有 trace 包**（跨架构没有 build-tuned 的
-#     采样目录），只打 runtime 包。
+#   * armv7-unknown-linux-musleabihf：任何 runner 都不是它的 host ⇒ 交叉，**普通 release
+#     编译（无 PGO/BOLT）**：armv7 二进制在 x86 runner 上跑不起来，采不了样；`release.sh
+#     --target armv7-... --pack` 走 cargo-zigbuild，它会去掉 rustc 的 self-contained
+#     crt*.o，避免和 zig 自带的 crt1.o 撞 `_start`。只有显式给 `--profile` 才走
+#     `pgo.sh use` 的 PGO 交叉路径（本地手动用）。**没有 trace 包**，只打 runtime 包。
 #
 # 典型用法：
 #   ./xn/build.sh                     # 构建 + 打包（不发布）
@@ -77,6 +78,11 @@ target="${XN_TARGET:-x86_64-unknown-linux-gnu}"
 profile_file="${XN_PGO_PROFILE:-}"
 host_triple=""
 cross=false
+# 发布名后缀：PGO/BOLT 构建统一叫 .tuned.；交叉档默认普通编译，不带后缀。
+pkg_flavor=".tuned"
+if [[ "$target" == armv7-unknown-linux-musleabihf && -z "$profile_file" ]]; then
+	pkg_flavor=""
+fi
 
 die() { echo "xn/build.sh: $*" >&2; exit 2; }
 note() { echo "==> $*" >&2; }
@@ -117,7 +123,7 @@ retry() {
 }
 
 usage() {
-	sed -n '2,39p' "$self" | sed 's/^# \{0,1\}//'
+	sed -n '2,46p' "$self" | sed 's/^# \{0,1\}//'
 	cat <<'EOF'
 
 选项（环境变量同名，带 XN_ 前缀）：
@@ -126,8 +132,8 @@ usage() {
   --ref REF            分支 / tag / commit，默认 main（须包含 release.sh --tuned --pack）
   --target TRIPLE      构建目标，默认 x86_64-unknown-linux-gnu；macOS 用
                        aarch64-apple-darwin，交叉 armv7 用 armv7-unknown-linux-musleabihf
-  --profile FILE       交叉目标的 PGO profile（merged.profdata）；缺省取 src/target/tune/
-                       下最新的 x86_64 run（armv7 二进制跑不了，只能复用采样）
+  --profile FILE       只给交叉档用：显式指定 merged.profdata 才走 pgo.sh use 的 PGO
+                       交叉路径；不给就是普通 release 编译（推荐，armv7 不需要 PGO）
   --out-dir DIR        产物目录，默认 xn/dist
   --release-repo R     release 所在仓库；默认 = --repo / XN_REPO 的 owner/repo
   --tag TAG            目标 release tag；默认直接读 Cargo.toml 的 v<version>
@@ -150,8 +156,10 @@ usage() {
   --dry-run            只打印命令，不 clone / 不构建 / 不上传
   -h, --help           本帮助
 
-打包由上游 release.sh 完成（`--tuned --pack`），本脚本只上传：
-  xn.<triple>.tuned.tar.xz / xn.<triple>.tuned.trace.tar.xz（各带 .sha256sum）
+打包由上游 release.sh 完成（PGO/BOLT 用 `--tuned --pack`；交叉档用普通 `--target --pack`），
+本脚本只上传：
+  xn.<triple>.tuned.tar.xz / xn.<triple>.tuned.trace.tar.xz（各带 .sha256sum；
+  交叉档没有 trace，名字是 xn.<triple>.tar.xz —— 没调优就不叫 tuned）
   外加 cidr.<triple>.tar.xz / xn-tui.<triple>.tar.xz（也是 release.sh --pack，不调优）
 EOF
 }
@@ -428,6 +436,12 @@ print_plan() {
 	fi
 	if $package_only; then
 		echo "# --package-only：跳过构建，直接用 $s/target/$target/release/ 里的产物"
+	elif [[ "$target" == armv7-unknown-linux-musleabihf && -z "$profile_file" ]]; then
+		printf '+ (cd %q && ./release.sh --target %q --pack' "$s" "$target"
+		[[ -n "$features" ]] && printf ' --features %q' "$features"
+		$locked && printf ' --locked'
+		printf ')\n'
+		echo "# 交叉普通编译（无 PGO）：发布名 xn.$target.tar.xz"
 	else
 		printf '+ (cd %q && ./release.sh' "$s"
 		printf ' %s' "${rargs[@]}"
@@ -452,6 +466,12 @@ fi
 if $check; then
 	prepare_source
 	echo "==> 上游：${src}（${commit:0:12}）"
+	if [[ "$target" == armv7-unknown-linux-musleabihf ]]; then
+		# 交叉档走普通 release 构建：不采 PGO、不跑 BOLT，doctor --require bolt 不适用。
+		( cd "$src" && ./release.sh --target "$target" --dry-run )
+		echo "交叉档：普通编译（无 PGO/BOLT），跳过 BOLT doctor"
+		exit 0
+	fi
 	( cd "$src" && ./release.sh --tuned --dry-run )
 	echo
 	local_doctor=0
@@ -492,7 +512,11 @@ if ! $package_only; then
 		printf 'icf=%s\n' "${icf:-all}"
 		printf 'release_repo=%s\n' "$release_repo"
 		printf 'release_tag=%s\n' "${tag:-<none>}"
-		printf 'note=打包由上游 release.sh --tuned --pack 完成（runtime + trace + SHA256SUMS）\n'
+		if $cross && [[ -z "$profile_file" ]]; then
+			printf 'note=打包由上游 release.sh --target --pack 完成（交叉普通编译，无 PGO）\n'
+		else
+			printf 'note=打包由上游 release.sh --tuned --pack 完成（runtime + trace + SHA256SUMS）\n'
+		fi
 	} > "$build_info"
 
 	build_args=(--tuned --target "$target" --pack
@@ -508,22 +532,31 @@ if ! $package_only; then
 	$locked && build_args+=(--locked)
 
 	if $cross; then
-		# 交叉：profile 只能复用。缺省取 src/target/tune/ 下最新的 x86_64 run。
+		# 交叉档默认**普通编译**（无 PGO/BOLT）：armv7 二进制在 x86 runner 上跑不起来，
+		# 采不了样；pgo.sh use 那条路直接把 zig 当 linker，会跟 rustc 的 self-contained
+		# crt*.o 撞 _start（duplicate symbol），所以只作为本地手动路径保留。
+		# release.sh 的普通 --target 构建走 cargo-zigbuild，会去掉那些 crt 对象。
 		prof="${profile_file:-}"
-		if [[ -z "$prof" ]]; then
-			prof="$(ls -dt "$src"/target/tune/*/01-collect/merged.profdata 2>/dev/null | head -1 || true)"
+		if [[ -n "$prof" ]]; then
+			[[ -f "$prof" ]] || die "--profile 指向的文件不存在：${prof}"
+			pkg_flavor=".tuned"
+			note "交叉构建（PGO）：pgo.sh use --target ${target}（profile=${prof}）"
+			use_args=(--target "$target" --cargo-profile release --profile "$prof")
+			[[ -n "$features" ]] && use_args+=(--features "$features")
+			$locked && use_args+=(--locked)
+			( cd "$src" && ./scripts/pgo.sh use "${use_args[@]}" ) 2>&1 | tee -a "$out_dir/build.log"
+			# 只有 runtime 包：跨架构没有 build-tuned 的 trace 目录。
+			note "交叉打包：pack-release.sh（runtime 包，无 trace）"
+			pack_args=(--release-dir "target/$target/release" --target "$target" --bin xn --flavor tuned)
+			( cd "$src" && ./scripts/pack-release.sh "${pack_args[@]}" ) 2>&1 | tee -a "$out_dir/build.log"
+		else
+			pkg_flavor=""
+			note "交叉构建（普通 release，无 PGO）：release.sh --target ${target} --pack"
+			cross_args=(--target "$target" --pack)
+			[[ -n "$features" ]] && cross_args+=(--features "$features")
+			$locked && cross_args+=(--locked)
+			( cd "$src" && ./release.sh "${cross_args[@]}" ) 2>&1 | tee -a "$out_dir/build.log"
 		fi
-		[[ -n "$prof" && -f "$prof" ]] \
-			|| die "交叉构建需要 --profile FILE（或先在同一个 checkout 里跑一遍 x86_64 的 build-tuned，留出 target/tune/*/01-collect/merged.profdata）"
-		note "交叉构建：pgo.sh use --target ${target}（profile=${prof}）"
-		use_args=(--target "$target" --cargo-profile release --profile "$prof")
-		[[ -n "$features" ]] && use_args+=(--features "$features")
-		$locked && use_args+=(--locked)
-		( cd "$src" && ./scripts/pgo.sh use "${use_args[@]}" ) 2>&1 | tee -a "$out_dir/build.log"
-		# 只有 runtime 包：跨架构没有 build-tuned 的 trace 目录。
-		note "交叉打包：pack-release.sh（runtime 包，无 trace）"
-		pack_args=(--release-dir "target/$target/release" --target "$target" --bin xn --flavor tuned)
-		( cd "$src" && ./scripts/pack-release.sh "${pack_args[@]}" ) 2>&1 | tee -a "$out_dir/build.log"
 	else
 		# extras 先编：cidr / xn-tui **不做 PGO/BOLT**（不在 xn 热路径上，普通构建就够），
 		# 而且**必须逐包单独调用** release.sh —— 一次写多个包（或用多个 -p）会做 feature
@@ -578,12 +611,12 @@ fi
 
 runtime_base="$(basename "$runtime_tar")"
 trace_base=""
-runtime_out="$out_dir/xn.$target.tuned.tar.xz"
+runtime_out="$out_dir/xn.$target${pkg_flavor}.tar.xz"
 trace_out=""
 note "产物：${runtime_base}（$(human_bytes "$(bytes_of "$runtime_tar")")）"
 if [[ -n "$trace_tar" ]]; then
 	trace_base="$(basename "$trace_tar")"
-	trace_out="$out_dir/xn.$target.tuned.trace.tar.xz"
+	trace_out="$out_dir/xn.$target${pkg_flavor}.trace.tar.xz"
 	note "      ${trace_base}（$(human_bytes "$(bytes_of "$trace_tar")")）"
 	cp -p "$runtime_tar" "$trace_tar" "$sums" "$out_dir/"
 else
@@ -606,7 +639,8 @@ if [[ -n "$trace_base" ]]; then
 fi
 note "SHA256SUMS 校验通过（runtime${trace_base:+ + trace}）"
 
-# 发布名固定成 .tuned.：不把上游的 flavor（pgo-bolt / pgo）暴露给消费端。
+# 发布名：PGO/BOLT 构建统一叫 .tuned.，不把上游的 flavor（pgo-bolt / pgo）暴露给
+# 消费端；交叉档默认普通编译，用 <triple> 原名（不带后缀），别把没调优的包叫 tuned。
 # 本地校验在改名前已经做完，SHA256SUMS 只用于这一步。
 if [[ "$out_dir/$runtime_base" != "$runtime_out" ]]; then
 	mv -f "$out_dir/$runtime_base" "$runtime_out"

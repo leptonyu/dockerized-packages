@@ -4,14 +4,12 @@ run-name: "发布 XN · ${{ inputs.target || 'all' }}"
 # 交付目标（`target` 下拉，默认 all，可单编一个）：
 #   all                      三个都编（x86_64 Linux + armv7 Linux + aarch64 macOS）
 #   x86_64-linux-gnu         ubuntu-latest，原生 PGO（BOLT 默认不开）
-#   armv7-linux-musleabihf   ubuntu-latest，交叉；PGO profile 从 x86_64 任务上传的
-#                            `xn-pgo-profile` artifact 取（armv7 二进制任何 runner 都跑不了，
-#                            没法自采；只出 runtime 包）
+#   armv7-linux-musleabihf   ubuntu-latest，交叉；**普通 release 编译（无 PGO/BOLT）**
+#                            ——armv7 二进制任何 runner 都跑不了，采不了样；只出 runtime 包
 #   aarch64-macos            macos-15（Apple silicon），原生 PGO（BOLT 不可用）
 #
-# **每个目标一个 job**：x86_64 / armv7 / macOS 各自构建、各自上传 artifact；重跑某一档
-# 不会带着另外两档一起重跑。`target=armv7-linux-musleabihf` 会先跑 x86_64 job 采一份
-# profile（交叉档唯一的采样来源），但那一轮不发布 x86_64 包、也不打 extras。
+# **每个目标一个 job，`check` 之后同时开跑**：x86_64 / armv7 / macOS 互不等待，各自构建、
+# 各自上传 artifact；重跑某一档不会带着另外两档一起重跑，也不会先跑别的档来给它铺路。
 #
 # `compare` 下拉（默认 false）：构建完成后在本 runner 跑 `pgo.compare`（bin 大小 + t1 同机
 # A/B；macOS 自动退 `pgo.compare.size`）。armv7 交叉档没有同机 control / 采样，不跑。
@@ -34,8 +32,8 @@ on:
         default: "false"
       target:
         description: >-
-          all=三个目标都编 | x86_64-linux-gnu=Ubuntu x86_64 原生 PGO |
-          armv7-linux-musleabihf=Ubuntu 交叉 armv7（复用 x86_64 的 profile，只出 runtime 包） |
+          all=三个目标并发都编 | x86_64-linux-gnu=Ubuntu x86_64 原生 PGO |
+          armv7-linux-musleabihf=Ubuntu 交叉 armv7（普通 release，无 PGO，只出 runtime 包） |
           aarch64-macos=macOS arm64 原生 PGO（BOLT 不可用）
         type: choice
         required: true
@@ -165,12 +163,10 @@ jobs:
   linux-x86_64:
     name: build x86_64-linux-gnu
     needs: check
-    # target=armv7 也要跑这一档：交叉档只能复用 x86_64 这台原生机器采出来的 profile。
     if: |
       needs.check.outputs.changed == 'true' && (
         needs.check.outputs.target == 'all' ||
-        needs.check.outputs.target == 'x86_64-linux-gnu' ||
-        needs.check.outputs.target == 'armv7-linux-musleabihf')
+        needs.check.outputs.target == 'x86_64-linux-gnu')
     runs-on: ubuntu-latest
     timeout-minutes: 240
     steps:
@@ -204,8 +200,8 @@ jobs:
           perf --version
           /usr/lib/llvm-23/bin/llvm-bolt --version
       - name: Install Rust
-        # 按仓库的 rust-toolchain.toml 装精确版本：x86_64 采的 profile 与 armv7 消费它的
-        # 工具链必须是同一版。
+        # 按仓库的 rust-toolchain.toml 装精确版本，避免 runner 预装的 rustc 和上游
+        # 期望的不一致。
         run: |
           toolchain="$(sed -n 's/^channel *= *"\([^"]*\)".*/\1/p' "$GITHUB_WORKSPACE/.cache/xn-src/rust-toolchain.toml")"
           rustup set profile minimal
@@ -239,49 +235,24 @@ jobs:
           LLVM_PROFDATA: /usr/lib/llvm-23/bin/llvm-profdata
           INPUT_FEATURES: ${{ inputs.features }}
           INPUT_TAG: ${{ inputs.tag }}
-          INPUT_TARGET: ${{ needs.check.outputs.target }}
           SCCACHE_CACHE_SIZE: 1G
         run: |
           set -euo pipefail
           args=(
             --src "$GITHUB_WORKSPACE/.cache/xn-src"
+            --publish
           )
-          # armv7 单选时这一 job 只负责采 profile：不发布、也不打 extras（那些由 armv7 job
-          # 自己决定，而交叉档只出 runtime 包）。
-          if [ "${INPUT_TARGET}" = "armv7-linux-musleabihf" ]; then
-            args+=(--no-extras)
-          else
-            args+=(--publish)
-          fi
           [ -n "${INPUT_TAG:-}" ] && args+=(--tag "$INPUT_TAG")
           [ -n "${INPUT_FEATURES:-}" ] && args+=(--features "$INPUT_FEATURES")
           ./xn/build.sh --target x86_64-unknown-linux-gnu "${args[@]}"
-      - name: Export PGO profile for cross targets
-        # armv7 job 只拿这一份 artifact；没有 merged.profdata 说明 PGO 降级成了普通
-        # release，宁可在这里报错，也不要让 armv7 悄悄用不上 profile。
-        run: |
-          set -euo pipefail
-          prof="$(ls -dt "$GITHUB_WORKSPACE"/.cache/xn-src/target/tune/*/01-collect/merged.profdata 2>/dev/null | head -1 || true)"
-          if [ -z "$prof" ] || [ ! -f "$prof" ]; then
-            echo "::error::没有 merged.profdata（PGO 构建可能降级成了普通 release）"
-            exit 1
-          fi
-          cp "$prof" xn/dist/merged.profdata
-          ls -lh xn/dist/merged.profdata
-      - name: Upload PGO profile
-        uses: actions/upload-artifact@v7
-        with:
-          name: xn-pgo-profile
-          path: xn/dist/merged.profdata
-          retention-days: 7
       - name: Run pgo.compare
-        if: ${{ inputs.compare == 'true' && needs.check.outputs.target != 'armv7-linux-musleabihf' }}
+        if: ${{ inputs.compare == 'true' }}
         run: |
           set -euo pipefail
           cd "$GITHUB_WORKSPACE/.cache/xn-src"
           scripts/test/pgo/compare-ci.sh --rounds 4
       - name: Upload pgo compare artifacts
-        if: always() && inputs.compare == 'true' && needs.check.outputs.target != 'armv7-linux-musleabihf'
+        if: always() && inputs.compare == 'true'
         uses: actions/upload-artifact@v7
         with:
           name: xn-pgo-compare-x86_64-linux-gnu
@@ -302,7 +273,9 @@ jobs:
 
   linux-armv7:
     name: build armv7-linux-musleabihf
-    needs: [check, linux-x86_64]
+    # 跟 x86_64 / macOS 一样只看 check：三档同时开跑，armv7 不排在 x86_64 后面等任何东西。
+    # armv7 走普通 release 交叉编译（无 PGO/BOLT），不需要 profile。
+    needs: check
     if: |
       needs.check.outputs.changed == 'true' && (
         needs.check.outputs.target == 'all' ||
@@ -326,7 +299,7 @@ jobs:
           persist-credentials: false
       - name: Install system dependencies
         # 交叉档的 C 依赖由 cargo-zigbuild 用 zig cc 编；这里只装 bindgen（libclang）与
-        # pack-release 需要的工具，不装 perf / LLVM 23 / BOLT。
+        # release.sh --pack 需要的工具，不装 perf / LLVM 23 / BOLT。
         run: |
           set -euo pipefail
           sudo apt-get update
@@ -341,14 +314,9 @@ jobs:
           rustup default "$toolchain"
           rustup target add --toolchain "$toolchain" armv7-unknown-linux-musleabihf
       - name: Install cargo-deny
-        # pack-release.sh 会调 gen-notices.sh（需要 cargo-deny）。
+        # release.sh --pack 会调 gen-notices.sh（需要 cargo-deny）。
         uses: taiki-e/install-action@cargo-deny
-      - name: Download x86_64 PGO profile
-        uses: actions/download-artifact@v8
-        with:
-          name: xn-pgo-profile
-          path: xn/dist
-      - name: Build tuned armv7 and publish
+      - name: Build armv7 (plain release) and publish
         env:
           GH_TOKEN: ${{ secrets.XN_REPO_TOKEN }}
           INPUT_FEATURES: ${{ inputs.features }}
@@ -358,7 +326,6 @@ jobs:
           args=(
             --src "$GITHUB_WORKSPACE/.cache/xn-src"
             --target armv7-unknown-linux-musleabihf
-            --profile "$GITHUB_WORKSPACE/xn/dist/merged.profdata"
             --no-extras
             --publish
           )
@@ -373,7 +340,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: xn-pgo-bolt-armv7-linux-musleabihf
+          name: xn-armv7-linux-musleabihf
           path: |
             xn/dist/*.tar.xz
             xn/dist/*.sha256sum
@@ -483,7 +450,24 @@ jobs:
         continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SHA: ${{ needs.check.outputs.sha }}
         run: |
-          gh variable set XN_LAST_MAIN_SHA \
-            --repo "$GITHUB_REPOSITORY" \
-            --body "${{ needs.check.outputs.sha }}"
+          set -uo pipefail
+          # 记不进去 = 下一轮还会重建同一个 SHA。别静悄悄地失败：重试后读回来确认一次。
+          for i in 1 2 3; do
+            if gh variable set XN_LAST_MAIN_SHA --repo "$GITHUB_REPOSITORY" --body "$SHA"; then
+              break
+            fi
+            echo "::warning::gh variable set 第 ${i}/3 次失败，5s 后重试"
+            sleep 5
+          done
+          got="$(gh api "repos/${GITHUB_REPOSITORY}/actions/variables/XN_LAST_MAIN_SHA" --jq .value 2>/dev/null || true)"
+          {
+            echo "### record built main SHA"
+            echo "- sha: \`${SHA}\`"
+            echo "- XN_LAST_MAIN_SHA: \`${got:-<读取失败>}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [[ "$got" != "$SHA" ]]; then
+            echo "::error::XN_LAST_MAIN_SHA 没记成（当前 ${got:-<空>}）；cache 标记仍在，但仓库变量没更新"
+            exit 1
+          fi
