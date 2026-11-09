@@ -1,7 +1,8 @@
 #!/bin/bash
 #
-# network/ 的 CI 入口：拿到 cidr（默认从 xn 的 latest release 下载 Linux x86_64 包，
-# 也可以用 CIDR=... 指定本地二进制），生成八份名单，校验后逐份 xz。
+# network/ 的 CI 入口：拿到 cidr（默认从 xn 的 latest release 下载 **普通包**
+# xn.x86_64-unknown-linux-gnu.tar.xz 里解出来，也可以用 CIDR=... 指定本地二进制），
+# 生成八份名单，校验后逐份 xz。
 # .github/workflows/adguard.yml 的 network job 负责缓存 + 调本脚本 + 发布。
 #
 # 本地也可以直接跑：
@@ -21,11 +22,12 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 cd "$ROOT"
 
-# 仓库不再提交 cidr 二进制（原来的 network/bin/cidr + Git LFS 已移除）：
-# 默认从 xn 的 release 下载，和 CI 用同一个包。
+# 仓库不再提交 cidr 二进制（原来的 network/bin/cidr + Git LFS 已移除）。
+# xn 的 release 不再单独发 cidr 包：cidr 跟着 **普通包**（xn.<triple>.tar.xz，
+# 非 PGO 那一档）一起发，所以这里下载普通包再解出 cidr；和 CI 用同一份产物。
 CIDR="${CIDR:-}"
 XN_REPO="${XN_REPO:-leptonyu/xn}"
-CIDR_ASSET="${CIDR_ASSET:-cidr.x86_64-unknown-linux-gnu.tar.xz}"
+CIDR_ASSET="${CIDR_ASSET:-xn.x86_64-unknown-linux-gnu.tar.xz}"
 CIDR_TAG="${CIDR_TAG:-}" # 空 = 最新 release；也可以填具体 tag
 CIDR_URL="${CIDR_URL:-}" # 显式 URL：用 curl 下（公开仓库 / 镜像 / 固定 tag）
 # xn 是私有仓库，下载 release 资产需要只读 token；仓库公开后留空即可。
@@ -96,7 +98,7 @@ fetch_cidr_gh() {
 
 	echo "ci.sh: gh release download ${CIDR_TAG:-latest} ${CIDR_ASSET}（${XN_REPO}）..." >&2
 	"${gh_cmd[@]}" "${args[@]}" ||
-		die "下载 cidr 失败：确认 $XN_REPO 的 release 里有 ${CIDR_ASSET}（私有仓库需要 XN_REPO_TOKEN）"
+		die "下载普通包失败：确认 $XN_REPO 的 release 里有 ${CIDR_ASSET}（私有仓库需要 XN_REPO_TOKEN）"
 	[ -f "$archive" ] || die "gh 没有把 $CIDR_ASSET 下到 $dir"
 }
 
@@ -123,9 +125,9 @@ fetch_cidr() {
 
 	rm -rf "$dir/extract"
 	mkdir -p "$dir/extract"
-	tar -xJf "$archive" -C "$dir/extract" || die "解压 cidr 包失败（${archive}）"
+	tar -xJf "$archive" -C "$dir/extract" || die "解压普通包失败（${archive}）"
 	CIDR="$(find "$dir/extract" -type f -name cidr -print -quit)"
-	[ -n "$CIDR" ] || die "cidr 包里找不到 cidr 可执行文件"
+	[ -n "$CIDR" ] || die "普通包里找不到 cidr 可执行文件（上游打包内容变了？）"
 	chmod +x "$CIDR" 2>/dev/null || true
 	[ -x "$CIDR" ] || die "cidr 不可执行：$CIDR"
 }

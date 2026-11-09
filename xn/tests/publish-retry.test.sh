@@ -7,7 +7,9 @@
 #   1) 某资产连续两次 HTTP 502 → 自动退避重试后成功；8 个资产齐全，.sha256sum 最后传；
 #   2) HTTP 403 → 判定不可重试，1 次就失败，不浪费 4 轮等待；
 #   3) 远端 .sha256sum 与本次构建不一致 → 自检发现后整体重传一次（16 次 upload）；
-#   4) --dry-run / --help。
+#   4) 普通包 + tuned 包合并发布（同 release、各自 .sha256sum、校验和最后传）；
+#   5) 两步发布：先普通包、再 tuned（workflow 里就是两段 publish）；
+#   6) --dry-run / --help。
 set -uo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -178,8 +180,42 @@ check "共 16 次 upload（1 轮 + 重传 1 轮）" test "$(grep -c 'release upl
 check "重传后自检通过" grep -q 'release 资产自检通过' "$state/stderr.log"
 check "重传前的告警" grep -q '不一致，重传一次' "$state/stderr.log"
 
-# ---------------------------------------------------------------- 4) dry-run / help
-printf '== 4) dry-run / help\n'
+# ---------------------------------------------------------------- 5) 合并发布：普通 + tuned
+printf '== 4) 普通包 + tuned 包合并发布（同 release）\n'
+src="$work/src5"; state="$work/state5"; out="$work/out5"
+make_src "$src"
+rel="$src/target/$target/release"
+printf 'plain-%s' "$RANDOM" >"$rel/xn.$target.tar.xz"
+printf '%s  %s\n' "$(sha "$rel/xn.$target.tar.xz")" "xn.$target.tar.xz" >>"$rel/SHA256SUMS"
+run_publish "$state" "$src" "$out"
+rc=$?
+check "退出码 0（实际 ${rc}）" test "$rc" -eq 0
+check "10 个资产（5 包 + 5 校验和）" test "$(ls "$state/remote" | wc -l | tr -d ' ')" = "10"
+check "普通包和 tuned 包都在远端" test -f "$state/remote/xn.$target.tar.xz" -a -f "$state/remote/xn.$target.tuned.tar.xz"
+check "普通包也有自己的 .sha256sum" test -f "$state/remote/xn.$target.tar.xz.sha256sum"
+check "校验和最后传（tuned 然后 trace）" test "$(grep 'release upload' "$state/calls.log" | awk '{print $NF}' | tail -2 | while read -r p; do basename "$p"; done | tr '\n' ' ')" = "xn.$target.tuned.tar.xz.sha256sum xn.$target.tuned.trace.tar.xz.sha256sum "
+
+# ---------------------------------------------------------------- 5) 两步发布
+printf '== 5) 两步发布：先普通包，再 tuned（同一个 release）\n'
+src="$work/src6"; state="$work/state6"; out="$work/out6"
+make_src "$src"
+rel="$src/target/$target/release"
+printf 'plain-%s' "$RANDOM" >"$rel/xn.$target.tar.xz"
+printf '%s  %s\n' "$(sha "$rel/xn.$target.tar.xz")" "xn.$target.tar.xz" >>"$rel/SHA256SUMS"
+run_publish "$state" "$src" "$out" XN_FLAVORS=release
+rc=$?
+check "第一步（普通包）退出码 0（实际 ${rc}）" test "$rc" -eq 0
+check "第一步后 6 个资产（普通包 + extras + 校验和）" test "$(ls "$state/remote" | wc -l | tr -d ' ')" = "6"
+check "第一步只有普通包，没有 tuned" test -f "$state/remote/xn.$target.tar.xz" -a ! -f "$state/remote/xn.$target.tuned.tar.xz"
+run_publish "$state" "$src" "$out" XN_FLAVORS=tuned
+rc=$?
+check "第二步（tuned）退出码 0（实际 ${rc}）" test "$rc" -eq 0
+check "第二步后 10 个资产" test "$(ls "$state/remote" | wc -l | tr -d ' ')" = "10"
+check "普通包和它的 .sha256sum 没被 tuned 那步清掉" test -f "$state/remote/xn.$target.tar.xz" -a -f "$state/remote/xn.$target.tar.xz.sha256sum"
+check "tuned 包和 trace 都在" test -f "$state/remote/xn.$target.tuned.tar.xz" -a -f "$state/remote/xn.$target.tuned.trace.tar.xz"
+
+# ---------------------------------------------------------------- 6) dry-run / help
+printf '== 6) dry-run / help\n'
 check "dry-run 退出码 0" bash "$build" --dry-run
 check "dry-run 打印上传计划" bash -c "bash '$build' --dry-run --publish 2>&1 | grep -q 'gh release create/upload'"
 check "help 退出码 0" bash "$build" --help

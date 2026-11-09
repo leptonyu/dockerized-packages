@@ -1,5 +1,5 @@
-name: Test xn
-run-name: "Test xn (${{ inputs.mode }})"
+name: 测试 XN
+run-name: "测试 XN（${{ inputs.mode }}）"
 
 # 一个参数：mode。每个值只做一件事，不再组合 scope / suite / tier。
 #
@@ -65,11 +65,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - runner: ubuntu-24.04
-            arch: x86_64
-          - runner: macos-15
-            arch: aarch64
+        # mode=smoke 只跑 eBPF smoke，而它只在 Linux 上执行；macOS 那条腿会白起一台
+        # runner（checkout / 装 Rust / 打包空日志），所以 smoke 的矩阵只留 Linux。
+        include: ${{ fromJSON(inputs.mode == 'smoke'
+          && '[{"runner":"ubuntu-24.04","arch":"x86_64"}]'
+          || '[{"runner":"ubuntu-24.04","arch":"x86_64"},{"runner":"macos-15","arch":"aarch64"}]') }}
     steps:
       - name: Check XN_REPO_TOKEN
         env:
@@ -103,6 +103,8 @@ jobs:
           rustup toolchain install "$toolchain"
           rustup component add --toolchain "$toolchain" clippy rustfmt
       - name: Install cargo-nextest
+        # 只有 unified 档（all / nightly）跑 nextest；smoke 只跑 eBPF，不装。
+        if: inputs.mode == 'all' || inputs.mode == 'nightly'
         uses: taiki-e/install-action@nextest
       - name: Check registry and catalog
         run: scripts/test/run.sh check

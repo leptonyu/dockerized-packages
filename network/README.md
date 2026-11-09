@@ -85,14 +85,16 @@ x86_64 包，不再需要本地提交名单快照。
 
 ## 生成
 
-依赖 `cidr`（`xn-cidr-bin` 的 CLI）。仓库不再提交二进制；`ci.sh` 从 xn 的
-**最新 release**（不钉版本）下载 `cidr.x86_64-unknown-linux-gnu.tar.xz`，解压到
-`network/.cache/cidr-bin/`（已在 `.gitignore` 里）。下载方式按环境自动选：
+依赖 `cidr`（`xn-cidr-bin` 的 CLI）。仓库不再提交二进制，xn 的 release 也**不再单独发
+cidr 包**：`ci.sh` 从 xn 的**最新 release**（不钉版本）下载**普通包**
+`xn.x86_64-unknown-linux-gnu.tar.xz`（非 PGO 那一档，cidr 跟它一起发），解压到
+`network/.cache/cidr-bin/`（已在 `.gitignore` 里），再从包里找出 `cidr`。
+下载方式按环境自动选：
 
 | 条件 | 下载方式 |
 | --- | --- |
 | 配了 `XN_REPO_TOKEN`（CI） | `gh release download`（走 GitHub API，不传 tag = 最新 release） |
-| 没配 token（公开仓库） | `curl` GitHub 的 latest 地址：`https://github.com/leptonyu/xn/releases/latest/download/cidr.x86_64-unknown-linux-gnu.tar.xz` |
+| 没配 token（公开仓库） | `curl` GitHub 的 latest 地址：`https://github.com/leptonyu/xn/releases/latest/download/xn.x86_64-unknown-linux-gnu.tar.xz` |
 | 配了 `CIDR_URL` | 直接 `curl` 这个地址（镜像 / 固定 tag / 私有镜像） |
 
 > 私有仓库的 release 资产不能走网页下载地址（`releases/download/<tag>/<asset>`），
@@ -107,7 +109,7 @@ x86_64 包，不再需要本地提交名单快照。
 | --- | --- | --- |
 | `CIDR` | 空（走下载） | 已有 cidr 的路径或命令名，设置后不再下载 |
 | `XN_REPO` | `leptonyu/xn` | release 所在仓库 |
-| `CIDR_ASSET` | `cidr.x86_64-unknown-linux-gnu.tar.xz` | release 里的资产名 |
+| `CIDR_ASSET` | `xn.x86_64-unknown-linux-gnu.tar.xz` | release 里含 cidr 的那个包里（默认普通包） |
 | `CIDR_TAG` | 空（最新 release） | 钉到某个 tag，例如 `v6.0.0` |
 | `CIDR_URL` | 空 | 显式下载地址；设置后用它 curl，不再走 gh |
 | `XN_REPO_TOKEN` | 空 | xn 是私有仓库，下载 release 资产用；和 xn 构建共用同一个 secret，只读即可 |

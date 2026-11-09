@@ -4,40 +4,35 @@
 #
 # 上游仓库：git@github.com:leptonyu/xn.git
 #
-# 本脚本**不打包**：打包已经交给上游 release.sh 的 `--tuned --pack`（runtime 包 +
-# trace 包 + SHA256SUMS 都落在 target/<triple>/release/）。这里只负责：
-#   1) 取上游源码、跑 `release.sh --tuned --target <triple> --pack`；
-#   2) 把 build.log / build-info.txt 交给它收进 trace 包（--pack-log / --pack-info）；
-#   3) 校验产物、复制到 --out-dir；
+# 本脚本**不打包**：打包交给上游 release.sh（runtime 包 + trace 包 + SHA256SUMS 都落在
+# target/<triple>/release/）。这里只负责：
+#   1) 取上游源码、按档位跑 `release.sh --pack`（tuned 档加 `--tuned`）；
+#   2) 把 build.log / build-info.txt 交给 tuned 构建收进 trace 包（--pack-log / --pack-info）；
+#   3) 校验产物、改成稳定的发布名、复制到 --out-dir；
 #   4) 额外把 cidr / xn-tui 单独打好（不调优，见下）；
 #   5) 需要时 gh release upload（逐资产上传；5xx / 网络抖动自动退避重试）。
 #
 # 发布不是原子操作：GitHub 的 release asset API 偶发 502/503/504，一个资产失败
-# 不该连累其余的。所以上传是**逐个文件**做的（runtime/trace 的 .sha256sum 排最后），
+# 不该连累其余的。所以上传是**逐个文件**做的（所有 .sha256sum 排最后），
 # 每个文件单独重试；传完再按 *.sha256sum + asset digest 自检，不一致才整体重传一次。
 #
-# 产物（target/<triple>/release/，本脚本再复制到 --out-dir）：
-#   xn.<triple>.tuned.tar.xz        runtime：xn / LICENSE / docs/configuration.md / THIRD-PARTY-NOTICES.txt
-#   xn.<triple>.tuned.trace.tar.xz  trace：trace-files.txt 列出的诊断文件 + xn.tuned.env
-#   （上游 release.sh 产出的名字带 flavor（Linux 是 pgo-bolt、macOS 是 pgo），
-#    PGO/BOLT 构建发布前统一改名成 .tuned.；交叉档普通编译则叫 xn.<triple>.tar.xz）
-#                                      + 两份清单 + build.log / build-info.txt
-#   SHA256SUMS                         两行 sha256 filename（本地校验用，不发布）
-#   *.tar.xz.sha256sum                 每个包自己的校验和（发布用）
-# 另外（同样 release.sh --pack，不调优；老版本才回退手工打）：
-#   cidr.<triple>.tar.xz / xn-tui.<triple>.tar.xz（各带 .sha256sum）
+# 交付档位（`--flavors`，同一 release 里合并发布）：
+#   release  xn.<triple>.tar.xz           普通 release 编译（所有目标都出）
+#   tuned    xn.<triple>.tuned.tar.xz     PGO/BOLT（gnu / macOS）
+#            xn.<triple>.tuned.trace.tar.xz  构建 trace + xn.tuned.env + 清单 + build.log
+# 每个包配一个 <asset>.sha256sum（发布用，最后传）；SHA256SUMS 只做本地校验，不发布。
 #
 # 平台（`--target`，默认 x86_64-unknown-linux-gnu）：
 #   * x86_64-unknown-linux-gnu：原生；BOLT 要 --emit-relocs，zig 交叉档拿不到。
 #   * aarch64-apple-darwin：在 macOS runner 上原生跑，PGO-only（flavor 变成 pgo）。
-#   * armv7-unknown-linux-musleabihf：任何 runner 都不是它的 host ⇒ 交叉，**普通 release
-#     编译（无 PGO/BOLT）**：armv7 二进制在 x86 runner 上跑不起来，采不了样；`release.sh
-#     --target armv7-... --pack` 走 cargo-zigbuild，它会去掉 rustc 的 self-contained
-#     crt*.o，避免和 zig 自带的 crt1.o 撞 `_start`。只有显式给 `--profile` 才走
-#     `pgo.sh use` 的 PGO 交叉路径（本地手动用）。**没有 trace 包**，只打 runtime 包。
+#   * armv7-unknown-linux-musleabihf：交叉，**只出 release 档**：armv7 二进制在 x86 runner
+#     上跑不起来，采不了 PGO 样本；`release.sh --target armv7-... --pack` 走
+#     cargo-zigbuild，它会去掉 rustc 的 self-contained crt*.o，避免和 zig 自带的 crt1.o
+#     撞 `_start`。显式给 `--profile` + `--flavors tuned` 才走 pgo.sh use 的 PGO 交叉路径。
 #
 # 典型用法：
 #   ./xn/build.sh                     # 构建 + 打包（不发布）
+#   ./xn/build.sh --flavors release   # 只编普通档（不发 tuned）
 #   ./xn/build.sh --publish           # 发布到 v<Cargo.toml version>
 #   ./xn/build.sh --tag v6.1.0 --publish
 #   ./xn/build.sh --check             # 只检查工具链
@@ -78,15 +73,42 @@ target="${XN_TARGET:-x86_64-unknown-linux-gnu}"
 profile_file="${XN_PGO_PROFILE:-}"
 host_triple=""
 cross=false
-# 发布名后缀：PGO/BOLT 构建统一叫 .tuned.；交叉档默认普通编译，不带后缀。
-pkg_flavor=".tuned"
-if [[ "$target" == armv7-unknown-linux-musleabihf && -z "$profile_file" ]]; then
-	pkg_flavor=""
-fi
+# 交付档位（逗号分隔）：release = 普通 release 编译；tuned = PGO/BOLT。
+# 空 = 按目标取默认：gnu / macOS 出 release,tuned（普通包和 tuned 包各自发布），
+# armv7 只出 release。--package-only 时按 target/<triple>/release/ 里现成的产物自动识别。
+flavors="${XN_FLAVORS:-}"
 
 die() { echo "xn/build.sh: $*" >&2; exit 2; }
 note() { echo "==> $*" >&2; }
 warn() { echo "xn/build.sh: 警告：$*" >&2; }
+
+# 默认档位：gnu / macOS 两种都出（普通 release + tuned 各自成包），armv7 只出普通档。
+default_flavors() {
+	if [[ "$target" == armv7-unknown-linux-musleabihf ]]; then
+		if [[ -n "$profile_file" ]]; then printf 'tuned\n'; else printf 'release\n'; fi
+	else
+		printf 'release,tuned\n'
+	fi
+}
+
+# 档位列表校验：只认 release / tuned。
+resolve_flavors() {
+	local f want=""
+	[[ -n "$flavors" ]] || flavors="$(default_flavors)"
+	for f in ${flavors//,/ }; do
+		case "$f" in
+			release|tuned) ;;
+			*) die "未知 flavor：${f}（只支持 release / tuned）" ;;
+		esac
+	done
+	# 规范成「先 release 后 tuned」并去重：asset 顺序稳定，tuned 失败也不影响普通包。
+	for f in release tuned; do
+		case ",$flavors," in
+			*",$f,"*) want="${want:+$want,}$f" ;;
+		esac
+	done
+	flavors="$want"
+}
 
 # 瞬时故障重试：GitHub API 偶发 502/503/504，或网络抖动。
 #   retry <描述> <命令...>
@@ -123,7 +145,8 @@ retry() {
 }
 
 usage() {
-	sed -n '2,46p' "$self" | sed 's/^# \{0,1\}//'
+	# 文件头的注释块（到第一条非注释行为止），不用维护行号。
+	awk 'NR > 1 { if ($0 ~ /^#/) { sub(/^# ?/, ""); print; next } exit }' "$self"
 	cat <<'EOF'
 
 选项（环境变量同名，带 XN_ 前缀）：
@@ -132,8 +155,10 @@ usage() {
   --ref REF            分支 / tag / commit，默认 main（须包含 release.sh --tuned --pack）
   --target TRIPLE      构建目标，默认 x86_64-unknown-linux-gnu；macOS 用
                        aarch64-apple-darwin，交叉 armv7 用 armv7-unknown-linux-musleabihf
-  --profile FILE       只给交叉档用：显式指定 merged.profdata 才走 pgo.sh use 的 PGO
-                       交叉路径；不给就是普通 release 编译（推荐，armv7 不需要 PGO）
+  --profile FILE       只给交叉档的 tuned 用：显式指定 merged.profdata 才走 pgo.sh use
+                       的 PGO 交叉路径（armv7 默认不需要，普通 release 编译就够）
+  --flavors LIST       release,tuned（默认，gnu/macOS）/ release / tuned；
+                       release = 普通编译包，tuned = PGO/BOLT 包，两者各自发布
   --out-dir DIR        产物目录，默认 xn/dist
   --release-repo R     release 所在仓库；默认 = --repo / XN_REPO 的 owner/repo
   --tag TAG            目标 release tag；默认直接读 Cargo.toml 的 v<version>
@@ -156,11 +181,12 @@ usage() {
   --dry-run            只打印命令，不 clone / 不构建 / 不上传
   -h, --help           本帮助
 
-打包由上游 release.sh 完成（PGO/BOLT 用 `--tuned --pack`；交叉档用普通 `--target --pack`），
-本脚本只上传：
-  xn.<triple>.tuned.tar.xz / xn.<triple>.tuned.trace.tar.xz（各带 .sha256sum；
-  交叉档没有 trace，名字是 xn.<triple>.tar.xz —— 没调优就不叫 tuned）
-  外加 cidr.<triple>.tar.xz / xn-tui.<triple>.tar.xz（也是 release.sh --pack，不调优）
+打包由上游 release.sh 完成（`--pack`；tuned 档加 `--tuned`），本脚本只上传：
+  xn.<triple>.tar.xz                 普通 release 编译（所有目标）
+  xn.<triple>.tuned.tar.xz            PGO/BOLT（gnu/macOS）
+  xn.<triple>.tuned.trace.tar.xz      构建 trace（仅 tuned）
+  每个包一份同名 .sha256sum；另外 cidr.<triple>.tar.xz / xn-tui.<triple>.tar.xz
+  （release.sh --pack，不调优，各带 .sha256sum）
 EOF
 }
 
@@ -181,6 +207,8 @@ while (($#)); do
 		--target=*) target="${1#*=}"; shift ;;
 		--profile) need_value "$1" "$#"; profile_file="$2"; shift 2 ;;
 		--profile=*) profile_file="${1#*=}"; shift ;;
+		--flavors) need_value "$1" "$#"; flavors="$2"; shift 2 ;;
+		--flavors=*) flavors="${1#*=}"; shift ;;
 		--out-dir) need_value "$1" "$#"; out_dir="$2"; shift 2 ;;
 		--out-dir=*) out_dir="${1#*=}"; shift ;;
 		--release-repo) need_value "$1" "$#"; release_repo="$2"; shift 2 ;;
@@ -225,6 +253,7 @@ out_dir="$(abs_dir "$out_dir")"
 if [[ -n "$src" ]]; then
 	src="$(cd "$src" 2>/dev/null && pwd -P)" || die "--src 不存在：$src"
 fi
+resolve_flavors
 
 is_linux_x86_64() {
 	[[ "$(uname -s)" == Linux && "$(uname -m)" == x86_64 ]]
@@ -342,8 +371,9 @@ require_platform() {
 		return 0
 	fi
 	cross=false
-	# 原生。Linux 上 BOLT 采样要 perf（PGO-only 用不到，但保持原口径）；macOS 走 PGO-only。
-	if [[ "$(uname -s)" == Linux ]]; then
+	# 原生。只有 tuned 档才要 perf（采 PGO 样本 / BOLT）；普通编译不查，省得为了发个
+	# 普通包还去装 perf。macOS 走 PGO-only，PGO 不需要 perf，只在 BOLT 时要。
+	if [[ "$flavors" == *tuned* ]] && [[ "$(uname -s)" == Linux ]]; then
 		command -v perf >/dev/null 2>&1 \
 			|| die "找不到 perf（BOLT 采样要用）；Ubuntu 跑 ./xn/install-perf.sh，不要装 linux-tools-generic（archive 滞后会报 broken packages）"
 		perf --version >/dev/null 2>&1 \
@@ -435,19 +465,35 @@ print_plan() {
 		printf '+ # 若 %q 不是分支/tag：git init + git fetch --depth 1 origin %q\n' "$ref" "$ref"
 	fi
 	if $package_only; then
-		echo "# --package-only：跳过构建，直接用 $s/target/$target/release/ 里的产物"
-	elif [[ "$target" == armv7-unknown-linux-musleabihf && -z "$profile_file" ]]; then
-		printf '+ (cd %q && ./release.sh --target %q --pack' "$s" "$target"
-		[[ -n "$features" ]] && printf ' --features %q' "$features"
-		$locked && printf ' --locked'
-		printf ')\n'
-		echo "# 交叉普通编译（无 PGO）：发布名 xn.$target.tar.xz"
+		echo "# --package-only：跳过构建，直接用 $s/target/$target/release/ 里的产物（档位 ${flavors}）"
 	else
-		printf '+ (cd %q && ./release.sh' "$s"
-		printf ' %s' "${rargs[@]}"
-		printf ')\n'
+		for flavor in ${flavors//,/ }; do
+			case "$flavor" in
+				release)
+					printf '+ (cd %q && ./release.sh --target %q --pack' "$s" "$target"
+					[[ -n "$features" ]] && printf ' --features %q' "$features"
+					$locked && printf ' --locked'
+					printf ')\n'
+					;;
+				tuned)
+					if [[ -n "$profile_file" ]]; then
+						printf '+ (cd %q && ./scripts/pgo.sh use --target %q --cargo-profile release --profile %q)\n' \
+							"$s" "$target" "$profile_file"
+						printf '+ (cd %q && ./scripts/pack-release.sh --release-dir target/%s/release --target %q --bin xn --flavor tuned)\n' \
+							"$s" "$target" "$target"
+					else
+						printf '+ (cd %q && ./release.sh' "$s"
+						printf ' %s' "${rargs[@]}"
+						printf ')\n'
+					fi
+					;;
+			esac
+		done
 	fi
 	printf '+ 校验并复制 %s/target/%s/release/{xn.*.tar.xz, SHA256SUMS} → %s\n' "$s" "$target" "$out_dir"
+	printf '+ 发布名：xn.%s.tar.xz（release）' "$target"
+	[[ "$flavors" == *tuned* ]] && printf ' + xn.%s.tuned[.trace].tar.xz（tuned）' "$target"
+	printf '\n'
 	printf '+ 打包 extras（不调优）：%s\n' "${extras:-<none>}"
 	if $publish; then
 		if [[ -n "$tag" ]]; then
@@ -466,17 +512,25 @@ fi
 if $check; then
 	prepare_source
 	echo "==> 上游：${src}（${commit:0:12}）"
-	if [[ "$target" == armv7-unknown-linux-musleabihf ]]; then
-		# 交叉档走普通 release 构建：不采 PGO、不跑 BOLT，doctor --require bolt 不适用。
+	echo "==> 档位：${flavors}"
+	cross_target=false
+	[[ "$target" == armv7-unknown-linux-musleabihf ]] && cross_target=true
+	if [[ "$flavors" == *release* ]]; then
 		( cd "$src" && ./release.sh --target "$target" --dry-run )
-		echo "交叉档：普通编译（无 PGO/BOLT），跳过 BOLT doctor"
-		exit 0
 	fi
-	( cd "$src" && ./release.sh --tuned --dry-run )
+	if [[ "$flavors" == *tuned* ]]; then
+		if $cross_target; then
+			echo "交叉档的 tuned 走 pgo.sh use；需要 --profile FILE"
+		else
+			( cd "$src" && ./release.sh --tuned --dry-run )
+		fi
+	fi
 	echo
 	local_doctor=0
-	( cd "$src" && ./scripts/build-tuned.sh doctor --target "$target" --require bolt ) || local_doctor=$?
-	if $tests && ! command -v cargo-nextest >/dev/null 2>&1; then
+	if [[ "$flavors" == *tuned* ]] && ! $cross_target; then
+		( cd "$src" && ./scripts/build-tuned.sh doctor --target "$target" --require bolt ) || local_doctor=$?
+	fi
+	if $tests && [[ "$flavors" == *tuned* ]] && ! command -v cargo-nextest >/dev/null 2>&1; then
 		warn "没有 cargo-nextest；release.sh --tuned 默认会跑 nextest，请安装或用 --no-tests"
 	fi
 	if $publish && ! command -v gh >/dev/null 2>&1; then
@@ -489,11 +543,100 @@ if $check; then
 	exit 0
 fi
 
+# ---------------------------------------------------------------- collect
+# 把某个档位在 release_dir 里产出的包复制到 out_dir，改成稳定的发布名，并按上游写的
+# SHA256SUMS 校验一遍：
+#   release 档 -> xn.<triple>.tar.xz
+#   tuned 档   -> xn.<triple>.tuned.tar.xz（+ .tuned.trace.tar.xz）
+# 上游的 flavor 名（pgo-bolt / pgo / release …）只用来分辨档位，不暴露给消费端。
+runtime_assets=()
+trace_assets=()
+seen_bases=()
+
+collect_flavor() { # $1 = release | tuned
+	local flavor="$1" f b out want got is_trace is_tuned any=false
+	local files=()
+	shopt -s nullglob
+	files=("$release_dir"/xn.*.tar.xz)
+	shopt -u nullglob
+	for f in ${files[@]+"${files[@]}"}; do
+		b="$(basename "$f")"
+		is_trace=false
+		is_tuned=false
+		case "$b" in *.trace.tar.xz) is_trace=true ;; esac
+		case "$b" in *pgo*|*bolt*|*tuned*) is_tuned=true ;; esac
+		if [[ "$flavor" == tuned ]]; then
+			[[ "$is_tuned" == true ]] || continue
+		else
+			[[ "$is_tuned" == true || "$is_trace" == true ]] && continue
+		fi
+		if [[ "$flavor" == tuned ]]; then
+			if $is_trace; then
+				out="$out_dir/xn.$target.tuned.trace.tar.xz"
+			else
+				out="$out_dir/xn.$target.tuned.tar.xz"
+			fi
+		else
+			out="$out_dir/xn.$target.tar.xz"
+		fi
+		want="$(awk -v n="$b" '$2 == n { print $1; exit }' "$release_dir/SHA256SUMS" 2>/dev/null || true)"
+		got="$(sha256_file "$f")"
+		if [[ -n "$want" ]]; then
+			[[ "$got" == "$want" ]] || die "${b} 与 SHA256SUMS 不一致（期望 ${want}，实际 ${got}）"
+		elif $package_only; then
+			warn "SHA256SUMS 里没有 ${b}，跳过校验（--package-only）"
+		else
+			die "SHA256SUMS 里没有 ${b}（$release_dir/SHA256SUMS）"
+		fi
+		cp -p "$f" "$out"
+		note "产物（${flavor}）：${b} → $(basename "$out")（$(human_bytes "$(bytes_of "$out")")）"
+		seen_bases+=("$b")
+		if $is_trace; then
+			trace_assets+=("$out")
+		else
+			runtime_assets+=("$out")
+		fi
+		any=true
+	done
+	$any || die "缺 ${flavor} 档的包：$release_dir/xn.*.tar.xz（release.sh --pack 是否成功？）"
+}
+
+# 把本次编出来的 xn 二进制留一份到 out-dir：`xn/compare.sh` 直接拿它和另一档做
+# 同机 A/B，不用让上游 compare 再重编一遍。
+keep_bin() { # $1 = release | tuned
+	local flavor="$1" bin="$src/target/$target/release/xn" out="$out_dir/xn.$target.$flavor.bin"
+	if [[ ! -f "$bin" ]]; then
+		warn "没找到 ${flavor} 档的 xn 二进制（${bin}）；compare 会缺这一组"
+		return 0
+	fi
+	cp -p "$bin" "$out"
+	chmod +x "$out" 2>/dev/null || true
+	note "二进制（${flavor}）：$(basename "$out")（$(human_bytes "$(bytes_of "$out")")）"
+}
+
+# 交叉档的 tuned：pgo.sh use + pack-release.sh（本地手动路径，需要 --profile）。
+pack_cross_tuned() { # $1 = profile 文件
+	local prof="$1"
+	note "交叉构建（tuned/PGO）：pgo.sh use --target ${target}（profile=${prof}）"
+	use_args=(--target "$target" --cargo-profile release --profile "$prof")
+	[[ -n "$features" ]] && use_args+=(--features "$features")
+	$locked && use_args+=(--locked)
+	( cd "$src" && ./scripts/pgo.sh use "${use_args[@]}" ) 2>&1 | tee -a "$out_dir/build.log"
+	note "交叉打包：pack-release.sh（runtime 包，无 trace）"
+	pack_args=(--release-dir "target/$target/release" --target "$target" --bin xn --flavor tuned)
+	( cd "$src" && ./scripts/pack-release.sh "${pack_args[@]}" ) 2>&1 | tee -a "$out_dir/build.log"
+}
+
 # ---------------------------------------------------------------- build
 if ! $package_only; then
+	# 先定档位，require_platform 才知道要不要检查 perf/BOLT 工具链。
+	resolve_flavors
 	require_platform
 	prepare_source
+	release_dir="$src/target/$target/release"
+	: > "$out_dir/build.log"
 	note "上游：${src}（${commit:0:12}，ref=${ref_label}）"
+	note "档位：${flavors}（release = 普通编译；tuned = PGO/BOLT）"
 
 	# 给 release.sh --pack 收进 trace 包的「外部 workflow 记录」。
 	build_info="$out_dir/build-info.txt"
@@ -505,6 +648,7 @@ if ! $package_only; then
 		printf 'source_commit=%s\n' "$commit"
 		printf 'version=%s\n' "$version"
 		printf 'target=%s\n' "$target"
+		printf 'flavors=%s\n' "$flavors"
 		printf 'features=%s\n' "${features:-<default>}"
 		printf 'tests=%s\n' "$tests"
 		printf 'event=%s\n' "${event:-<release.sh default>}"
@@ -512,67 +656,64 @@ if ! $package_only; then
 		printf 'icf=%s\n' "${icf:-all}"
 		printf 'release_repo=%s\n' "$release_repo"
 		printf 'release_tag=%s\n' "${tag:-<none>}"
-		if $cross && [[ -z "$profile_file" ]]; then
-			printf 'note=打包由上游 release.sh --target --pack 完成（交叉普通编译，无 PGO）\n'
-		else
-			printf 'note=打包由上游 release.sh --tuned --pack 完成（runtime + trace + SHA256SUMS）\n'
-		fi
+		printf 'note=打包由上游 release.sh --pack 完成（tuned 档加 --tuned；交叉档普通编译无 PGO）\n'
 	} > "$build_info"
 
-	build_args=(--tuned --target "$target" --pack
+	tuned_args=(--tuned --target "$target" --pack
 		--pack-log "$out_dir/build.log"
 		--pack-info "$build_info")
-	[[ -n "$features" ]] && build_args+=(--features "$features")
-	[[ -n "$workload" ]] && build_args+=(--workload "$workload")
-	[[ -n "$freq" ]] && build_args+=(--freq "$freq")
-	[[ -n "$event" ]] && build_args+=(--event "$event")
-	[[ -n "$icf" ]] && build_args+=(--icf "$icf")
-	$force && build_args+=(--force)
-	$tests || build_args+=(--no-tests)
-	$locked && build_args+=(--locked)
+	[[ -n "$features" ]] && tuned_args+=(--features "$features")
+	[[ -n "$workload" ]] && tuned_args+=(--workload "$workload")
+	[[ -n "$freq" ]] && tuned_args+=(--freq "$freq")
+	[[ -n "$event" ]] && tuned_args+=(--event "$event")
+	[[ -n "$icf" ]] && tuned_args+=(--icf "$icf")
+	$force && tuned_args+=(--force)
+	$tests || tuned_args+=(--no-tests)
+	$locked && tuned_args+=(--locked)
 
-	if $cross; then
-		# 交叉档默认**普通编译**（无 PGO/BOLT）：armv7 二进制在 x86 runner 上跑不起来，
-		# 采不了样；pgo.sh use 那条路直接把 zig 当 linker，会跟 rustc 的 self-contained
-		# crt*.o 撞 _start（duplicate symbol），所以只作为本地手动路径保留。
-		# release.sh 的普通 --target 构建走 cargo-zigbuild，会去掉那些 crt 对象。
-		prof="${profile_file:-}"
-		if [[ -n "$prof" ]]; then
-			[[ -f "$prof" ]] || die "--profile 指向的文件不存在：${prof}"
-			pkg_flavor=".tuned"
-			note "交叉构建（PGO）：pgo.sh use --target ${target}（profile=${prof}）"
-			use_args=(--target "$target" --cargo-profile release --profile "$prof")
-			[[ -n "$features" ]] && use_args+=(--features "$features")
-			$locked && use_args+=(--locked)
-			( cd "$src" && ./scripts/pgo.sh use "${use_args[@]}" ) 2>&1 | tee -a "$out_dir/build.log"
-			# 只有 runtime 包：跨架构没有 build-tuned 的 trace 目录。
-			note "交叉打包：pack-release.sh（runtime 包，无 trace）"
-			pack_args=(--release-dir "target/$target/release" --target "$target" --bin xn --flavor tuned)
-			( cd "$src" && ./scripts/pack-release.sh "${pack_args[@]}" ) 2>&1 | tee -a "$out_dir/build.log"
-		else
-			pkg_flavor=""
-			note "交叉构建（普通 release，无 PGO）：release.sh --target ${target} --pack"
-			cross_args=(--target "$target" --pack)
-			[[ -n "$features" ]] && cross_args+=(--features "$features")
-			$locked && cross_args+=(--locked)
-			( cd "$src" && ./release.sh "${cross_args[@]}" ) 2>&1 | tee -a "$out_dir/build.log"
-		fi
-	else
-		# extras 先编：cidr / xn-tui **不做 PGO/BOLT**（不在 xn 热路径上，普通构建就够），
-		# 而且**必须逐包单独调用** release.sh —— 一次写多个包（或用多个 -p）会做 feature
-		# 合并：xn 的 reqwest/rustls 会被带进 xn-tui，白胖 2 MB，构建产物也不是同一套。
-		if [[ -n "${extras// /}" ]]; then
-			extra_args=(--target "$target" --pack)
-			$locked && extra_args+=(--locked)
-			for b in ${extras//,/ }; do
-				note "构建 extras（不调优）：${b}（单独调用 release.sh --pack）"
-				( cd "$src" && ./release.sh "$b" "${extra_args[@]}" ) 2>&1 | tee -a "$out_dir/build.log"
-			done
-		fi
+	release_args=(--target "$target" --pack)
+	[[ -n "$features" ]] && release_args+=(--features "$features")
+	$locked && release_args+=(--locked)
 
-		note "release.sh ${build_args[*]}"
-		( cd "$src" && ./release.sh "${build_args[@]}" ) 2>&1 | tee "$out_dir/build.log"
+	# extras 先编：cidr / xn-tui **不做 PGO/BOLT**（不在 xn 热路径上，普通构建就够），
+	# 而且**必须逐包单独调用** release.sh —— 一次写多个包（或用多个 -p）会做 feature
+	# 合并：xn 的 reqwest/rustls 会被带进 xn-tui，白胖 2 MB，构建产物也不是同一套。
+	# extras 跟着 release 档走：tuned 档单独跑时不重复打。
+	if ! $cross && [[ "$flavors" == *release* ]] && [[ -n "${extras// /}" ]]; then
+		extra_args=(--target "$target" --pack)
+		$locked && extra_args+=(--locked)
+		for b in ${extras//,/ }; do
+			note "构建 extras（不调优）：${b}（单独调用 release.sh --pack）"
+			( cd "$src" && ./release.sh "$b" "${extra_args[@]}" ) 2>&1 | tee -a "$out_dir/build.log"
+		done
 	fi
+
+	# 档位依次构建、就地收集：每档一打完就把包改好名搬走，免得后一档覆盖 SHA256SUMS。
+	# 先 release 后 tuned：tuned 挂了也不影响已经产出的普通包。
+	for flavor in ${flavors//,/ }; do
+		case "$flavor" in
+			release)
+				note "构建 release 档（普通编译，无 PGO）：release.sh ${release_args[*]}"
+				( cd "$src" && ./release.sh "${release_args[@]}" ) 2>&1 | tee -a "$out_dir/build.log"
+				keep_bin release
+				collect_flavor release
+				;;
+			tuned)
+				if $cross; then
+					# 交叉档默认只出 release；要 tuned 得显式给 --profile（pgo.sh use 那条路
+					# 直接把 zig 当 linker，会和 rustc 的 self-contained crt*.o 撞 _start）。
+					[[ -n "$profile_file" ]] || die "交叉档编 tuned 需要 --profile FILE（armv7 默认只出 release 档）"
+					[[ -f "$profile_file" ]] || die "--profile 指向的文件不存在：${profile_file}"
+					pack_cross_tuned "$profile_file"
+				else
+					note "构建 tuned 档（PGO/BOLT）：release.sh ${tuned_args[*]}"
+					( cd "$src" && ./release.sh "${tuned_args[@]}" ) 2>&1 | tee -a "$out_dir/build.log"
+				fi
+				keep_bin tuned
+				collect_flavor tuned
+				;;
+		esac
+	done
 else
 	# --package-only 不构建，但仍要有源码来拿产物与元数据。
 	if [[ -z "$src" ]]; then
@@ -580,81 +721,38 @@ else
 		[[ -d "$src/.git" ]] || die "--package-only 需要 --src 或已存在的 $src"
 	fi
 	prepare_source
-	note "package-only：使用现有产物，不重新构建"
+	release_dir="$src/target/$target/release"
+	if [[ -z "${XN_FLAVORS:-}" ]]; then
+		# 没显式指定就按现成产物识别：普通包、tuned 包有哪个重传哪个。
+		flavors=""
+		shopt -s nullglob
+		for f in "$release_dir"/xn.*.tar.xz; do
+			b="$(basename "$f")"
+			case "$b" in *.trace.tar.xz) continue ;; esac
+			case "$b" in
+				*pgo*|*bolt*|*tuned*) flavors="${flavors:+$flavors,}tuned" ;;
+				*) flavors="${flavors:+$flavors,}release" ;;
+			esac
+		done
+		shopt -u nullglob
+		[[ -n "$flavors" ]] || die "没有可发布的产物：$release_dir/xn.*.tar.xz"
+	fi
+	resolve_flavors
+	note "package-only：使用现有产物，不重新构建（档位 ${flavors}）"
+	for flavor in ${flavors//,/ }; do
+		collect_flavor "$flavor"
+	done
 fi
-
-# ---------------------------------------------------------------- collect
-release_dir="$src/target/$target/release"
-# release.sh --pack 把三个文件放在 target/<triple>/release/：
-#   xn.<triple>.<flavor>.tar.xz / xn.<triple>.<flavor>.trace.tar.xz / SHA256SUMS
-# flavor 在 Linux 上是 pgo-bolt，macOS PGO-only 是 pgo —— 用 glob 认，不写死。
-runtime_tar=""
-trace_tar=""
-sums=""
-shopt -s nullglob
-for f in "$release_dir"/xn.*.tar.xz; do
-	case "$f" in
-		*.trace.tar.xz) trace_tar="$f" ;;
-		*) runtime_tar="$f" ;;
-	esac
-done
-shopt -u nullglob
-[[ -f "$release_dir/SHA256SUMS" ]] && sums="$release_dir/SHA256SUMS"
-[[ -n "$runtime_tar" ]] || die "缺 runtime 包：$release_dir/xn.*.tar.xz（release.sh --pack 是否成功？）"
-if $cross; then
-	# 交叉目标没有 build-tuned 的 trace 目录；pack-release.sh 只出 runtime 包。
-	trace_tar=""
-else
-	[[ -n "$trace_tar" ]] || die "缺 trace 包：$release_dir/xn.*.trace.tar.xz"
-fi
-[[ -n "$sums" ]] || die "缺 SHA256SUMS：$release_dir/SHA256SUMS"
-
-runtime_base="$(basename "$runtime_tar")"
-trace_base=""
-runtime_out="$out_dir/xn.$target${pkg_flavor}.tar.xz"
-trace_out=""
-note "产物：${runtime_base}（$(human_bytes "$(bytes_of "$runtime_tar")")）"
-if [[ -n "$trace_tar" ]]; then
-	trace_base="$(basename "$trace_tar")"
-	trace_out="$out_dir/xn.$target${pkg_flavor}.trace.tar.xz"
-	note "      ${trace_base}（$(human_bytes "$(bytes_of "$trace_tar")")）"
-	cp -p "$runtime_tar" "$trace_tar" "$sums" "$out_dir/"
-else
-	cp -p "$runtime_tar" "$sums" "$out_dir/"
-fi
-
-# 校验和自检：只对两个 xn 包按 SHA256SUMS 里的行核对（extras 的 pack 若也写
-# SHA256SUMS，行数/内容可能被动过，别让 extras 的行把 xn 的校验搞成假阴性）。
-verify_sum() { # $1=文件
-	local f="$1" base want got
-	base="$(basename "$f")"
-	want="$(awk -v n="$base" '$2 == n { print $1; exit }' "$out_dir/SHA256SUMS")"
-	[[ -n "$want" ]] || die "SHA256SUMS 里没有 ${base} 的校验和（$out_dir/SHA256SUMS）"
-	got="$(sha256_file "$f")"
-	[[ "$got" == "$want" ]] || die "${base} 校验失败（期望 ${want}，实际 ${got}）"
-}
-verify_sum "$out_dir/$runtime_base"
-if [[ -n "$trace_base" ]]; then
-	verify_sum "$out_dir/$trace_base"
-fi
-note "SHA256SUMS 校验通过（runtime${trace_base:+ + trace}）"
-
-# 发布名：PGO/BOLT 构建统一叫 .tuned.，不把上游的 flavor（pgo-bolt / pgo）暴露给
-# 消费端；交叉档默认普通编译，用 <triple> 原名（不带后缀），别把没调优的包叫 tuned。
-# 本地校验在改名前已经做完，SHA256SUMS 只用于这一步。
-if [[ "$out_dir/$runtime_base" != "$runtime_out" ]]; then
-	mv -f "$out_dir/$runtime_base" "$runtime_out"
-fi
-if [[ -n "$trace_base" && "$out_dir/$trace_base" != "$trace_out" ]]; then
-	mv -f "$out_dir/$trace_base" "$trace_out"
-fi
-runtime_tar="$runtime_out"
-trace_tar="$trace_out"
 
 # ---------------------------------------------------------------- extras package
 # cidr / xn-tui 也支持 release.sh --pack：包直接落在 target/<triple>/release/，
 # 名字是 <bin>.<triple>.tar.xz（可能有配套的 .sha256sum）。找不到才回退手工打。
-extra_list=(${extras//,/ })
+if $package_only || [[ "$flavors" == *release* ]]; then
+	extra_list=(${extras//,/ })
+else
+	# tuned 单独发布时不重复上传 extras（它们在 release 那一轮已经发过）。
+	extra_list=()
+fi
 for eb in ${extra_list[@]+"${extra_list[@]}"}; do
 	epkg=""
 	shopt -s nullglob
@@ -705,25 +803,29 @@ for eb in ${extra_list[@]+"${extra_list[@]}"}; do
 done
 
 # ---------------------------------------------------------------- publish
-# release 上放：runtime / trace / extras 各自一个包 + 同名的 <asset>.sha256sum。
+# release 上放：release / tuned / trace / extras 各自一个包 + 同名的 <asset>.sha256sum。
 # 不再发汇总的 SHA256SUMS：校验和与资产一一对应，消费端按 <asset>.sha256sum 校验。
-publish_sums=("$(basename "$runtime_tar")")
-if [[ -n "$trace_tar" ]]; then
-	publish_sums+=("$(basename "$trace_tar")")
-fi
-for f in "${publish_sums[@]}"; do
-	printf '%s  %s\n' "$(sha256_file "$out_dir/$f")" "$f" > "$out_dir/$f.sha256sum"
+# 顺序：所有包先传，所有 .sha256sum 最后传 —— 消费端最坏看到旧包 + 旧校验和，
+# 不会出现「新校验和配旧包」。
+runtime_names=()
+for f in ${runtime_assets[@]+"${runtime_assets[@]}"}; do
+	name="$(basename "$f")"
+	printf '%s  %s\n' "$(sha256_file "$f")" "$name" > "$out_dir/$name.sha256sum"
+	runtime_names+=("$name")
+done
+trace_names=()
+for f in ${trace_assets[@]+"${trace_assets[@]}"}; do
+	name="$(basename "$f")"
+	printf '%s  %s\n' "$(sha256_file "$f")" "$name" > "$out_dir/$name.sha256sum"
+	trace_names+=("$name")
 done
 
-assets=(
-	"$out_dir/$(basename "$runtime_tar")"
-	${extra_assets[@]+"${extra_assets[@]}"}
-	# runtime/trace 的校验和最后传：消费端最坏看到旧包 + 旧校验和，不会新校验和配旧包
-	"$out_dir/$(basename "$runtime_tar").sha256sum"
-)
-if [[ -n "$trace_tar" ]]; then
-	assets+=("$out_dir/$(basename "$trace_tar")" "$out_dir/$(basename "$trace_tar").sha256sum")
-fi
+assets=()
+for f in ${runtime_assets[@]+"${runtime_assets[@]}"}; do assets+=("$f"); done
+assets+=(${extra_assets[@]+"${extra_assets[@]}"})
+for f in ${trace_assets[@]+"${trace_assets[@]}"}; do assets+=("$f"); done
+for n in ${runtime_names[@]+"${runtime_names[@]}"}; do assets+=("$out_dir/$n.sha256sum"); done
+for n in ${trace_names[@]+"${trace_names[@]}"}; do assets+=("$out_dir/$n.sha256sum"); done
 
 # 逐个资产上传：一个文件 502 不该让后面的（尤其是排在最后的 .sha256sum）传不上去，
 # 每个文件单独重试 + 退避。gh --clobber 会先删同名旧资产再传，重试是幂等的。
@@ -790,13 +892,20 @@ if $publish; then
 		[[ -n "$slug" && "$release_repo" == "$slug" ]] \
 			|| die "release $release_repo@$tag 不存在；只有上游 $slug 会自动创建（其他仓库请先建 release 或用 --tag）"
 		note "新建 release ${release_repo}@${tag}（target ${commit:0:12}）"
+		notes="$(printf 'xn %s from %s.\n\n' "$version" "${commit:0:12}")"
+		for n in ${runtime_names[@]+"${runtime_names[@]}"}; do
+			case "$n" in
+				*.tuned.tar.xz) notes="$notes$(printf -- '- `%s`: PGO/BOLT 编译（xn / LICENSE / docs/configuration.md / THIRD-PARTY-NOTICES.txt）\n' "$n")" ;;
+				*) notes="$notes$(printf -- '- `%s`: 普通 release 编译（xn / LICENSE / docs/configuration.md / THIRD-PARTY-NOTICES.txt）\n' "$n")" ;;
+			esac
+		done
+		for n in ${trace_names[@]+"${trace_names[@]}"}; do
+			notes="$notes$(printf -- '- `%s`: 构建 trace（trace-files.txt 列出的诊断文件 + xn.tuned.env + 清单 + build.log / build-info.txt）\n' "$n")"
+		done
+		notes="$notes$(printf -- '- `*.tar.xz.sha256sum`: 每个包自己的校验和（`shasum -a 256 -c <asset>.sha256sum`）\n')"
 		retry "创建 release" gh release create "$tag" --repo "$release_repo" --target "$commit" \
 			--title "xn $version" \
-			--notes "PGO+BOLT x86_64 GNU build of xn $version from ${commit:0:12}.
-
-- \`$(basename "$runtime_tar")\`: runtime package (xn / LICENSE / docs/configuration.md / THIRD-PARTY-NOTICES.txt)
-- \`$(basename "$trace_tar")\`: build trace (trace-files.txt 列出的诊断文件 + xn.tuned.env + 清单 + build.log / build-info.txt)
-- \`*.tar.xz.sha256sum\`: 每个包自己的校验和（\`shasum -a 256 -c <asset>.sha256sum\`）" || {
+			--notes "$notes" || {
 			# 502 时请求可能已经落地；再看一眼，别把建成功的 release 当失败。
 			gh release view "$tag" --repo "$release_repo" >/dev/null 2>&1 ||
 				die "创建 release ${release_repo}@${tag} 失败"
@@ -813,22 +922,20 @@ if $publish; then
 	note "release 资产自检通过（*.sha256sum + digest）"
 	# 旧版曾把 env / build-info / manifest / bolt.env 单独发布；默认清掉。
 	if $prune_legacy; then
-		base_name="$(basename "$runtime_tar")"
-		base_name="${base_name%.tar.xz}"
-		legacy=(
-			"SHA256SUMS" # 旧版汇总校验和，改成每个包一个 .sha256sum
-			"$base_name.env"
-			"$base_name.build-info.txt"
-			"$base_name.manifest.tsv"
-			"$base_name.bolt.env"
-		)
-		# 发布名从上游 flavor（pgo-bolt / pgo）统一改成 .tuned. 后，清掉旧名字。
-		if [[ "$runtime_base" != "$(basename "$runtime_tar")" ]]; then
-			legacy+=(
-				"$runtime_base" "$runtime_base.sha256sum"
-				"$trace_base" "$trace_base.sha256sum"
-			)
-		fi
+		legacy=("SHA256SUMS") # 旧版汇总校验和，改成每个包一个 .sha256sum
+		published=" "
+		for n in ${runtime_names[@]+"${runtime_names[@]}"} ${trace_names[@]+"${trace_names[@]}"}; do
+			stem="${n%.tar.xz}"
+			legacy+=("$stem.env" "$stem.build-info.txt" "$stem.manifest.tsv" "$stem.bolt.env")
+			published="$published$n "
+		done
+		# 上游 flavor 名（pgo-bolt / pgo / release）改成统一发布名后，清掉旧名字。
+		for b in ${seen_bases[@]+"${seen_bases[@]}"}; do
+			case "$published" in
+				*" $b "*) ;;
+				*) legacy+=("$b" "$b.sha256sum") ;;
+			esac
+		done
 		names="$(gh release view "$tag" --repo "$release_repo" --json assets --jq '.assets[].name' 2>/dev/null || true)"
 		for name in "${legacy[@]}"; do
 			if grep -qxF -- "$name" <<<"$names"; then
@@ -843,4 +950,8 @@ else
 	note "未加 --publish；产物在 $out_dir"
 fi
 
-note "完成：$(basename "$runtime_tar") / $(basename "$trace_tar") / *.sha256sum 在 $out_dir"
+done_names=""
+for n in ${runtime_names[@]+"${runtime_names[@]}"} ${trace_names[@]+"${trace_names[@]}"}; do
+	done_names="${done_names:+$done_names, }$n"
+done
+note "完成：${done_names} + *.sha256sum 在 $out_dir"

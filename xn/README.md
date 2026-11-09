@@ -1,13 +1,15 @@
-# xn — PGO+BOLT 的 x86_64 GNU 构建
+# xn — 普通包 + PGO+BOLT 的 xn 构建
 
-上游：[`leptonyu/xn`](https://github.com/leptonyu/xn)。本模块不复制调优实现，直接调用上游的：
+上游：[`leptonyu/xn`](https://github.com/leptonyu/xn)。本模块不复制构建/调优实现，直接调用上游的：
 
 ```bash
-./release.sh --tuned --target x86_64-unknown-linux-gnu --pack
+./release.sh --target <triple> --pack            # 普通包（所有目标都出）
+./release.sh --tuned --target <triple> --pack    # tuned 包（PGO/BOLT，gnu / macOS）
 ```
 
 `--pack` 会把 runtime 包、trace 包、`SHA256SUMS` 一起生成到 `target/<triple>/release/`；
-本模块**不再自己打包**，只调用、校验、上传。
+本模块**不再自己打包**，只调用、校验、上传。两个档位各自成包、发到同一个 release：
+`xn.<triple>.tar.xz`（普通）和 `xn.<triple>.tuned.tar.xz`（PGO/BOLT），互不覆盖。
 
 > **现状**：`--bolt` 暂不启用（`x86_64-unknown-linux-gnu` 目前只跑 PGO）；`perf` /
 > `bolt-23` 这些 BOLT 依赖照常安装，后续要启用时直接加 `--bolt`，不用再改环境。
@@ -121,15 +123,18 @@ BOLT 启用时，GitHub 托管 runner 没有 PMU/LBR，用 software event（未�
 
 ## 产物
 
-打包由上游 `release.sh --tuned --pack` 完成，本模块只调用、校验、上传。产物落在
-`target/x86_64-unknown-linux-gnu/release/`，`build.sh` 再复制到 `--out-dir`（默认 `xn/dist/`）：
+打包由上游 `release.sh --pack`（tuned 档加 `--tuned`）完成，本模块只调用、校验、上传。
+`build.sh --flavors` 决定编哪几档：`release,tuned`（gnu / macOS 默认）、`release`、`tuned`。
+产物落在 `target/<triple>/release/`，`build.sh` 再改名复制到 `--out-dir`（默认 `xn/dist/`）：
 
 ```text
-xn.x86_64-unknown-linux-gnu.tuned.tar.xz        # runtime 包
+xn.x86_64-unknown-linux-gnu.tar.xz                # 普通 runtime 包（所有目标）
+xn.x86_64-unknown-linux-gnu.tar.xz.sha256sum
+xn.x86_64-unknown-linux-gnu.tuned.tar.xz          # tuned runtime 包（PGO/BOLT）
 xn.x86_64-unknown-linux-gnu.tuned.tar.xz.sha256sum
-xn.x86_64-unknown-linux-gnu.tuned.trace.tar.xz  # trace 包
+xn.x86_64-unknown-linux-gnu.tuned.trace.tar.xz    # tuned 的 trace 包
 xn.x86_64-unknown-linux-gnu.tuned.trace.tar.xz.sha256sum
-SHA256SUMS                                      # 上游生成的汇总，只做本地校验，不发布
+SHA256SUMS                                        # 上游生成的汇总，只做本地校验，不发布
 ```
 
 - **runtime 包**：`xn` / `LICENSE` / `docs/configuration.md` / `THIRD-PARTY-NOTICES.txt`。
@@ -140,10 +145,10 @@ SHA256SUMS                                      # 上游生成的汇总，只做
 - **校验和**：每个包一个同名的 `<asset>.sha256sum`（发布的就是这个），
   `(cd xn/dist && shasum -a 256 -c xn.x86_64-unknown-linux-gnu.tuned.tar.xz.sha256sum)`；
   上游生成的 `SHA256SUMS` 只用于本地校验，不再上传。
-- flavor：上游产出的文件名带 flavor（Linux 是 `pgo-bolt`，macOS PGO-only 是 `pgo`）。
-  `build.sh` 用 `xn.*.tar.xz` / `xn.*.trace.tar.xz` glob 认产物，**发布时统一改名成
-  `.tuned.`**（`xn.<triple>.tuned.tar.xz` / `xn.<triple>.tuned.trace.tar.xz`），消费端
-  不用关心 flavor；旧名字的资产会在发布时清掉。
+- flavor：上游产出的文件名带 flavor（Linux 是 `pgo-bolt`，macOS PGO-only 是 `pgo`，
+  普通包不带 flavor）。`build.sh` 用 `xn.*.tar.xz` glob 认产物、按名字分辨档位，
+  **发布时统一改名**：tuned 档 → `xn.<triple>.tuned[.trace].tar.xz`，普通档 →
+  `xn.<triple>.tar.xz`；旧名字的资产会在发布时清掉。
 - 发布时每个包 + 自己的 `.sha256sum` 一起上传（不再发汇总的 `SHA256SUMS`）；
   `build.sh` 还会把 `trace-files.txt` / `trace-replay-files.txt`
   的生成交给上游（`release.sh --pack`），不在本地做任何裁剪。
@@ -166,8 +171,8 @@ xn-tui.x86_64-unknown-linux-gnu.tar.xz    (+ .sha256sum)   # xn-tui / LICENSE / 
   它们不在 xn 的热路径上，所以只做普通 `release` 构建，不跑 PGO/BOLT。
 - 构建**逐包单独调用**：`./release.sh cidr --target <triple> --pack`、`./release.sh xn-tui --target <triple> --pack`
   各一次（一次写多个包/多个 `-p` 会做 feature 合并，`xn` 的 reqwest/rustls 会被带进 `xn-tui`，
-  白胖 2 MB）。两包都在 tuned 构建之前编完，包和 `.sha256sum` 由 release.sh 放到
-  `target/<triple>/release/`，`build.sh` 只复制。
+  白胖 2 MB）。两包跟着 **release 档**编（`--flavors tuned` 单独跑时不重复打），包和
+  `.sha256sum` 由 release.sh 放到 `target/<triple>/release/`，`build.sh` 只复制。
 - 老 release.sh 不支持 extras 的 `--pack` 时回退到手工打（bin / LICENSE / NOTICES），日志里会标
   `手工回退`。
 - `--extras "cidr xn-tui"` 换/加列表，`--no-extras` 全关；`--package-only` 不编译，
@@ -180,9 +185,13 @@ schedule 绑定：
 
 - **不按天编译**：每小时（`:17`）只解析一次上游 `leptonyu/xn` 的 `main` SHA，只有 SHA
   变化才跑构建；没有变化时 check job 几秒结束。（x86_64 / macOS 是 PGO，armv7 普通编译。）
-- **每个目标一个 job、彼此并发**：`x86_64-linux-gnu` / `armv7-linux-musleabihf` /
-  `aarch64-macos` 都只依赖 `check`，`check` 一过同时开跑，谁都不等谁；`target` 只决定
-  开哪几个，重跑某一档不会带上另外两档。
+- **一个档位一个 job，全部并发**：`linux-x86_64`（普通）/ `linux-x86_64-tuned`（PGO）/
+  `linux-armv7` / `macos-aarch64`（普通）/ `macos-aarch64-tuned`（PGO）都只依赖 `check`，
+  `check` 一过同时开跑。普通包走轻量依赖（装完就编、编完就发），PGO job 才装
+  LLVM/perf/BOLT，所以普通包比之前早一大截；tuned 挂了也不影响普通包。
+- **普通包和 tuned 包进同一个 release，资产名不重叠**：`xn.<triple>.tar.xz`（普通 + extras）
+  和 `xn.<triple>.tuned[.trace].tar.xz`（PGO/BOLT）。两个 job 并发往同一个 release 追加，
+  `gh release create` 的竞态由 `build.sh` 兜住（已存在就继续追加）。
 - **armv7 是普通编译，没有 PGO**：armv7 二进制在 x86 runner 上跑不起来，采不了 PGO
   样本，所以交叉档直接走 `release.sh --target armv7-unknown-linux-musleabihf --pack`
   （cargo-zigbuild 交叉），只出 runtime 包，发布名是
@@ -192,9 +201,9 @@ schedule 绑定：
   `crt*.o` 撞 `_start`（duplicate symbol），普通 `release.sh --target` 不会。
 - 已构建的 main SHA 记在仓库变量 **`XN_LAST_MAIN_SHA`**（并用 `actions/cache` 的
   `xn-main-sha-<sha>` 标记兜底）；只在发布成功后更新，失败/取消不会记账，下一轮会重试。
-  记账门槛是**本次选中的目标全部 success**（`all` 时 x86_64 / armv7 / macOS 三个都要过），
-  所以任何一个目标挂掉，这个 SHA 就一直不会被记——armv7 链接失败那段时间就是这样。
-  记完会读回 `XN_LAST_MAIN_SHA` 确认并写进 job summary，没记上会打 `::error::`。
+  **记账只看普通档**：`all` 时 x86_64 / armv7 / macOS 三个普通 job 都成功才记，tuned 不参与
+  —— PGO 挂了整轮仍算成功，代价是这个 SHA 的 tuned 要等上游下次提交才重试（或手动
+  `force=true` 立刻重来）。记完会读回变量确认并写进 job summary，没记上会打 `::error::`。
 - 支持上游主动触发：`repository_dispatch`，`event_type: xn-main-updated`，
   `client_payload.sha` 可选；没有 dispatch 时最多晚一小时发现更新。
 - 默认跟踪 `main`；需要临时从别的分支构建时，用手动 `workflow_dispatch` 的 `ref` 输入。
@@ -203,35 +212,60 @@ schedule 绑定：
   改写 `XN_LAST_MAIN_SHA`。
 - 留空 `tag` 时直接读上游 `Cargo.toml` 的版本（`v<version>`）；release 不存在时由
   `build.sh` 新建，`--target` 是本次构建的上游 commit；存在时只追加资产。
-- `ubuntu-latest`；安装 LLVM 23 / `bolt-23` / perf / nextest / cargo-deny。perf 走
-  `install-perf.sh`（原因见上），其余与上游 tag release 同口径。BOLT 暂不启用，安装
-  步骤只确认 perf 可用、不跑 `perf record`；依赖照装，后续启用时不用改 workflow。
-- **sccache**：上游 `scripts/cargo-env.sh` 每次启动都按 `PATH` → `$CARGO_HOME/bin` →
-  `~/.cargo/bin` 探测 sccache，找不到就打一行「这次构建不套 sccache」的提示（不是错误）。
-  workflow 用 `taiki-e/install-action@sccache` 装预编译版（落到 `$CARGO_HOME/bin`，
-  等价于上游文档里的 `cargo install sccache`，但不用现场编译）；随后 `source` 上游的
-  `scripts/cargo-env.sh` 断言 `RUSTC_WRAPPER=sccache` 并真编一个空程序——装不上/找不到
-  就直接失败，不会再让那句提示混进构建日志。缓存写上游的 `target/sccache`
-  （`SCCACHE_CACHE_SIZE=1G`，fresh runner 命中本来就少，别和 PGO 的 `target/` 抢盘）。
-  PGO 三阶段换了 RUSTFLAGS、BOLT 又不经过 rustc，真正的重编还是绕不开；
-  要临时关掉用 `XN_SCCACHE=off`。
+- `ubuntu-latest`；依赖分两段装，**普通包先发**：基础编译依赖（clang / bindgen /
+  pkg-config …）→ 普通编译并上传 → 再装 tuned 才要的 LLVM 23 / `bolt-23` / perf /
+  nextest（perf 走 `install-perf.sh`，原因见上），然后 PGO/BOLT。这样普通包早几分钟
+  可用，普通编译挂了也不用白装 LLVM。BOLT 默认不开，装好只确认 perf / llvm-bolt 能跑、
+  不跑 `perf record`；后续要开 `--bolt` 不用再改环境。
+- `build.sh` 的 `require_platform` 只在 `flavors` 含 `tuned` 时才检查 perf——
+  只发普通包时不需要 perf。
+- **sccache（跨 run 复用依赖编译）**：上游 `scripts/cargo-env.sh` 每次启动都按
+  `PATH` → `$CARGO_HOME/bin` → `~/.cargo/bin` 探测 sccache，找不到就打一行提示（不是错误）。
+  workflow 用 `taiki-e/install-action@sccache` 装预编译版；随后 `source` 上游的
+  `scripts/cargo-env.sh` 断言 `RUSTC_WRAPPER=sccache` 并真编一个空程序——装不上就直接失败。
+  缓存写上游的 `target/sccache`（`SCCACHE_CACHE_SIZE=1G`），并用 `actions/cache`
+  **按 `<os>-<档位>` + `Cargo.lock` 哈希 restore/save**：依赖没变就命中，省掉依赖重编；
+  命中（`cache-hit=true`）时不再重复上传那 1G 缓存。PGO 三阶段 RUSTFLAGS 各不相同、
+  BOLT 又不经过 rustc，这部分省不掉；要临时关掉用 `XN_SCCACHE=off`。
 - 私有上游需要仓库 secret **`XN_REPO_TOKEN`**（对 `leptonyu/xn` **`contents: write`**：
   既要 checkout，也要创建/更新 release）；本仓库只用它自己的 `GITHUB_TOKEN` 更新
   `XN_LAST_MAIN_SHA`（`actions: write`）。
 - 默认**不加** cargo features；需要时在手动触发的 `features` 输入或本地 `build.sh --features quic` 里加。
-- `Upload build outputs` 收集 `xn/dist/*.tar.xz`、`xn/dist/*.sha256sum` 和
-  每个包的 `.sha256sum`（runtime + trace + extras），`build.log` 已经在
-  trace 包里，不再单独上传。
+- `Upload build outputs` 收集 `xn/dist/*.tar.xz`、`xn/dist/*.sha256sum` 和两档的
+  `.bin`（compare job 要用），`build.log` 已经在 trace 包里，不再单独上传。
 - 发布上传逐资产 + 自动重试（见上），GitHub 偶发的 502 不再让 job 停在
   「8 个资产传到一半」；`XN_LAST_MAIN_SHA` 仍只在发布成功后记账，最终失败的话
   下一轮会重新构建并重传。
 
 `xn` workflow 与 DNS/network 的每日 release 相互独立；它失败不会撤回其它 workflow 的资产。
 
-## 手动测试（Test xn）
+## 对比测试（pgo.compare）
+
+`compare=true` 时**不重编**：`build.sh` 会把本次两档的 xn 二进制留在
+`xn/dist/xn.<triple>.{release,tuned}.bin`，两档各自上传 artifact；`pgo.compare` 是一个
+独立 job，把两边的 artifact 合到一起交给 [`compare.sh`](compare.sh)，后者再把这两份摆成
+上游 `build-tuned` 的 run 目录，交给上游 `scripts/test/pgo/compare-ci.sh --no-build`：
+
+```text
+target/tune/prebuilt-<UTC>/02-optimize/xn.control  ← 普通包里的 xn（控制组）
+target/tune/prebuilt-<UTC>/02-optimize/xn.tuned    ← tuned 包里的 xn（优化组）
+```
+
+于是 `pgo.compare` 就是拿这两个 bin 做同机 A/B（`scripts/perf/run.sh run t1
+--binary control --binary-b tuned`，A,B,B,A 轮转），macOS 的产物是 Mach-O，自动退
+`pgo.compare.size` 只比大小。报告落在上游 checkout 的 `target/pgo/`、`target/test-runs/`，
+workflow 作为 artifact 上传。
+
+```bash
+./xn/build.sh                                   # 先编两档（产物 + bin 都在 xn/dist）
+./xn/compare.sh --target x86_64-unknown-linux-gnu --rounds 4
+./xn/compare.sh --target aarch64-apple-darwin --size-only
+```
+
+## 手动测试（测试 XN）
 
 [`xn-tests.yml`](../.github/workflows/xn-tests.yml) 是手动触发的测试入口，不在 push / PR
-自动跑。Actions → **Test xn** → **Run workflow** 的菜单配置：
+自动跑。Actions → **测试 XN** → **Run workflow** 的菜单配置：
 
 | 输入 | 取值 | 含义 |
 | --- | --- | --- |
@@ -289,7 +323,7 @@ schedule 绑定：
 - 发布路径有离线自测：`./xn/tests/publish-retry.test.sh`（临时假 `gh`，不联网、不构建），
   覆盖 502 重试、4xx 快速失败、自检发现不一致后重传。仓库级入口是
   `./xn/tests/run-all.sh`（顺带 `bash -n` 全仓脚本），新增 `*/tests/*.test.sh` 会被
-  自动发现。手动测试入口与菜单配置见上面的「手动测试（Test xn）」。
+  自动发现。手动测试入口与菜单配置见上面的「手动测试（测试 XN）」。
 - `--release-repo` 指向非上游仓库时，只追加到已有 release，不会在别的仓库自动建 tag。
 - `--package-only` 不重跑构建，直接用 `target/<triple>/release/` 里现成的三个文件重传；
   缺文件就报错（先跑一次完整构建），也不编译 extras（缺就用 `--no-extras`）。

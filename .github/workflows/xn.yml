@@ -3,16 +3,30 @@ run-name: "发布 XN · ${{ inputs.target || 'all' }}"
 
 # 交付目标（`target` 下拉，默认 all，可单编一个）：
 #   all                      三个都编（x86_64 Linux + armv7 Linux + aarch64 macOS）
-#   x86_64-linux-gnu         ubuntu-latest，原生 PGO（BOLT 默认不开）
-#   armv7-linux-musleabihf   ubuntu-latest，交叉；**普通 release 编译（无 PGO/BOLT）**
-#                            ——armv7 二进制任何 runner 都跑不了，采不了样；只出 runtime 包
-#   aarch64-macos            macos-15（Apple silicon），原生 PGO（BOLT 不可用）
+#   x86_64-linux-gnu         ubuntu-latest：普通包 + tuned（原生 PGO；BOLT 默认不开）
+#   armv7-linux-musleabihf   ubuntu-latest，交叉；**只有普通 release 编译（无 PGO/BOLT）**
+#                            ——armv7 二进制任何 runner 都跑不了，采不了样
+#   aarch64-macos            macos-15（Apple silicon）：普通包 + tuned（PGO；BOLT 不可用）
 #
 # **每个目标一个 job，`check` 之后同时开跑**：x86_64 / armv7 / macOS 互不等待，各自构建、
 # 各自上传 artifact；重跑某一档不会带着另外两档一起重跑，也不会先跑别的档来给它铺路。
 #
-# `compare` 下拉（默认 false）：构建完成后在本 runner 跑 `pgo.compare`（bin 大小 + t1 同机
-# A/B；macOS 自动退 `pgo.compare.size`）。armv7 交叉档没有同机 control / 采样，不跑。
+# **档位合并发布**：同一个 `v<version>` release 里，普通包和 tuned 包各自成资产 —
+#   xn.<triple>.tar.xz          普通 release 编译（全部目标）
+#   xn.<triple>.tuned.tar.xz    PGO/BOLT（x86_64 / macOS）
+#   xn.<triple>.tuned.trace.tar.xz
+#
+# **普通档和 tuned 档各是一个 job，并发跑**（x86_64-release / x86_64-tuned /
+# armv7 / macos-release / macos-tuned）：普通包先出，tuned 挂了不影响普通包；两档都往
+# 同一个 release 追加资产，资产名互不重叠。
+#
+# `compare` 下拉（默认 false）：普通档 + tuned 档都成功后，`pgo.compare` 这个 job 把两边
+# 的 bin 取下来做同机 A/B（`xn/compare.sh` 摆成 build-tuned 的 run 目录，交给上游
+# `compare-ci.sh --no-build`），不重编。macOS 的产物是 Mach-O，退 `pgo.compare.size`
+# 只比大小。armv7 交叉档没有同机 control / 采样，不跑。
+#
+# **记账只看普通档**：x86_64 / armv7 / macOS 三个普通 job 都成功才写 `XN_LAST_MAIN_SHA`
+# （tuned 不参与，失败了也不会把整轮判死）。
 #
 # 触发：每小时检查上游 main SHA（未变就跳过）；手动 force；repository_dispatch
 # `xn-main-updated`。构建成功把 SHA 记到 XN_LAST_MAIN_SHA；发布到上游 v<Cargo.toml version>
@@ -45,7 +59,7 @@ on:
           - aarch64-macos
       compare:
         description: >-
-          true=构建后跑 pgo.compare（x86_64 完整 A/B；macOS 自动退 bin 尺寸；armv7 交叉档不跑）
+          true=构建后拿本次的普通 bin vs PGO bin 跑 pgo.compare（不重编；macOS 只比尺寸；armv7 不跑）
         type: choice
         required: true
         default: "false"
@@ -160,15 +174,18 @@ jobs:
             echo "- build: \`$changed\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
+  # ---------------------------------------------------------------- x86_64
+  # 普通档和 tuned 档是**两个 job**：同时开跑，普通包先出；tuned 挂了也不影响普通包，
+  # 更不阻塞 XN_LAST_MAIN_SHA 记账（只由普通档 + armv7 决定，见 record）。
   linux-x86_64:
-    name: build x86_64-linux-gnu
+    name: build x86_64-linux-gnu（普通）
     needs: check
     if: |
       needs.check.outputs.changed == 'true' && (
         needs.check.outputs.target == 'all' ||
         needs.check.outputs.target == 'x86_64-linux-gnu')
     runs-on: ubuntu-latest
-    timeout-minutes: 240
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v7
       - name: Checkout upstream xn
@@ -181,7 +198,7 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
       - name: Install system dependencies
-        # BOLT 默认不开（PGO-only），但 perf / LLVM 23 / bolt-23 保持装好，打开 --bolt 不用再改环境。
+        # 普通包只要编译器 + bindgen 这一套；perf / LLVM 23 / bolt-23 是 tuned job 才装的。
         run: |
           set -euo pipefail
           sudo apt-get update
@@ -189,19 +206,8 @@ jobs:
             clang lld \
             libclang-dev libssl-dev zlib1g-dev liblzma-dev \
             curl git xz-utils file binutils python3 openssl lsb-release
-          ./xn/install-perf.sh
-          curl -fsSL https://apt.llvm.org/llvm.sh -o /tmp/llvm.sh
-          chmod +x /tmp/llvm.sh
-          sudo /tmp/llvm.sh 23
-          sudo apt-get install -y llvm-23 llvm-23-tools bolt-23 lld-23 clang-23
-          echo "/usr/lib/llvm-23/bin" >> "$GITHUB_PATH"
-          echo 'kernel.perf_event_paranoid=1' | sudo tee /etc/sysctl.d/99-xn-perf.conf >/dev/null
-          sudo sysctl --system
-          perf --version
-          /usr/lib/llvm-23/bin/llvm-bolt --version
       - name: Install Rust
-        # 按仓库的 rust-toolchain.toml 装精确版本，避免 runner 预装的 rustc 和上游
-        # 期望的不一致。
+        # 按仓库的 rust-toolchain.toml 装精确版本，避免 runner 预装的 rustc 和上游期望的不一致。
         run: |
           toolchain="$(sed -n 's/^channel *= *"\([^"]*\)".*/\1/p' "$GITHUB_WORKSPACE/.cache/xn-src/rust-toolchain.toml")"
           rustup set profile minimal
@@ -225,11 +231,128 @@ jobs:
           "$tmp/t"
           sccache --show-stats | sed -n '1,6p'
           sccache --stop-server || true
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@nextest
+      - name: Install cargo-deny
+        # 打包要生成 THIRD-PARTY-NOTICES.txt（普通包也带）。
+        uses: taiki-e/install-action@cargo-deny
+      - name: Restore sccache
+        # 跨 run 复用依赖编译：key 跟 Cargo.lock 走，依赖没变就命中；命中就不再重复上传。
+        id: sccache
+        uses: actions/cache/restore@v6
+        with:
+          path: .cache/xn-src/target/sccache
+          key: sccache-linux-release-${{ hashFiles('.cache/xn-src/Cargo.lock') }}
+          restore-keys: sccache-linux-release-
+      - name: 普通编译并上传
+        env:
+          GH_TOKEN: ${{ secrets.XN_REPO_TOKEN }}
+          INPUT_FEATURES: ${{ inputs.features }}
+          INPUT_TAG: ${{ inputs.tag }}
+          SCCACHE_CACHE_SIZE: 1G
+        run: |
+          set -euo pipefail
+          args=(
+            --src "$GITHUB_WORKSPACE/.cache/xn-src"
+            --target x86_64-unknown-linux-gnu
+            --flavors release
+            --publish
+          )
+          [ -n "${INPUT_TAG:-}" ] && args+=(--tag "$INPUT_TAG")
+          [ -n "${INPUT_FEATURES:-}" ] && args+=(--features "$INPUT_FEATURES")
+          ./xn/build.sh "${args[@]}"
+      - name: Save sccache
+        # 只在新 key（依赖变了）时存一次，命中就不覆盖 —— 不然每轮都重传一个 1G 缓存。
+        if: always() && steps.sccache.outputs.cache-hit != 'true' && steps.sccache.outputs.cache-primary-key != ''
+        continue-on-error: true
+        uses: actions/cache/save@v6
+        with:
+          path: .cache/xn-src/target/sccache
+          key: ${{ steps.sccache.outputs.cache-primary-key }}
+      - name: Upload build outputs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: xn-x86_64-linux-gnu
+          path: |
+            xn/dist/*.tar.xz
+            xn/dist/*.sha256sum
+            xn/dist/*.bin
+          if-no-files-found: ignore
+          retention-days: 7
+
+  linux-x86_64-tuned:
+    name: build x86_64-linux-gnu（PGO）
+    needs: check
+    if: |
+      needs.check.outputs.changed == 'true' && (
+        needs.check.outputs.target == 'all' ||
+        needs.check.outputs.target == 'x86_64-linux-gnu')
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v7
+      - name: Checkout upstream xn
+        uses: actions/checkout@v7
+        with:
+          repository: leptonyu/xn
+          ref: ${{ needs.check.outputs.sha }}
+          token: ${{ secrets.XN_REPO_TOKEN }}
+          path: .cache/xn-src
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Install system dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config cmake perl nasm \
+            clang lld \
+            libclang-dev libssl-dev zlib1g-dev liblzma-dev \
+            curl git xz-utils file binutils python3 openssl lsb-release
+      - name: Install PGO/BOLT toolchain
+        # tuned 档才要：perf 采样、LLVM 23 的 llvm-profdata / llvm-bolt、BOLT 用的 lld。
+        run: |
+          set -euo pipefail
+          ./xn/install-perf.sh
+          curl -fsSL https://apt.llvm.org/llvm.sh -o /tmp/llvm.sh
+          chmod +x /tmp/llvm.sh
+          sudo /tmp/llvm.sh 23
+          sudo apt-get install -y llvm-23 llvm-23-tools bolt-23 lld-23 clang-23
+          echo "/usr/lib/llvm-23/bin" >> "$GITHUB_PATH"
+          echo 'kernel.perf_event_paranoid=1' | sudo tee /etc/sysctl.d/99-xn-perf.conf >/dev/null
+          sudo sysctl --system
+          perf --version
+          /usr/lib/llvm-23/bin/llvm-bolt --version
+      - name: Install Rust
+        run: |
+          toolchain="$(sed -n 's/^channel *= *"\([^"]*\)".*/\1/p' "$GITHUB_WORKSPACE/.cache/xn-src/rust-toolchain.toml")"
+          rustup set profile minimal
+          rustup toolchain install "$toolchain"
+          rustup default "$toolchain"
+          rustup component add --toolchain "$toolchain" llvm-tools-preview
+      - name: Install sccache
+        uses: taiki-e/install-action@sccache
+      - name: Verify sccache
+        run: |
+          set -euo pipefail
+          env_sh="$GITHUB_WORKSPACE/.cache/xn-src/scripts/cargo-env.sh"
+          [[ -f "$env_sh" ]] || { echo "上游 checkout 里没有 scripts/cargo-env.sh"; exit 1; }
+          source "$env_sh"
+          test "${RUSTC_WRAPPER:-}" = sccache
+          sccache --version
+          # 让真正的构建从干净 server 起：SCCACHE_CACHE_SIZE=1G 才会生效。
+          sccache --stop-server || true
       - name: Install cargo-deny
         uses: taiki-e/install-action@cargo-deny
-      - name: Build tuned xn
+      - name: Install cargo-nextest
+        # PGO 采样默认要跑 nextest。
+        uses: taiki-e/install-action@nextest
+      - name: Restore sccache
+        id: sccache
+        uses: actions/cache/restore@v6
+        with:
+          path: .cache/xn-src/target/sccache
+          key: sccache-linux-tuned-${{ hashFiles('.cache/xn-src/Cargo.lock') }}
+          restore-keys: sccache-linux-tuned-
+      - name: PGO 优化并上传
         env:
           GH_TOKEN: ${{ secrets.XN_REPO_TOKEN }}
           LLVM_PROFDATA: /usr/lib/llvm-23/bin/llvm-profdata
@@ -240,36 +363,31 @@ jobs:
           set -euo pipefail
           args=(
             --src "$GITHUB_WORKSPACE/.cache/xn-src"
+            --target x86_64-unknown-linux-gnu
+            --flavors tuned
             --publish
           )
           [ -n "${INPUT_TAG:-}" ] && args+=(--tag "$INPUT_TAG")
           [ -n "${INPUT_FEATURES:-}" ] && args+=(--features "$INPUT_FEATURES")
-          ./xn/build.sh --target x86_64-unknown-linux-gnu "${args[@]}"
-      - name: Run pgo.compare
-        if: ${{ inputs.compare == 'true' }}
-        run: |
-          set -euo pipefail
-          cd "$GITHUB_WORKSPACE/.cache/xn-src"
-          scripts/test/pgo/compare-ci.sh --rounds 4
-      - name: Upload pgo compare artifacts
-        if: always() && inputs.compare == 'true'
-        uses: actions/upload-artifact@v7
+          ./xn/build.sh "${args[@]}"
+      - name: Save sccache
+        if: always() && steps.sccache.outputs.cache-hit != 'true' && steps.sccache.outputs.cache-primary-key != ''
+        continue-on-error: true
+        uses: actions/cache/save@v6
         with:
-          name: xn-pgo-compare-x86_64-linux-gnu
-          path: |
-            .cache/xn-src/target/test-runs
-            .cache/xn-src/target/pgo
-          if-no-files-found: warn
-          retention-days: 14
+          path: .cache/xn-src/target/sccache
+          key: ${{ steps.sccache.outputs.cache-primary-key }}
       - name: Upload build outputs
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: xn-pgo-bolt-x86_64-linux-gnu
+          name: xn-x86_64-linux-gnu-tuned
           path: |
             xn/dist/*.tar.xz
             xn/dist/*.sha256sum
+            xn/dist/*.bin
           if-no-files-found: ignore
+          retention-days: 7
 
   linux-armv7:
     name: build armv7-linux-musleabihf
@@ -281,7 +399,7 @@ jobs:
         needs.check.outputs.target == 'all' ||
         needs.check.outputs.target == 'armv7-linux-musleabihf')
     runs-on: ubuntu-latest
-    timeout-minutes: 240
+    timeout-minutes: 300
     env:
       # 只编一次交叉档；sccache 的下载/启动（macOS 的 SUN_LEN、GitHub release 504）
       # 不值得再引入一个失败点。
@@ -346,8 +464,9 @@ jobs:
             xn/dist/*.sha256sum
           if-no-files-found: ignore
 
+  # ---------------------------------------------------------------- macOS
   macos-aarch64:
-    name: build aarch64-macos
+    name: build aarch64-macos（普通）
     needs: check
     if: |
       needs.check.outputs.changed == 'true' && (
@@ -375,11 +494,16 @@ jobs:
           rustup component add --toolchain "$toolchain" llvm-tools-preview
       - name: Install sccache
         uses: taiki-e/install-action@sccache
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@nextest
       - name: Install cargo-deny
         uses: taiki-e/install-action@cargo-deny
-      - name: Build tuned xn and publish
+      - name: Restore sccache
+        id: sccache
+        uses: actions/cache/restore@v6
+        with:
+          path: .cache/xn-src/target/sccache
+          key: sccache-macos-release-${{ hashFiles('.cache/xn-src/Cargo.lock') }}
+          restore-keys: sccache-macos-release-
+      - name: 普通编译并上传
         env:
           GH_TOKEN: ${{ secrets.XN_REPO_TOKEN }}
           INPUT_FEATURES: ${{ inputs.features }}
@@ -390,19 +514,196 @@ jobs:
           args=(
             --src "$GITHUB_WORKSPACE/.cache/xn-src"
             --target aarch64-apple-darwin
+            --flavors release
             --publish
           )
           [ -n "${INPUT_TAG:-}" ] && args+=(--tag "$INPUT_TAG")
           [ -n "${INPUT_FEATURES:-}" ] && args+=(--features "$INPUT_FEATURES")
           ./xn/build.sh "${args[@]}"
-      - name: Run pgo.compare (size-only on macOS)
-        if: ${{ inputs.compare == 'true' }}
+      - name: Save sccache
+        if: always() && steps.sccache.outputs.cache-hit != 'true' && steps.sccache.outputs.cache-primary-key != ''
+        continue-on-error: true
+        uses: actions/cache/save@v6
+        with:
+          path: .cache/xn-src/target/sccache
+          key: ${{ steps.sccache.outputs.cache-primary-key }}
+      - name: Upload build outputs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: xn-aarch64-macos
+          path: |
+            xn/dist/*.tar.xz
+            xn/dist/*.sha256sum
+            xn/dist/*.bin
+          if-no-files-found: ignore
+          retention-days: 7
+
+  macos-aarch64-tuned:
+    name: build aarch64-macos（PGO）
+    needs: check
+    if: |
+      needs.check.outputs.changed == 'true' && (
+        needs.check.outputs.target == 'all' ||
+        needs.check.outputs.target == 'aarch64-macos')
+    runs-on: macos-15
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v7
+      - name: Checkout upstream xn
+        uses: actions/checkout@v7
+        with:
+          repository: leptonyu/xn
+          ref: ${{ needs.check.outputs.sha }}
+          token: ${{ secrets.XN_REPO_TOKEN }}
+          path: .cache/xn-src
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Install Rust
+        run: |
+          toolchain="$(sed -n 's/^channel *= *"\([^"]*\)".*/\1/p' "$GITHUB_WORKSPACE/.cache/xn-src/rust-toolchain.toml")"
+          rustup set profile minimal
+          rustup toolchain install "$toolchain"
+          rustup default "$toolchain"
+          rustup component add --toolchain "$toolchain" llvm-tools-preview
+      - name: Install sccache
+        uses: taiki-e/install-action@sccache
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@cargo-deny
+      - name: Install cargo-nextest
+        # PGO 采样默认要跑 nextest。
+        uses: taiki-e/install-action@nextest
+      - name: Restore sccache
+        id: sccache
+        uses: actions/cache/restore@v6
+        with:
+          path: .cache/xn-src/target/sccache
+          key: sccache-macos-tuned-${{ hashFiles('.cache/xn-src/Cargo.lock') }}
+          restore-keys: sccache-macos-tuned-
+      - name: PGO 优化并上传
+        env:
+          GH_TOKEN: ${{ secrets.XN_REPO_TOKEN }}
+          INPUT_FEATURES: ${{ inputs.features }}
+          INPUT_TAG: ${{ inputs.tag }}
+          SCCACHE_CACHE_SIZE: 1G
         run: |
           set -euo pipefail
-          cd "$GITHUB_WORKSPACE/.cache/xn-src"
-          scripts/test/pgo/compare-ci.sh --rounds 4
+          args=(
+            --src "$GITHUB_WORKSPACE/.cache/xn-src"
+            --target aarch64-apple-darwin
+            --flavors tuned
+            --publish
+          )
+          [ -n "${INPUT_TAG:-}" ] && args+=(--tag "$INPUT_TAG")
+          [ -n "${INPUT_FEATURES:-}" ] && args+=(--features "$INPUT_FEATURES")
+          ./xn/build.sh "${args[@]}"
+      - name: Save sccache
+        if: always() && steps.sccache.outputs.cache-hit != 'true' && steps.sccache.outputs.cache-primary-key != ''
+        continue-on-error: true
+        uses: actions/cache/save@v6
+        with:
+          path: .cache/xn-src/target/sccache
+          key: ${{ steps.sccache.outputs.cache-primary-key }}
+      - name: Upload build outputs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: xn-aarch64-macos-tuned
+          path: |
+            xn/dist/*.tar.xz
+            xn/dist/*.sha256sum
+            xn/dist/*.bin
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # ---------------------------------------------------------------- compare
+  linux-compare:
+    name: pgo.compare x86_64（现成 bin，不重编）
+    # 普通 bin 和 tuned bin 分属两个 job，这里把两边的 artifact 合到一起再做同机 A/B；
+    # compare 下拉 false（默认）时整条跳过。
+    needs: [check, linux-x86_64, linux-x86_64-tuned]
+    if: |
+      always() && inputs.compare == 'true' &&
+      needs.check.outputs.changed == 'true' &&
+      (needs.check.outputs.target == 'all' || needs.check.outputs.target == 'x86_64-linux-gnu') &&
+      needs.linux-x86_64.result == 'success' &&
+      needs.linux-x86_64-tuned.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+      - name: Checkout upstream xn
+        uses: actions/checkout@v7
+        with:
+          repository: leptonyu/xn
+          ref: ${{ needs.check.outputs.sha }}
+          token: ${{ secrets.XN_REPO_TOKEN }}
+          path: .cache/xn-src
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Download build artifacts（两档的 bin）
+        uses: actions/download-artifact@v8
+        with:
+          pattern: xn-x86_64-linux-gnu*
+          path: xn/dist
+          merge-multiple: true
+      - name: Run pgo.compare（普通 bin vs PGO bin，不重编）
+        run: |
+          set -euo pipefail
+          ./xn/compare.sh \
+            --src "$GITHUB_WORKSPACE/.cache/xn-src" \
+            --target x86_64-unknown-linux-gnu \
+            --rounds 4
       - name: Upload pgo compare artifacts
-        if: always() && inputs.compare == 'true'
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: xn-pgo-compare-x86_64-linux-gnu
+          path: |
+            .cache/xn-src/target/test-runs
+            .cache/xn-src/target/pgo
+          if-no-files-found: warn
+          retention-days: 14
+
+  macos-compare:
+    name: pgo.compare aarch64-macos（只比尺寸）
+    # macOS 产物是 Mach-O，Linux perf rig 跑不了：只比两个 bin 的大小，同样不重编。
+    needs: [check, macos-aarch64, macos-aarch64-tuned]
+    if: |
+      always() && inputs.compare == 'true' &&
+      needs.check.outputs.changed == 'true' &&
+      (needs.check.outputs.target == 'all' || needs.check.outputs.target == 'aarch64-macos') &&
+      needs.macos-aarch64.result == 'success' &&
+      needs.macos-aarch64-tuned.result == 'success'
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - name: Checkout upstream xn
+        uses: actions/checkout@v7
+        with:
+          repository: leptonyu/xn
+          ref: ${{ needs.check.outputs.sha }}
+          token: ${{ secrets.XN_REPO_TOKEN }}
+          path: .cache/xn-src
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Download build artifacts（两档的 bin）
+        uses: actions/download-artifact@v8
+        with:
+          pattern: xn-aarch64-macos*
+          path: xn/dist
+          merge-multiple: true
+      - name: Run pgo.compare (size-only on macOS)
+        run: |
+          set -euo pipefail
+          ./xn/compare.sh \
+            --src "$GITHUB_WORKSPACE/.cache/xn-src" \
+            --target aarch64-apple-darwin \
+            --size-only \
+            --rounds 4
+      - name: Upload pgo compare artifacts
+        if: always()
         uses: actions/upload-artifact@v7
         with:
           name: xn-pgo-compare-aarch64-macos
@@ -411,18 +712,11 @@ jobs:
             .cache/xn-src/target/pgo
           if-no-files-found: warn
           retention-days: 14
-      - name: Upload build outputs
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: xn-pgo-bolt-aarch64-macos
-          path: |
-            xn/dist/*.tar.xz
-            xn/dist/*.sha256sum
-          if-no-files-found: ignore
 
-  # 所有选中目标都成功后才记 main SHA：拆成三个 job 后，早完成的 x86_64 不能代表
-  # armv7 / macOS 也过了。
+  # ---------------------------------------------------------------- record
+  # 记账只看**普通档**（x86_64 / armv7 / macOS 三个 job）：tuned 是独立 job，挂了不影响
+  # 普通包发布，也不阻塞 XN_LAST_MAIN_SHA。代价是这个 SHA 的 tuned 要等上游下一次提交
+  # 才重试；想立刻重来就手动 dispatch（force=true）。
   record:
     name: record built main SHA
     needs: [check, linux-x86_64, linux-armv7, macos-aarch64]
