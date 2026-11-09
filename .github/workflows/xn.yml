@@ -29,8 +29,10 @@ run-name: "发布 XN · ${{ inputs.target || 'all' }}"
 # （tuned 不参与，失败了也不会把整轮判死）。
 #
 # 触发：每小时检查上游 main SHA（未变就跳过）；手动 force；repository_dispatch
-# `xn-main-updated`。构建成功把 SHA 记到 XN_LAST_MAIN_SHA；发布到上游 v<Cargo.toml version>
-# release（需要写权限的 XN_REPO_TOKEN）。
+# `xn-main-updated`。构建成功后把 SHA 记成 actions/cache 标记 `xn-main-sha-<sha>`
+# （下一轮据此跳过）；仓库变量 XN_LAST_MAIN_SHA 只是可选快路径 —— GITHUB_TOKEN 写不了
+# Actions Variables，会先试 secret XN_VARS_TOKEN（fine-grained，Variables: read/write），
+# 再复用 XN_REPO_TOKEN（classic PAT / repo scope 才能写本仓库变量），都不行只打 warning。发布到上游 v<Cargo.toml version> release（需要写权限的 XN_REPO_TOKEN）。
 
 on:
   schedule:
@@ -159,6 +161,8 @@ jobs:
           FORCE: ${{ inputs.force || 'false' }}
         run: |
           set -euo pipefail
+          # 已构建标记以 actions/cache 的 xn-main-sha-<sha> 为准（GITHUB_TOKEN 能写）；
+          # 仓库变量 XN_LAST_MAIN_SHA 只是可选快路径（配了 XN_VARS_TOKEN 才会更新）。
           changed=true
           if [ "$REF" = "main" ] && [ "$FORCE" != "true" ]; then
             if [ "$SHA" = "${LAST_SHA:-}" ] || [ "${CACHE_HIT:-false}" = "true" ]; then
@@ -742,25 +746,36 @@ jobs:
       - name: Record built main SHA
         continue-on-error: true
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # GITHUB_TOKEN 写不了 Actions Variables（即使 actions: write 也是 403），所以：
+          #   1) 优先 XN_VARS_TOKEN（fine-grained PAT，Variables: read/write，最小权限）；
+          #   2) 没配就复用 XN_REPO_TOKEN —— 它是 classic PAT（repo scope）时能写本仓库变量；
+          #      只授了 leptonyu/xn 的 fine-grained token 会 403，只打 warning。
+          # 权威的「已构建」标记始终是上面那个 actions/cache（GITHUB_TOKEN 能写）。
+          XN_VARS_TOKEN: ${{ secrets.XN_VARS_TOKEN }}
+          XN_REPO_TOKEN: ${{ secrets.XN_REPO_TOKEN }}
           SHA: ${{ needs.check.outputs.sha }}
         run: |
           set -uo pipefail
-          # 记不进去 = 下一轮还会重建同一个 SHA。别静悄悄地失败：重试后读回来确认一次。
-          for i in 1 2 3; do
-            if gh variable set XN_LAST_MAIN_SHA --repo "$GITHUB_REPOSITORY" --body "$SHA"; then
-              break
+          got=""
+          used=""
+          for name in XN_VARS_TOKEN XN_REPO_TOKEN; do
+            tok="$(printenv "$name" 2>/dev/null || true)"
+            [[ -n "$tok" ]] || continue
+            if GH_TOKEN="$tok" gh variable set XN_LAST_MAIN_SHA \
+              --repo "$GITHUB_REPOSITORY" --body "$SHA" >/dev/null 2>&1; then
+              got="$(GH_TOKEN="$tok" gh api \
+                "repos/${GITHUB_REPOSITORY}/actions/variables/XN_LAST_MAIN_SHA" \
+                --jq .value 2>/dev/null || true)"
+              used="$name"
+              [[ "$got" == "$SHA" ]] && break
             fi
-            echo "::warning::gh variable set 第 ${i}/3 次失败，5s 后重试"
-            sleep 5
           done
-          got="$(gh api "repos/${GITHUB_REPOSITORY}/actions/variables/XN_LAST_MAIN_SHA" --jq .value 2>/dev/null || true)"
           {
             echo "### record built main SHA"
             echo "- sha: \`${SHA}\`"
-            echo "- XN_LAST_MAIN_SHA: \`${got:-<读取失败>}\`"
+            echo "- cache 标记: \`xn-main-sha-${SHA}\`（权威，下一轮 check 用它跳过）"
+            echo "- XN_LAST_MAIN_SHA: \`${got:-未更新}\`（${used:-没有可写变量的 token}）"
           } >> "$GITHUB_STEP_SUMMARY"
           if [[ "$got" != "$SHA" ]]; then
-            echo "::error::XN_LAST_MAIN_SHA 没记成（当前 ${got:-<空>}）；cache 标记仍在，但仓库变量没更新"
-            exit 1
+            echo "::warning::XN_LAST_MAIN_SHA 没更新：XN_VARS_TOKEN 没配、XN_REPO_TOKEN 也写不了（多半是只授了 leptonyu/xn 的 fine-grained token）。已构建标记仍以 cache \`xn-main-sha-${SHA}\` 为准，不影响下一轮跳过；要更新变量就配 XN_VARS_TOKEN（fine-grained，Variables: read/write），或把 XN_REPO_TOKEN 换成 classic PAT（repo scope）。"
           fi

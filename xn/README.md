@@ -187,11 +187,16 @@ schedule 绑定：
   `build.sh --profile FILE` 仍保留 `pgo.sh use` 的 PGO 交叉路径，仅本地手动用。
   注意别用 `pgo.sh use` 直接当 zig 调交叉链接：它会和 rustc 的 self-contained
   `crt*.o` 撞 `_start`（duplicate symbol），普通 `release.sh --target` 不会。
-- 已构建的 main SHA 记在仓库变量 **`XN_LAST_MAIN_SHA`**（并用 `actions/cache` 的
-  `xn-main-sha-<sha>` 标记兜底）；只在发布成功后更新，失败/取消不会记账，下一轮会重试。
+- 已构建的 main SHA 记成 **`actions/cache` 标记 `xn-main-sha-<sha>`**（GITHUB_TOKEN 能写，
+  `check` job 用它跳过同一 SHA），仓库变量 **`XN_LAST_MAIN_SHA`** 只是可选快路径：
+  Actions Variables 的 API **不接受 GITHUB_TOKEN**（`actions: write` 也 403）。更新顺序：
+  secret **`XN_VARS_TOKEN`**（fine-grained PAT，Repository permissions → Variables:
+  Read and write）→ 否则复用 **`XN_REPO_TOKEN`**（只有 classic PAT / `repo` scope 才能写
+  本仓库变量；只授了 `leptonyu/xn` 的 fine-grained token 会 403）。都写不了只打
+  `::warning::`，不影响记账。
   **记账只看普通档**：`all` 时 x86_64 / armv7 / macOS 三个普通 job 都成功才记，tuned 不参与
-  —— PGO 挂了整轮仍算成功，代价是这个 SHA 的 tuned 要等上游下次提交才重试（或手动
-  `force=true` 立刻重来）。记完会读回变量确认并写进 job summary，没记上会打 `::error::`。
+  —— PGO 挂了整轮仍算成功，代价是这个 SHA 的 tuned 要等上游提交才重试（或手动
+  `force=true` 立刻重来）。
 - 支持上游主动触发：`repository_dispatch`，`event_type: xn-main-updated`，
   `client_payload.sha` 可选；没有 dispatch 时最多晚一小时发现更新。
 - 默认跟踪 `main`；需要临时从别的分支构建时，用手动 `workflow_dispatch` 的 `ref` 输入。
@@ -216,8 +221,10 @@ schedule 绑定：
   命中（`cache-hit=true`）时不再重复上传那 1G 缓存。PGO 三阶段 RUSTFLAGS 各不相同、
   BOLT 又不经过 rustc，这部分省不掉；要临时关掉用 `XN_SCCACHE=off`。
 - 私有上游需要仓库 secret **`XN_REPO_TOKEN`**（对 `leptonyu/xn` **`contents: write`**：
-  既要 checkout，也要创建/更新 release）；本仓库只用它自己的 `GITHUB_TOKEN` 更新
-  `XN_LAST_MAIN_SHA`（`actions: write`）。
+  既要 checkout，也要创建/更新 release）。如果它是 **classic PAT（`repo` scope）**，顺带就能
+  写本仓库的变量 `XN_LAST_MAIN_SHA`；只有 fine-grained（仅授 `leptonyu/xn`）时不行，这时
+  可选配 **`XN_VARS_TOKEN`**（fine-grained，本仓库 **Variables: read/write**）。都不配也能跑，
+  已构建标记走 `actions/cache`。
 - 默认**不加** cargo features；需要时在手动触发的 `features` 输入或本地 `build.sh --features quic` 里加。
 - `Upload build outputs` 收集 `xn/dist/*.tar.xz`、`xn/dist/*.sha256sum` 和两档的
   `.bin`（compare job 要用），`build.log` 已经在 trace 包里，不再单独上传。
