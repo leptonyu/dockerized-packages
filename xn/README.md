@@ -139,6 +139,11 @@ SHA256SUMS                                        # 上游生成的汇总，只�
   `THIRD-PARTY-NOTICES.txt`（一次 workspace 构建，四个 bin 全在里面；不再单独发
   `cidr.*` / `xn-tui.*` 包）。
 - **tuned runtime 包**：只有 `xn`（上游 `--tuned` 只编 xn）+ 同样的 LICENSE / docs / notices。
+- **PGO 的 optimize 只给 xn 加 profile-use**：`build.sh` 探测上游 `release.sh` 是否支持
+  `--xn-only`（补丁见 [`patches/upstream-xn-only.patch`](patches/upstream-xn-only.patch)），
+  支持就自动加 —— 依赖按基线编（能命中 sccache），不把 profile-use 灌给 tokio/rustls 之类
+  （上游文档：依赖被 PGO 后客户端 CPU/GB +33%，GOAL-094）。上游没打补丁就退回默认，只提示。
+  `--no-xn-only` 可显式关掉。
 - **trace 包**：`trace-files.txt` 列出的诊断文件（各步骤日志、`manifest.tsv`、`bolt.env`、
   `hot-functions.tsv`、`xn.fdata` 等）+ `xn.tuned.env` + 两份清单 +（可选）`build.log` /
   `build-info.txt`。`trace-replay-files.txt` 里列的 `perf.data` / `xn.stage2` **只留清单、
@@ -289,7 +294,9 @@ workflow 作为 artifact 上传。
 
 ## 与上游的关系
 
-- 只读上游：不修改 `release.sh`、`scripts/`、`Cargo.toml`；`--patch-all` 等上游开关不碰。
+- 只读上游：不在本仓库改 `release.sh` / `scripts/` / `Cargo.toml`；需要的上游改动以补丁形式
+  放在 [`patches/`](patches/)，由人工在上游仓库 `git apply`（当前只有一个：
+  `upstream-xn-only.patch`，给 PGO 的 optimize 加 `--xn-only`）。
 - `--tuned` 是上游唯一的 PGO+BOLT 入口；本模块的版本门槛是
   `release.sh` 里出现 `--tuned`。上游改成新入口时，先改这里，不复制逻辑。
 - 产物是**候选**：`--tuned` 的采样是合成 loopback 负载 + 测试套件，不等于线上流量；

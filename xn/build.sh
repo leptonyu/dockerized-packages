@@ -56,6 +56,9 @@ event="${XN_EVENT:-}"
 freq="${XN_FREQ:-}"
 icf="${XN_ICF:-}"
 workload="${XN_WORKLOAD:-}"
+# PGO optimize 是否只给 xn 注入 profile-use（依赖走基线）。auto = 上游 release.sh 支持
+# `--xn-only` 就自动开（见 xn/patches/upstream-xn-only.patch），不支持就跳过。
+xn_only="${XN_XN_ONLY:-auto}"
 publish=false
 package_only=false
 dry_run=false
@@ -165,6 +168,8 @@ usage() {
   --icf MODE           BOLT ICF：safe / all / none
   --workload CMD       自定义 PGO/BOLT 负载，透传给 release.sh
   --no-tests           PGO 采样只跑 loopback 套件，不跑 nextest
+  --xn-only            PGO optimize 只给 xn 加 profile-use（上游支持 --xn-only 时默认开）
+  --no-xn-only         显式关掉，走上游默认（依赖也吃 profile-use）
   --no-locked          不向 cargo 传 --locked
   --force              让 build-tuned 重做已有 run 目录
   --keep-legacy        发布时不删除旧版单独上传的 .env / .build-info 等
@@ -218,6 +223,8 @@ while (($#)); do
 		--workload) need_value "$1" "$#"; workload="$2"; shift 2 ;;
 		--workload=*) workload="${1#*=}"; shift ;;
 		--no-tests) tests=false; shift ;;
+		--xn-only) xn_only=true; shift ;;
+		--no-xn-only) xn_only=false; shift ;;
 		--no-locked) locked=false; shift ;;
 		--keep-legacy) prune_legacy=false; shift ;;
 		--force) force=true; shift ;;
@@ -661,6 +668,19 @@ if ! $package_only; then
 	$force && tuned_args+=(--force)
 	$tests || tuned_args+=(--no-tests)
 	$locked && tuned_args+=(--locked)
+
+	# PGO 只给 xn 注入 profile-use：上游 release.sh 支持 --xn-only 才加（补丁见
+	# xn/patches/upstream-xn-only.patch）。不支持就退回上游默认，只提示一行。
+	if [[ "$flavors" == *tuned* ]] && ! $cross && [[ "$xn_only" != false ]]; then
+		if grep -q -- '--xn-only' "$src/release.sh"; then
+			tuned_args+=(--xn-only)
+			note "tuned：--xn-only（profile-use 只作用 xn，依赖走基线，sccache 可命中）"
+		elif [[ "$xn_only" == true ]]; then
+			warn "上游 release.sh 不支持 --xn-only（先应用 xn/patches/upstream-xn-only.patch）"
+		else
+			note "上游 release.sh 还没有 --xn-only，跳过（应用 xn/patches/upstream-xn-only.patch 可省一轮依赖重编）"
+		fi
+	fi
 
 	release_args=(--target "$target" --pack)
 	[[ -n "$features" ]] && release_args+=(--features "$features")
