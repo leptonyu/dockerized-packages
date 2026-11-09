@@ -549,7 +549,7 @@ jobs:
       needs.check.outputs.changed == 'true' && (
         needs.check.outputs.target == 'all' ||
         needs.check.outputs.target == 'aarch64-macos')
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 240
     steps:
       - uses: actions/checkout@v7
@@ -678,7 +678,7 @@ jobs:
       (needs.check.outputs.target == 'all' || needs.check.outputs.target == 'aarch64-macos') &&
       needs.macos-aarch64.result == 'success' &&
       needs.macos-aarch64-tuned.result == 'success'
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
