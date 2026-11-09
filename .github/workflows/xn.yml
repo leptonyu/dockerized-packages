@@ -353,7 +353,7 @@ jobs:
       needs.check.outputs.changed == 'true' && (
         needs.check.outputs.target == 'all' ||
         needs.check.outputs.target == 'aarch64-macos')
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 180
     steps:
       - uses: actions/checkout@v7
