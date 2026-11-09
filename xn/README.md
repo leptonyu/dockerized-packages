@@ -272,28 +272,29 @@ workflow 作为 artifact 上传。
 
 | 输入 | 取值 | 含义 |
 | --- | --- | --- |
-| `scope` | `all`（默认）/ `repo` / `upstream` | `all` = 本仓库离线测试 + 上游套件；`repo` 只跑 `xn/tests/run-all.sh`；`upstream` 只跑上游 |
-| `suite` | `all`（默认）/ `smoke` / `unit` / `e2e` / `bench` / `perf` / `pgo` | 上游分类。`all` 是全部职能条目（数小时，不含 pgo）；`smoke` 是 GOAL-112 的 5 条 `smoke.ebpf.*`（eBPF 最小矩阵） |
-| `tier` | `none`（默认）/ `pr` / `nightly` / `release` / `manual` | 按档位选；不是 `none` 时覆盖 `suite`（两个下拉不能相加） |
-| `arch` | `both`（默认）/ `x86_64` / `aarch64` | 上游 runner 架构；单架构省一半时间 |
-| `ref` | 空（默认）/ 分支 / commit | 上游 ref；空 = `main` 最新 commit |
-| `keep_going` | `true`（默认）/ `false` | 失败后是否继续；eBPF 与 unified 都遵守 |
-| `strict` | `false`（默认）/ `true` | 缺环境是否按 env-error 失败；默认记 skip。unified 以非 root 跑，hosted 上只能跳过 root/VM 条目；eBPF 步骤始终要求环境（root/docker/BTF）可用 |
+| `mode` | `all`（默认） | 本仓库离线测试 + 上游全部 active 条目（数小时，不含 pgo）+ eBPF smoke |
+| `mode` | `repo` | 只跑本仓库离线测试（`xn/tests/run-all.sh`，几秒） |
+| `mode` | `smoke` | 只跑上游 eBPF smoke 矩阵（GOAL-112 的 5 条 `smoke.ebpf.*`） |
+| `mode` | `nightly` | 上游 nightly 档（unit + e2e）+ eBPF smoke |
 
 触发规则：
 
-- `scope=repo` 不 checkout 上游、不需要 `XN_REPO_TOKEN`。
-- `pick = tier`（非 `none`）或 `suite`；`pick=smoke` 只跑 eBPF 步骤
-  （`scripts/test/ci-ebpf.sh --category smoke`），不再跑 unified —— 避免同一批
-  5 条被非 root 的 unified 再选一次（全部 skip），并让 `last-report.md` 保持
-  eBPF 的结果。
-- `pick=all` / `nightly` 先跑 `scripts/test/all.sh`，再跑 eBPF smoke —— unified 以
-  非 root 跑，会跳过 `smoke.ebpf.*`，eBPF 步骤用特权容器补上；eBPF 放在最后，
-  `last-report.md` 是 eBPF 的结果，unified 的汇总另存 `last-report-unified.md`。
-- `all` 按上游口径**不含 pgo**（`run --all` 会过滤掉 pgo 类目）；要跑 PGO 显式选
-  `suite=pgo`。
-- 其它分类只跑 unified；整类都因环境跳过时，`strict=false` 只告警，`strict=true`
-  才失败。
+- `mode=repo` 不 checkout 上游、不需要 `XN_REPO_TOKEN`。
+- 架构固定为 x86_64 Linux + aarch64 macOS（`mode=smoke` 只在 Linux 上跑，eBPF
+  本来就只支持 Linux，macOS 那条腿只会白起一台 runner）；上游 ref 固定 `main`。
+- `mode=all` / `nightly` 先跑 `scripts/test/all.sh`（默认 keep-going，只认
+  `--fail-fast`），再跑 eBPF smoke。unified 以非 root 跑，会跳过 `smoke.ebpf.*`
+  等 root/VM 条目，eBPF 步骤用特权容器补上；eBPF 放在最后，`last-report.md` 是
+  eBPF 的结果，unified 的汇总另存 `last-report-unified.md`。
+- unified 整类都因环境跳过时脚本退 2，workflow 只告警；退 2 但输出里不是「全部
+  跳过」（例如参数/用法错误）仍按失败处理，避免一条没跑却显示绿色。
+- `mode=smoke` 只跑 eBPF 步骤（`scripts/test/ci-ebpf.sh --category smoke`），不再
+  跑 unified —— 避免同一批 5 条被非 root 的 unified 再选一次（全部 skip），并让
+  `last-report.md` 保持 eBPF 的结果。
+- `all` / `nightly` 按上游口径**不含 pgo**（`run --all` 会过滤掉 pgo 类目）；PGO
+  构建 + `pgo.compare` 不在这个 workflow 里，入口是发布链路 `xn.yml` 的
+  `compare` 下拉。
+- eBPF 步骤始终要求环境（root / docker / BTF）可用；缺环境直接失败而不是跳过。
 
 ## 与上游的关系
 

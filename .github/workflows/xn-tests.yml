@@ -113,15 +113,23 @@ jobs:
         run: |
           set -euo pipefail
           if [ "${{ inputs.mode }}" = "nightly" ]; then suite=nightly; else suite=all; fi
-          # 整类都因环境不满足被跳过是 hosted runner 的正常情况（没有 root / VM）；
-          # run.sh 退 2 是为了防假绿，这里降级成告警。真正的失败（1）仍然红。
+          # all.sh 默认就是 keep-going，只认 --fail-fast；不要再传 --keep-going
+          # （未知参数会直接退 2，被下面误当成「全部跳过」）。
+          log="$(mktemp)"
+          trap 'rm -f "$log"' EXIT
           set +e
-          scripts/test/all.sh "$suite" --keep-going
-          code=$?
+          scripts/test/all.sh "$suite" 2>&1 | tee "$log"
+          code=${PIPESTATUS[0]}
           set -e
+          # 整类都因环境不满足被跳过是 hosted runner 的正常情况（没有 root / VM）；
+          # 脚本退 2 是为了防假绿，这里降级成告警。但参数 / 用法错误也退 2，必须先
+          # 确认输出里确实有「全部跳过」，否则会把「一条没跑」吞成绿色。
           if [ "$code" -eq 2 ]; then
-            echo "::warning::$suite 的条目全部因环境不满足被跳过（hosted runner 没有 root/VM）"
-            exit 0
+            if grep -q '全部 .* 条因环境不满足被跳过' "$log"; then
+              echo "::warning::$suite 的条目全部因环境不满足被跳过（hosted runner 没有 root/VM）"
+              exit 0
+            fi
+            echo "::error::all.sh 退 2，但不是「全部跳过」（多半是参数/用法错误），按失败处理"
           fi
           exit "$code"
       - name: Preserve unified report
