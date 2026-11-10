@@ -144,6 +144,9 @@ SHA256SUMS                                        # 上游生成的汇总，只�
   （实测 +0.099%），也没有可复现的吞吐收益（GOAL-094）；full PGO 才能拿回体积/数据面收益
   （2026-11-04 NUC：18.46MB → 15.88MB）。代价是客户端 CPU/GB 有已知回退（GOAL-094），
   发版前用 `pgo.compare` 留同机 A/B 证据。
+- **采样只采数据面（GOAL-117）**：tuned 默认 `--no-tests`，nextest 只做正确性门禁、不 merge；
+  上游默认 workload 是 `tune-workload.sh --coverage --dns`。server/client profraw 必须落盘，
+  profile 形状不合格（ws/tunnel 全 0）会在 optimize 前失败。
 - **trace 包**：`trace-files.txt` 列出的诊断文件（各步骤日志、`manifest.tsv`、`bolt.env`、
   `hot-functions.tsv`、`xn.fdata` 等）+ `xn.tuned.env` + 两份清单 +（可选）`build.log` /
   `build-info.txt`。`trace-replay-files.txt` 里列的 `perf.data` / `xn.stage2` **只留清单、

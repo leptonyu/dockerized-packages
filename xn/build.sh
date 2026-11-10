@@ -61,7 +61,7 @@ package_only=false
 dry_run=false
 check=false
 force=false
-tests=true
+tests=false
 locked=true
 prune_legacy=true
 target="${XN_TARGET:-x86_64-unknown-linux-gnu}"
@@ -164,7 +164,8 @@ usage() {
   --freq N             perf 采样频率，透传给 release.sh
   --icf MODE           BOLT ICF：safe / all / none
   --workload CMD       自定义 PGO/BOLT 负载，透传给 release.sh
-  --no-tests           PGO 采样只跑 loopback 套件，不跑 nextest
+  --tests              PGO 采样也跑 nextest（默认不跑：只采 workload，测试只做正确性门禁）
+  --no-tests           兼容旧参数；等价于默认（不跑 nextest）
   --no-locked          不向 cargo 传 --locked
   --force              让 build-tuned 重做已有 run 目录
   --keep-legacy        发布时不删除旧版单独上传的 .env / .build-info 等
@@ -217,6 +218,7 @@ while (($#)); do
 		--icf=*) icf="${1#*=}"; shift ;;
 		--workload) need_value "$1" "$#"; workload="$2"; shift 2 ;;
 		--workload=*) workload="${1#*=}"; shift ;;
+		--tests) tests=true; shift ;;
 		--no-tests) tests=false; shift ;;
 		--no-locked) locked=false; shift ;;
 		--keep-legacy) prune_legacy=false; shift ;;
@@ -431,7 +433,7 @@ print_plan() {
 	[[ -n "$event" ]] && rargs+=(--event "$event")
 	[[ -n "$icf" ]] && rargs+=(--icf "$icf")
 	$force && rargs+=(--force)
-	$tests || rargs+=(--no-tests)
+	if $tests; then rargs+=(--tests); else rargs+=(--no-tests); fi
 	$locked && rargs+=(--locked)
 
 	echo "# 需要原生 Linux x86_64；当前 $(uname -s)/$(uname -m)"
@@ -505,7 +507,7 @@ if $check; then
 		( cd "$src" && ./scripts/build-tuned.sh doctor --target "$target" --require bolt ) || local_doctor=$?
 	fi
 	if $tests && [[ "$flavors" == *tuned* ]] && ! command -v cargo-nextest >/dev/null 2>&1; then
-		warn "没有 cargo-nextest；release.sh --tuned 默认会跑 nextest，请安装或用 --no-tests"
+		warn "没有 cargo-nextest；默认不跑 nextest（只有 --tests 才需要它）"
 	fi
 	if $publish && ! command -v gh >/dev/null 2>&1; then
 		warn "没有 gh；--publish 需要 gh"
@@ -708,7 +710,7 @@ if ! $package_only; then
 	[[ -n "$event" ]] && tuned_args+=(--event "$event")
 	[[ -n "$icf" ]] && tuned_args+=(--icf "$icf")
 	$force && tuned_args+=(--force)
-	$tests || tuned_args+=(--no-tests)
+	if $tests; then tuned_args+=(--tests); else tuned_args+=(--no-tests); fi
 	$locked && tuned_args+=(--locked)
 
 	# tuned 不传任何 PGO 范围开关：走上游默认，让全部 crate 都吃 -Cprofile-use
