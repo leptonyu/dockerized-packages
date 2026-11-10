@@ -1,5 +1,5 @@
 name: 发布 XN
-run-name: "发布 XN · ${{ inputs.target || 'all' }}"
+run-name: "发布 XN · ${{ inputs.target || 'all' }} · compare=${{ inputs.compare || 'false' }}"
 
 # 交付目标（`target` 下拉，默认 all，可单编一个）：
 #   all                      三个都编（x86_64 Linux + armv7 Linux + aarch64 macOS）
@@ -21,31 +21,38 @@ run-name: "发布 XN · ${{ inputs.target || 'all' }}"
 # armv7 / macos-release / macos-tuned）：普通包先出，tuned 挂了不影响普通包；两档都往
 # 同一个 release 追加资产，资产名互不重叠。
 #
-# `compare` 下拉（默认 false）：普通档 + tuned 档都成功后，`pgo.compare` 这个 job 把两边
-# 的 bin 取下来做同机 A/B（`xn/compare.sh` 摆成 build-tuned 的 run 目录，交给上游
-# `compare-ci.sh --no-build`），不重编。macOS 的产物是 Mach-O，退 `pgo.compare.size`
-# 只比大小。armv7 交叉档没有同机 control / 采样，不跑。
+# `compare` 下拉（默认 false）：
+#   true  两档 build 都成功、或标记命中已构建（skipped）后，`pgo.compare` 把两边的 bin
+#         取下来做同机 A/B（`xn/compare.sh` 摆成 build-tuned 的 run 目录，交给上游
+#         `compare-ci.sh --no-build`），不重编；skipped 的档用 xn-ci 里上次的 bin
+#         （同一 SHA；bin 不全就报错，`force=true` 重编）。macOS 的产物是 Mach-O，退
+#         `pgo.compare.size` 只比大小；armv7 交叉档没有同机 control / 采样，不跑。
+#   only  本轮完全不构建，直接用 `xn-ci` 里现成的 bin 单独跑 compare（target=all 时只跑
+#         bin 齐的那档）。每个 build job 成功后都会把 bin 传上 `xn-ci`，所以任何一轮
+#         构建完成后都能单独补对比；给已经构建过的 SHA 补对比、或重跑 A/B 时用这个。
 # bin 和对比报告都经私有上游仓库的固定 prerelease `xn-ci` 中转（单 tag，`--clobber` 覆盖，不累积）。
 #
-# **记账只看普通档**：x86_64 / armv7 / macOS 三个普通 job 都成功才写 `XN_LAST_MAIN_SHA`
-# （tuned 不参与，失败了也不会把整轮判死）。
+# **记账只看普通档**：x86_64 / armv7 / macOS 三个普通 job 都是 success 或 skipped
+# （skipped = 之前已编过）才写 `XN_LAST_MAIN_SHA`（tuned 不参与，失败了也不会把整轮判死）。
 #
 # **禁止缓存上游任何东西**：本仓库是 public，`leptonyu/xn` 是 private。
 # actions/cache 的 key 和内容对 public 仓库可见/可下载，所以：
 #   - 不缓存上游 checkout（`.cache/xn-src` 每轮 actions/checkout 现拉）；
 #   - sccache 只在单轮 job 内用（PGO 三阶段复用依赖编译），**不跨 run 缓存**：
 #     编译产物（rlib/rmeta）里带着私有代码的 metadata，不能进公开 cache；
-#   - 「已构建」标记的 key 用上游 SHA 的 SHA-256（`xn-built-<64位hex>`），标记文件只写
-#     固定字符串 —— key/内容里都不出现上游 SHA 或源码。
+#   - 「已构建」标记按 build job 各存一份（`xn-built-<64位hex>-<job>`），标记文件只写
+#     固定字符串 —— key/内容里都不出现上游 SHA 或源码。check 据此识别哪些子任务已经
+#     完成并跳过，只编缺的那些（非 main ref / force=true 时忽略标记，一律重编）。
 # **artifact 同理**：public 仓库的 artifact 对所有人可下载，所以构建产物（tar.xz / .bin）
 # 一律不进 artifact，只发私有上游 release；compare 的 bin / 报告走 `xn-ci` prerelease。
 # 新增 cache / artifact 时先问：这东西是不是从 leptonyu/xn 来的？
 #
-# 触发：每小时检查上游 main SHA（未变就跳过）；手动 force；repository_dispatch
-# `xn-main-updated`。构建成功后写 `xn-built-<sha256(SHA)>` 标记（下一轮据此跳过）；
-# 仓库变量 XN_LAST_MAIN_SHA 只是可选快路径 —— GITHUB_TOKEN 写不了
-# Actions Variables，会先试 secret XN_VARS_TOKEN（fine-grained，Variables: read/write），
-# 再复用 XN_REPO_TOKEN（classic PAT / repo scope 才能写本仓库变量），都不行只打 warning。发布到上游 v<Cargo.toml version> release（需要写权限的 XN_REPO_TOKEN）。
+# 触发：每小时检查上游 main SHA；每个 build job 成功后写自己的 `xn-built-<sha256>-<job>`
+# 标记（下一轮 check 据此只跳完成的子任务）；仓库变量 XN_LAST_MAIN_SHA 只记录最近一次
+# 三个普通档齐全的 main SHA（跳过构建不看它）—— GITHUB_TOKEN 写不了 Actions Variables，
+# 会先试 secret XN_VARS_TOKEN（fine-grained，Variables: read/write），再复用 XN_REPO_TOKEN
+# （classic PAT / repo scope 才能写本仓库变量），都不行只打 warning。
+# 发布到上游 v<Cargo.toml version> release（需要写权限的 XN_REPO_TOKEN）。
 
 on:
   schedule:
@@ -74,13 +81,15 @@ on:
           - aarch64-macos
       compare:
         description: >-
-          true=构建后拿本次的普通 bin vs PGO bin 跑 pgo.compare（不重编；macOS 只比尺寸；armv7 不跑）
+          false=不跑 pgo.compare | true=构建后拿本轮普通 bin vs PGO bin 跑（不重编；macOS
+          只比尺寸；armv7 不跑） | only=完全不构建，直接用 xn-ci 里现成的 bin 单独跑
         type: choice
         required: true
         default: "false"
         options:
           - "false"
           - "true"
+          - only
       ref:
         description: 指定上游 ref（留空 = main）
         required: false
@@ -110,9 +119,18 @@ jobs:
     outputs:
       sha: ${{ steps.resolve.outputs.sha }}
       ref: ${{ steps.resolve.outputs.ref }}
-      changed: ${{ steps.decide.outputs.changed }}
       target: ${{ steps.target.outputs.target }}
       cache_key: ${{ steps.marker.outputs.key }}
+      changed: ${{ steps.decide.outputs.changed }}
+      # compare=only 时用：xn-ci 里哪一档的 bin 齐（普通 + tuned 都在）
+      bins_x86_64: ${{ steps.bins.outputs.x86_64 }}
+      bins_macos: ${{ steps.bins.outputs.macos }}
+      # 每个 build job 单独决策：已完成的跳过，只编缺的（见「Decide which builds to run」）
+      build_x86_64: ${{ steps.decide.outputs.build_x86_64 }}
+      build_x86_64_tuned: ${{ steps.decide.outputs.build_x86_64_tuned }}
+      build_armv7: ${{ steps.decide.outputs.build_armv7 }}
+      build_macos: ${{ steps.decide.outputs.build_macos }}
+      build_macos_tuned: ${{ steps.decide.outputs.build_macos_tuned }}
     steps:
       - name: Check XN_REPO_TOKEN
         env:
@@ -128,10 +146,10 @@ jobs:
             echo "::error::XN_REPO_TOKEN 对 leptonyu/xn 没有写权限；创建/更新 v<version> release 需要 contents:write"
             exit 1
           fi
-      - name: Prepare private CI release（compare 用）
-        # public 仓库的 artifact 不能承载私有上游的产物。compare 要的 bin / 报告改走
+      - name: Prepare private CI release（bin 中转）
+        # public 仓库的 artifact 不能承载私有上游的产物。构建出的 bin / 对比报告改走
         # 私有上游仓库里**一个固定 prerelease** `xn-ci`：每次 --clobber 覆盖，不会越积越多。
-        if: ${{ inputs.compare == 'true' }}
+        # 每轮构建的 build job 都会把 bin 传上去（compare=only 不必等本轮构建）。
         env:
           GH_TOKEN: ${{ secrets.XN_REPO_TOKEN }}
         run: |
@@ -175,57 +193,206 @@ jobs:
         run: |
           set -euo pipefail
           # 仓库是 public、上游是 private：key 里绝不能出现上游 SHA，否则等于公开私有提交号。
-          # 用 SHA-256 摘要当 key（不可逆），标记文件内容也不写 SHA（record 只写 "built"）。
+          # 用 SHA-256 摘要当 key（不可逆），标记文件内容也不写 SHA（各 build job 只写 "built"）。
           echo "key=$(printf '%s' "$SHA" | sha256sum | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
       - name: Prepare state dir
         run: mkdir -p .xn-built-sha
-      - name: Restore built marker
-        id: built
+      # 每个 build job 一个标记（key = xn-built-<sha256>-<job>）。这里逐个 lookup，
+      # 下面 decide 就能算出「哪个子任务已经完成」并只保留没完成的那几个。
+      - name: Restore built marker（x86_64 普通）
+        id: built-linux-x86_64
         continue-on-error: true
         uses: actions/cache/restore@v6
         with:
           path: .xn-built-sha
-          key: xn-built-${{ steps.marker.outputs.key }}
+          key: xn-built-${{ steps.marker.outputs.key }}-linux-x86_64
           lookup-only: true
-      - name: Decide whether to build
+      - name: Restore built marker（x86_64 PGO）
+        id: built-linux-x86_64-tuned
+        continue-on-error: true
+        uses: actions/cache/restore@v6
+        with:
+          path: .xn-built-sha
+          key: xn-built-${{ steps.marker.outputs.key }}-linux-x86_64-tuned
+          lookup-only: true
+      - name: Restore built marker（armv7）
+        id: built-linux-armv7
+        continue-on-error: true
+        uses: actions/cache/restore@v6
+        with:
+          path: .xn-built-sha
+          key: xn-built-${{ steps.marker.outputs.key }}-linux-armv7
+          lookup-only: true
+      - name: Restore built marker（macOS 普通）
+        id: built-macos-aarch64
+        continue-on-error: true
+        uses: actions/cache/restore@v6
+        with:
+          path: .xn-built-sha
+          key: xn-built-${{ steps.marker.outputs.key }}-macos-aarch64
+          lookup-only: true
+      - name: Restore built marker（macOS PGO）
+        id: built-macos-aarch64-tuned
+        continue-on-error: true
+        uses: actions/cache/restore@v6
+        with:
+          path: .xn-built-sha
+          key: xn-built-${{ steps.marker.outputs.key }}-macos-aarch64-tuned
+          lookup-only: true
+      - name: Decide which builds to run
         id: decide
         env:
-          SHA: ${{ steps.resolve.outputs.sha }}
+          TARGET: ${{ steps.target.outputs.target }}
           REF: ${{ steps.resolve.outputs.ref }}
-          LAST_SHA: ${{ vars.XN_LAST_MAIN_SHA }}
-          CACHE_HIT: ${{ steps.built.outputs.cache-hit }}
-          MARKER_KEY: ${{ steps.marker.outputs.key }}
           FORCE: ${{ inputs.force || 'false' }}
+          COMPARE: ${{ inputs.compare || 'false' }}
+          MARKER_KEY: ${{ steps.marker.outputs.key }}
+          HIT_X86_64: ${{ steps.built-linux-x86_64.outputs.cache-hit }}
+          HIT_X86_64_TUNED: ${{ steps.built-linux-x86_64-tuned.outputs.cache-hit }}
+          HIT_ARMV7: ${{ steps.built-linux-armv7.outputs.cache-hit }}
+          HIT_MACOS: ${{ steps.built-macos-aarch64.outputs.cache-hit }}
+          HIT_MACOS_TUNED: ${{ steps.built-macos-aarch64-tuned.outputs.cache-hit }}
         run: |
           set -euo pipefail
-          # 已构建标记以 actions/cache 的 xn-built-<sha256> 为准（GITHUB_TOKEN 能写）；
-          # 仓库变量 XN_LAST_MAIN_SHA 只是可选快路径（配了 XN_VARS_TOKEN 才会更新）。
-          changed=true
-          if [ "$REF" = "main" ] && [ "$FORCE" != "true" ]; then
-            if [ "$SHA" = "${LAST_SHA:-}" ] || [ "${CACHE_HIT:-false}" = "true" ]; then
-              changed=false
+          target="${TARGET:-all}"
+          # 标记按 build job 各一份：已完成的子任务不再重跑，只编缺的那些。
+          # 非 main ref / force=true 时忽略标记（手动 force 一定重编，和之前一致）。
+          honor=true
+          if [ "$REF" != "main" ] || [ "$FORCE" = "true" ]; then honor=false; fi
+
+          in_target() { case "$target" in all|"$1") return 0 ;; *) return 1 ;; esac; }
+          need() { # need <target> <已构建> -> true=这个 job 要编
+            if in_target "$1" && { [ "$honor" = false ] || [ "$2" = false ]; }; then
+              echo true
+            else
+              echo false
             fi
+          }
+
+          built_x86_64=false built_x86_64_tuned=false built_armv7=false
+          built_macos=false built_macos_tuned=false
+          [ "${HIT_X86_64:-false}" = "true" ] && built_x86_64=true
+          [ "${HIT_X86_64_TUNED:-false}" = "true" ] && built_x86_64_tuned=true
+          [ "${HIT_ARMV7:-false}" = "true" ] && built_armv7=true
+          [ "${HIT_MACOS:-false}" = "true" ] && built_macos=true
+          [ "${HIT_MACOS_TUNED:-false}" = "true" ] && built_macos_tuned=true
+
+          build_x86_64=false build_x86_64_tuned=false build_armv7=false
+          build_macos=false build_macos_tuned=false
+          # compare=only：本轮不构建，直接用 xn-ci 里现成的 bin 跑 pgo.compare。
+          if [ "$COMPARE" != "only" ]; then
+            build_x86_64=$(need x86_64-linux-gnu "$built_x86_64")
+            build_x86_64_tuned=$(need x86_64-linux-gnu "$built_x86_64_tuned")
+            build_armv7=$(need armv7-linux-musleabihf "$built_armv7")
+            build_macos=$(need aarch64-macos "$built_macos")
+            build_macos_tuned=$(need aarch64-macos "$built_macos_tuned")
           fi
-          echo "changed=$changed" >> "$GITHUB_OUTPUT"
+
+          changed=false
+          for b in "$build_x86_64" "$build_x86_64_tuned" "$build_armv7" \
+                   "$build_macos" "$build_macos_tuned"; do
+            [ "$b" = "true" ] && changed=true
+          done
+
+          {
+            echo "changed=$changed"
+            echo "build_x86_64=$build_x86_64"
+            echo "build_x86_64_tuned=$build_x86_64_tuned"
+            echo "build_armv7=$build_armv7"
+            echo "build_macos=$build_macos"
+            echo "build_macos_tuned=$build_macos_tuned"
+          } >> "$GITHUB_OUTPUT"
+
+          list=""
+          [ "$build_x86_64" = "true" ] && list="$list x86_64"
+          [ "$build_x86_64_tuned" = "true" ] && list="$list x86_64-pgo"
+          [ "$build_armv7" = "true" ] && list="$list armv7"
+          [ "$build_macos" = "true" ] && list="$list macos"
+          [ "$build_macos_tuned" = "true" ] && list="$list macos-pgo"
+          # compare=true 依赖本轮 build 成功；如果标记全命中（无事可做），compare 不会跑。
+          if [ "$COMPARE" = "true" ] && [ "$changed" = "false" ]; then
+            echo "::warning::本轮没有要构建的 job（已构建标记都命中），compare=true 等不到本轮 bin、不会跑；要单独跑对比请用 compare=only"
+          fi
           {
             echo "### upstream"
             echo "- ref: \`$REF\`"
             # 本仓库 public：summary 也不写上游 SHA，只写它的摘要前缀。
             echo "- sha: \`sha256:${MARKER_KEY:0:12}…\`"
-            echo "- target: \`${{ steps.target.outputs.target }}\`"
-            echo "- build: \`$changed\`"
+            echo "- target: \`$target\`"
+            echo "- compare: \`$COMPARE\`"
+            echo "- 要编：\`${list:-无（已构建的跳过 / compare=only）}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: 清点 compare 用的 bin（xn-ci）
+        id: bins
+        if: ${{ inputs.compare == 'only' }}
+        env:
+          GH_TOKEN: ${{ secrets.XN_REPO_TOKEN }}
+          COMPARE: ${{ inputs.compare || 'false' }}
+          TARGET: ${{ steps.target.outputs.target }}
+        run: |
+          set -euo pipefail
+          # xn-ci 是固定 prerelease。compare=only 不重编，直接用里面现成的 bin；
+          # 这里先清点哪一档的 bin 齐（普通 + tuned 各一份），compare job 只跑齐的那档。
+          assets="$(gh release view xn-ci --repo leptonyu/xn --json assets --jq '.assets[].name' 2>/dev/null || true)"
+          has() { grep -qxF -- "$1" <<<"$assets"; }
+          x86_64=false
+          macos=false
+          if has xn.x86_64-unknown-linux-gnu.release.bin &&
+             has xn.x86_64-unknown-linux-gnu.tuned.bin; then
+            x86_64=true
+          fi
+          if has xn.aarch64-apple-darwin.release.bin &&
+             has xn.aarch64-apple-darwin.tuned.bin; then
+            macos=true
+          fi
+          {
+            echo "x86_64=$x86_64"
+            echo "macos=$macos"
+          } >> "$GITHUB_OUTPUT"
+
+          target="${TARGET:-all}"
+          want_x86=false
+          want_macos=false
+          case "$target" in all|x86_64-linux-gnu) want_x86=true ;; esac
+          case "$target" in all|aarch64-macos) want_macos=true ;; esac
+          if [ "$COMPARE" = "only" ]; then
+            missing=""
+            if [ "$want_x86" = "true" ] && [ "$x86_64" != "true" ]; then
+              missing="x86_64"
+            fi
+            if [ "$want_macos" = "true" ] && [ "$macos" != "true" ]; then
+              missing="${missing:+$missing、}macOS"
+            fi
+            # 明确点名了单个平台却缺 bin：直接报错，别让这一轮默默什么都不跑。
+            if [ -n "$missing" ] && [ "$target" != "all" ]; then
+              echo "::error::xn-ci 里没有完整的 ${missing} bin（普通 + tuned）；compare=only 不重编，先跑一轮 compare=true（或 force=true）把 bin 传上去"
+              exit 1
+            fi
+            if [ "$x86_64" != "true" ] && [ "$macos" != "true" ]; then
+              echo "::error::xn-ci 里一组 bin 都没有，compare=only 无从跑起；先跑一轮构建"
+              exit 1
+            fi
+            if [ "$x86_64" != "true" ]; then
+              echo "::warning::xn-ci 里没有完整的 x86_64 bin；跳过这一档 compare"
+            fi
+            if [ "$macos" != "true" ]; then
+              echo "::warning::xn-ci 里没有完整的 macOS bin；跳过这一档 compare"
+            fi
+          fi
+          {
+            echo "### compare 中转（xn-ci）"
+            echo "- x86_64 bin: \`$x86_64\`"
+            echo "- macOS bin: \`$macos\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
   # ---------------------------------------------------------------- x86_64
   # 普通档和 tuned 档是**两个 job**：同时开跑，普通包先出；tuned 挂了也不影响普通包，
-  # 更不阻塞 XN_LAST_MAIN_SHA 记账（只由普通档 + armv7 决定，见 record）。
+  # 更不阻塞 XN_LAST_MAIN_SHA 记账（只由三个普通档决定，见 record）。
   linux-x86_64:
     name: build x86_64-linux-gnu（普通）
     needs: check
-    if: |
-      needs.check.outputs.changed == 'true' && (
-        needs.check.outputs.target == 'all' ||
-        needs.check.outputs.target == 'x86_64-linux-gnu')
+    # check 已经按 job 判定「这个子任务要不要编」：标记命中（同一上游 SHA 编过）就跳过。
+    if: needs.check.outputs.build_x86_64 == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
@@ -296,7 +463,9 @@ jobs:
           ./xn/build.sh "${args[@]}"
       - name: 上传 bin 到私有 release（compare 用）
         # 不放 public artifact：这里传的是私有上游的二进制。
-        if: ${{ inputs.compare == 'true' }}
+        # 每轮都传：compare=only 直接拿这里现成的 bin，不必和构建同一轮。
+        # compare=true 时上传失败会红（对比要靠它）；其余时候只警告，不连累发布。
+        continue-on-error: ${{ inputs.compare != 'true' }}
         env:
           GH_TOKEN: ${{ secrets.XN_REPO_TOKEN }}
         run: |
@@ -308,16 +477,32 @@ jobs:
             gh release upload xn-ci "${files[@]}" --repo leptonyu/xn --clobber && exit 0
             sleep $((i * 2))
           done
+          # 传不上去就把同名旧 bin 删掉：否则 compare 可能拿到上一个 SHA 的旧 bin。
+          for f in "${files[@]}"; do
+            gh release delete-asset xn-ci "$(basename "$f")" --repo leptonyu/xn --yes \
+              >/dev/null 2>&1 || true
+          done
           echo "::error::上传 bin 到私有 release xn-ci 失败"
           exit 1
+      - name: 记已构建标记（x86_64 普通）
+        # 每个 build job 成功后各存一份标记：下一轮 check 只跳过已完成的子任务。
+        # 只写固定字符串 —— cache 内容对 public 仓库可见，不能写上游 SHA / 源码。
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          mkdir -p .xn-built-sha
+          printf 'built\n' > .xn-built-sha/linux-x86_64
+      - name: Save built marker（x86_64 普通）
+        continue-on-error: true
+        uses: actions/cache/save@v6
+        with:
+          path: .xn-built-sha
+          key: xn-built-${{ needs.check.outputs.cache_key }}-linux-x86_64
 
   linux-x86_64-tuned:
     name: build x86_64-linux-gnu（PGO）
     needs: check
-    if: |
-      needs.check.outputs.changed == 'true' && (
-        needs.check.outputs.target == 'all' ||
-        needs.check.outputs.target == 'x86_64-linux-gnu')
+    if: needs.check.outputs.build_x86_64_tuned == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 300
     steps:
@@ -410,7 +595,9 @@ jobs:
           ./xn/build.sh "${args[@]}"
       - name: 上传 bin 到私有 release（compare 用）
         # 不放 public artifact：这里传的是私有上游的二进制。
-        if: ${{ inputs.compare == 'true' }}
+        # 每轮都传：compare=only 直接拿这里现成的 bin，不必和构建同一轮。
+        # compare=true 时上传失败会红（对比要靠它）；其余时候只警告，不连累发布。
+        continue-on-error: ${{ inputs.compare != 'true' }}
         env:
           GH_TOKEN: ${{ secrets.XN_REPO_TOKEN }}
         run: |
@@ -422,18 +609,32 @@ jobs:
             gh release upload xn-ci "${files[@]}" --repo leptonyu/xn --clobber && exit 0
             sleep $((i * 2))
           done
+          # 传不上去就把同名旧 bin 删掉：否则 compare 可能拿到上一个 SHA 的旧 bin。
+          for f in "${files[@]}"; do
+            gh release delete-asset xn-ci "$(basename "$f")" --repo leptonyu/xn --yes \
+              >/dev/null 2>&1 || true
+          done
           echo "::error::上传 bin 到私有 release xn-ci 失败"
           exit 1
+      - name: 记已构建标记（x86_64 PGO）
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          mkdir -p .xn-built-sha
+          printf 'built\n' > .xn-built-sha/linux-x86_64-tuned
+      - name: Save built marker（x86_64 PGO）
+        continue-on-error: true
+        uses: actions/cache/save@v6
+        with:
+          path: .xn-built-sha
+          key: xn-built-${{ needs.check.outputs.cache_key }}-linux-x86_64-tuned
 
   linux-armv7:
     name: build armv7-linux-musleabihf
     # 跟 x86_64 / macOS 一样只看 check：三档同时开跑，armv7 不排在 x86_64 后面等任何东西。
     # armv7 走普通 release 交叉编译（无 PGO/BOLT），不需要 profile。
     needs: check
-    if: |
-      needs.check.outputs.changed == 'true' && (
-        needs.check.outputs.target == 'all' ||
-        needs.check.outputs.target == 'armv7-linux-musleabihf')
+    if: needs.check.outputs.build_armv7 == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 300
     env:
@@ -489,15 +690,24 @@ jobs:
         if: ${{ inputs.compare == 'true' }}
         run: |
           echo "::notice::armv7-linux-musleabihf 是交叉目标，没有同机 control / profile 采样；pgo.compare 只在 x86_64 / macOS 原生任务上跑"
+      - name: 记已构建标记（armv7）
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          mkdir -p .xn-built-sha
+          printf 'built\n' > .xn-built-sha/linux-armv7
+      - name: Save built marker（armv7）
+        continue-on-error: true
+        uses: actions/cache/save@v6
+        with:
+          path: .xn-built-sha
+          key: xn-built-${{ needs.check.outputs.cache_key }}-linux-armv7
 
   # ---------------------------------------------------------------- macOS
   macos-aarch64:
     name: build aarch64-macos（普通）
     needs: check
-    if: |
-      needs.check.outputs.changed == 'true' && (
-        needs.check.outputs.target == 'all' ||
-        needs.check.outputs.target == 'aarch64-macos')
+    if: needs.check.outputs.build_macos == 'true'
     runs-on: macos-26
     timeout-minutes: 180
     steps:
@@ -542,7 +752,9 @@ jobs:
           ./xn/build.sh "${args[@]}"
       - name: 上传 bin 到私有 release（compare 用）
         # 不放 public artifact：这里传的是私有上游的二进制。
-        if: ${{ inputs.compare == 'true' }}
+        # 每轮都传：compare=only 直接拿这里现成的 bin，不必和构建同一轮。
+        # compare=true 时上传失败会红（对比要靠它）；其余时候只警告，不连累发布。
+        continue-on-error: ${{ inputs.compare != 'true' }}
         env:
           GH_TOKEN: ${{ secrets.XN_REPO_TOKEN }}
         run: |
@@ -554,16 +766,30 @@ jobs:
             gh release upload xn-ci "${files[@]}" --repo leptonyu/xn --clobber && exit 0
             sleep $((i * 2))
           done
+          # 传不上去就把同名旧 bin 删掉：否则 compare 可能拿到上一个 SHA 的旧 bin。
+          for f in "${files[@]}"; do
+            gh release delete-asset xn-ci "$(basename "$f")" --repo leptonyu/xn --yes \
+              >/dev/null 2>&1 || true
+          done
           echo "::error::上传 bin 到私有 release xn-ci 失败"
           exit 1
+      - name: 记已构建标记（macOS 普通）
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          mkdir -p .xn-built-sha
+          printf 'built\n' > .xn-built-sha/macos-aarch64
+      - name: Save built marker（macOS 普通）
+        continue-on-error: true
+        uses: actions/cache/save@v6
+        with:
+          path: .xn-built-sha
+          key: xn-built-${{ needs.check.outputs.cache_key }}-macos-aarch64
 
   macos-aarch64-tuned:
     name: build aarch64-macos（PGO）
     needs: check
-    if: |
-      needs.check.outputs.changed == 'true' && (
-        needs.check.outputs.target == 'all' ||
-        needs.check.outputs.target == 'aarch64-macos')
+    if: needs.check.outputs.build_macos_tuned == 'true'
     runs-on: macos-26
     timeout-minutes: 240
     steps:
@@ -620,7 +846,9 @@ jobs:
           ./xn/build.sh "${args[@]}"
       - name: 上传 bin 到私有 release（compare 用）
         # 不放 public artifact：这里传的是私有上游的二进制。
-        if: ${{ inputs.compare == 'true' }}
+        # 每轮都传：compare=only 直接拿这里现成的 bin，不必和构建同一轮。
+        # compare=true 时上传失败会红（对比要靠它）；其余时候只警告，不连累发布。
+        continue-on-error: ${{ inputs.compare != 'true' }}
         env:
           GH_TOKEN: ${{ secrets.XN_REPO_TOKEN }}
         run: |
@@ -632,22 +860,46 @@ jobs:
             gh release upload xn-ci "${files[@]}" --repo leptonyu/xn --clobber && exit 0
             sleep $((i * 2))
           done
+          # 传不上去就把同名旧 bin 删掉：否则 compare 可能拿到上一个 SHA 的旧 bin。
+          for f in "${files[@]}"; do
+            gh release delete-asset xn-ci "$(basename "$f")" --repo leptonyu/xn --yes \
+              >/dev/null 2>&1 || true
+          done
           echo "::error::上传 bin 到私有 release xn-ci 失败"
           exit 1
+      - name: 记已构建标记（macOS PGO）
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          mkdir -p .xn-built-sha
+          printf 'built\n' > .xn-built-sha/macos-aarch64-tuned
+      - name: Save built marker（macOS PGO）
+        continue-on-error: true
+        uses: actions/cache/save@v6
+        with:
+          path: .xn-built-sha
+          key: xn-built-${{ needs.check.outputs.cache_key }}-macos-aarch64-tuned
 
   # ---------------------------------------------------------------- compare
   linux-compare:
-    name: pgo.compare x86_64（现成 bin，不重编）
+    name: pgo.compare x86_64（不重编）
     # 普通 bin 和 tuned bin 分属两个 job，这里把两边的 bin 凑到一起再做同机 A/B；
     # 中转走私有仓库的 `xn-ci` release（public artifact 不放私有产物）。
-    # compare 下拉 false（默认）时整条跳过。
+    #   compare=true：两档 build 都成功、或标记命中已构建（skipped）后跑；skipped 的档用
+    #                 xn-ci 里上次传的 bin（同一 SHA；bin 不全会下载失败，用 force=true 重编）；
+    #   compare=only：不构建，用 xn-ci 里现成的 bin —— check 已确认这一档 bin 齐。
     needs: [check, linux-x86_64, linux-x86_64-tuned]
     if: |
-      always() && inputs.compare == 'true' &&
-      needs.check.outputs.changed == 'true' &&
+      always() &&
+      needs.check.result == 'success' &&
       (needs.check.outputs.target == 'all' || needs.check.outputs.target == 'x86_64-linux-gnu') &&
-      needs.linux-x86_64.result == 'success' &&
-      needs.linux-x86_64-tuned.result == 'success'
+      (
+        (inputs.compare == 'only' && needs.check.outputs.bins_x86_64 == 'true') ||
+        (inputs.compare == 'true' &&
+         (needs.linux-x86_64.result == 'success' || needs.linux-x86_64.result == 'skipped') &&
+         (needs.linux-x86_64-tuned.result == 'success' || needs.linux-x86_64-tuned.result == 'skipped') &&
+         (needs.linux-x86_64.result == 'success' || needs.linux-x86_64-tuned.result == 'success'))
+      )
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
@@ -664,11 +916,21 @@ jobs:
       - name: 从私有 release 取两档的 bin
         env:
           GH_TOKEN: ${{ secrets.XN_REPO_TOKEN }}
+          COMPARE: ${{ inputs.compare }}
         run: |
           set -euo pipefail
+          if [ "$COMPARE" = "only" ]; then
+            echo "::notice::compare=only：用 xn-ci 里现成的 bin（可能是更早一轮的构建，不重编）"
+          fi
           mkdir -p xn/dist
           gh release download xn-ci --repo leptonyu/xn \
-            --pattern 'xn.x86_64-unknown-linux-gnu.*.bin' --dir xn/dist --clobber
+            --pattern 'xn.x86_64-unknown-linux-gnu.*.bin' --dir xn/dist --clobber || true
+          for f in xn.x86_64-unknown-linux-gnu.release.bin xn.x86_64-unknown-linux-gnu.tuned.bin; do
+            if [ ! -f "xn/dist/$f" ]; then
+              echo "::error::xn-ci 里缺 $f：compare=true 时某一档若是 skipped，说明它上次的 bin 不在中转 release；用 force=true 重编这一档，或先跑一轮构建"
+              exit 1
+            fi
+          done
           ls -l xn/dist
       - name: Run pgo.compare（普通 bin vs PGO bin，不重编）
         run: |
@@ -698,15 +960,23 @@ jobs:
           exit 1
 
   macos-compare:
-    name: pgo.compare aarch64-macos（只比尺寸）
+    name: pgo.compare aarch64-macos（只比尺寸，不重编）
     # macOS 产物是 Mach-O，Linux perf rig 跑不了：只比两个 bin 的大小，同样不重编。
+    #   compare=true：两档 build 都成功、或标记命中已构建（skipped）后跑；skipped 的档用
+    #                 xn-ci 里上次传的 bin（同一 SHA；bin 不全会下载失败，用 force=true 重编）；
+    #   compare=only：用 xn-ci 里现成的 bin。
     needs: [check, macos-aarch64, macos-aarch64-tuned]
     if: |
-      always() && inputs.compare == 'true' &&
-      needs.check.outputs.changed == 'true' &&
+      always() &&
+      needs.check.result == 'success' &&
       (needs.check.outputs.target == 'all' || needs.check.outputs.target == 'aarch64-macos') &&
-      needs.macos-aarch64.result == 'success' &&
-      needs.macos-aarch64-tuned.result == 'success'
+      (
+        (inputs.compare == 'only' && needs.check.outputs.bins_macos == 'true') ||
+        (inputs.compare == 'true' &&
+         (needs.macos-aarch64.result == 'success' || needs.macos-aarch64.result == 'skipped') &&
+         (needs.macos-aarch64-tuned.result == 'success' || needs.macos-aarch64-tuned.result == 'skipped') &&
+         (needs.macos-aarch64.result == 'success' || needs.macos-aarch64-tuned.result == 'success'))
+      )
     runs-on: macos-26
     timeout-minutes: 60
     steps:
@@ -723,11 +993,21 @@ jobs:
       - name: 从私有 release 取两档的 bin
         env:
           GH_TOKEN: ${{ secrets.XN_REPO_TOKEN }}
+          COMPARE: ${{ inputs.compare }}
         run: |
           set -euo pipefail
+          if [ "$COMPARE" = "only" ]; then
+            echo "::notice::compare=only：用 xn-ci 里现成的 bin（可能是更早一轮的构建，不重编）"
+          fi
           mkdir -p xn/dist
           gh release download xn-ci --repo leptonyu/xn \
-            --pattern 'xn.aarch64-apple-darwin.*.bin' --dir xn/dist --clobber
+            --pattern 'xn.aarch64-apple-darwin.*.bin' --dir xn/dist --clobber || true
+          for f in xn.aarch64-apple-darwin.release.bin xn.aarch64-apple-darwin.tuned.bin; do
+            if [ ! -f "xn/dist/$f" ]; then
+              echo "::error::xn-ci 里缺 $f：compare=true 时某一档若是 skipped，说明它上次的 bin 不在中转 release；用 force=true 重编这一档，或先跑一轮构建"
+              exit 1
+            fi
+          done
           ls -l xn/dist
       - name: Run pgo.compare (size-only on macOS)
         run: |
@@ -759,32 +1039,23 @@ jobs:
 
   # ---------------------------------------------------------------- record
   # 记账只看**普通档**（x86_64 / armv7 / macOS 三个 job）：tuned 是独立 job，挂了不影响
-  # 普通包发布，也不阻塞 XN_LAST_MAIN_SHA。代价是这个 SHA 的 tuned 要等上游下一次提交
-  # 才重试；想立刻重来就手动 dispatch（force=true）。
+  # 普通包发布，也不阻塞 XN_LAST_MAIN_SHA。已构建标记按 job 独立，失败/没跑的 job 下一轮
+  # check 会接着补（不必等上游下一次提交）；想一次全重编就手动 dispatch（force=true）。
   record:
     name: record built main SHA
     needs: [check, linux-x86_64, linux-armv7, macos-aarch64]
     if: |
       always() &&
+      needs.check.result == 'success' &&
+      inputs.compare != 'only' &&
       needs.check.outputs.changed == 'true' &&
       needs.check.outputs.ref == 'main' &&
       needs.check.outputs.target == 'all' &&
-      needs.linux-x86_64.result == 'success' &&
-      needs.linux-armv7.result == 'success' &&
-      needs.macos-aarch64.result == 'success'
+      (needs.linux-x86_64.result == 'success' || needs.linux-x86_64.result == 'skipped') &&
+      (needs.linux-armv7.result == 'success' || needs.linux-armv7.result == 'skipped') &&
+      (needs.macos-aarch64.result == 'success' || needs.macos-aarch64.result == 'skipped')
     runs-on: ubuntu-latest
     steps:
-      - name: Prepare built marker
-        run: |
-          mkdir -p .xn-built-sha
-          # 只写固定字符串：cache 内容对 public 仓库可见，不能把上游 SHA / 源码写进去。
-          printf 'built\n' > .xn-built-sha/built
-      - name: Save built marker
-        continue-on-error: true
-        uses: actions/cache/save@v6
-        with:
-          path: .xn-built-sha
-          key: xn-built-${{ needs.check.outputs.cache_key }}
       - name: Record built main SHA
         continue-on-error: true
         env:
@@ -792,7 +1063,8 @@ jobs:
           #   1) 优先 XN_VARS_TOKEN（fine-grained PAT，Variables: read/write，最小权限）；
           #   2) 没配就复用 XN_REPO_TOKEN —— 它是 classic PAT（repo scope）时能写本仓库变量；
           #      只授了 leptonyu/xn 的 fine-grained token 会 403，只打 warning。
-          # 权威的「已构建」标记始终是上面那个 actions/cache（GITHUB_TOKEN 能写）。
+          # 跳过构建始终看每个 build job 自己的 cache 标记（xn-built-<sha256>-<job>）；
+          # 这个变量只是「最近一次三个普通档齐全的 main SHA」记录，不参与判定。
           XN_VARS_TOKEN: ${{ secrets.XN_VARS_TOKEN }}
           XN_REPO_TOKEN: ${{ secrets.XN_REPO_TOKEN }}
           SHA: ${{ needs.check.outputs.sha }}
@@ -819,9 +1091,9 @@ jobs:
             echo "### record built main SHA"
             # 本仓库 public：summary 写摘要前缀，不写上游 SHA。
             echo "- sha: \`sha256:${SHA_DIGEST:0:12}…\`"
-            echo "- cache 标记: \`xn-built-${SHA_DIGEST:0:12}…\`（权威，下一轮 check 用它跳过）"
+            echo "- 已构建标记: 每个 build job 各自一份 \`xn-built-<sha256>-<job>\`（下一轮 check 只跳完成的）"
             echo "- XN_LAST_MAIN_SHA: \`${var_state}\`（${used:-没有可写变量的 token}）"
           } >> "$GITHUB_STEP_SUMMARY"
           if [[ "$got" != "$SHA" ]]; then
-            echo "::warning::XN_LAST_MAIN_SHA 没更新：XN_VARS_TOKEN 没配、XN_REPO_TOKEN 也写不了（多半是只授了 leptonyu/xn 的 fine-grained token）。已构建标记仍以 cache \`xn-built-<sha256>\` 为准，不影响下一轮跳过；要更新变量就配 XN_VARS_TOKEN（fine-grained，Variables: read/write），或把 XN_REPO_TOKEN 换成 classic PAT（repo scope）。"
+            echo "::warning::XN_LAST_MAIN_SHA 没更新：XN_VARS_TOKEN 没配、XN_REPO_TOKEN 也写不了（多半是只授了 leptonyu/xn 的 fine-grained token）。已构建标记仍以各 build job 的 cache 标记 \`xn-built-<sha256>-<job>\` 为准，不影响下一轮跳过；要更新变量就配 XN_VARS_TOKEN（fine-grained，Variables: read/write），或把 XN_REPO_TOKEN 换成 classic PAT（repo scope）。"
           fi

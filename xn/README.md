@@ -198,22 +198,27 @@ schedule 绑定：
 - **禁止缓存上游任何东西**（本仓库 public，`leptonyu/xn` private）：上游 checkout 每轮
   `actions/checkout` 现拉，不进 cache；sccache 不跨 run 缓存（编译产物里带私有代码的
   metadata），只在单轮 job 内复用（见下一条）。
-  已构建标记是 **`actions/cache` 的 `xn-built-<sha256(上游SHA)>`**（GITHUB_TOKEN 能写，
-  `check` job 用它跳过同一 SHA）：key 里只有摘要，标记文件内容固定写 `built`，
-  公开 cache 里看不到上游 SHA/源码。仓库变量 **`XN_LAST_MAIN_SHA`** 只是可选快路径：
+  已构建标记按 build job 各存一份：**`actions/cache` 的
+  `xn-built-<sha256(上游SHA)>-<job>`**（GITHUB_TOKEN 能写）。`check` 逐个 lookup，识别
+  **哪个子任务已经完成**：完成的 job 跳过、只编缺的那些（同一 SHA 下 x86_64 编过、
+  macOS 没编，就只跑 macOS）。key 里只有摘要 + job 名，标记文件内容固定写 `built`，
+  公开 cache 里看不到上游 SHA/源码。`force=true` / 非 `main` 的 `ref` 会忽略标记、
+  一律重编。
+  仓库变量 **`XN_LAST_MAIN_SHA`** 只是「最近一次三个普通档齐全」的记录，不参与跳过判定：
   Actions Variables 的 API **不接受 GITHUB_TOKEN**（`actions: write` 也 403）。更新顺序：
   secret **`XN_VARS_TOKEN`**（fine-grained PAT，Repository permissions → Variables:
   Read and write）→ 否则复用 **`XN_REPO_TOKEN`**（只有 classic PAT / `repo` scope 才能写
   本仓库变量；只授了 `leptonyu/xn` 的 fine-grained token 会 403）。都写不了只打
   `::warning::`，不影响记账。
-  **记账只看普通档**：`all` 时 x86_64 / armv7 / macOS 三个普通 job 都成功才记，tuned 不参与
-  —— PGO 挂了整轮仍算成功，代价是这个 SHA 的 tuned 要等上游提交才重试（或手动
-  `force=true` 立刻重来）。
+  **记账只看普通档**：`all` 时 x86_64 / armv7 / macOS 三个普通 job 都是 `success` 或
+  `skipped`（之前已编过）才记，tuned 不参与 —— PGO 挂了整轮仍算成功；没完成的 job
+  下一轮 check 会接着补，不必等上游新提交。
 - 支持上游主动触发：`repository_dispatch`，`event_type: xn-main-updated`，
   `client_payload.sha` 可选；没有 dispatch 时最多晚一小时发现更新。
 - 默认跟踪 `main`；需要临时从别的分支构建时，用手动 `workflow_dispatch` 的 `ref` 输入。
 - 手动 `workflow_dispatch` 可覆盖 `ref`（默认 `main`）、`tag`（默认 `v<Cargo.toml version>`）、
-  `event`（默认 `cpu-clock:u`）、`features`（默认空 = 不加 quic），`force=true` 可强制重编。手动指定非 `main` 的 `ref` 不会
+  `features`（默认空 = 不加 quic）、`compare`（`true` 跟本轮构建跑对比、`only` 不构建直接
+  用 `xn-ci` 现成 bin 跑），`force=true` 可强制重编。手动指定非 `main` 的 `ref` 不会
   改写 `XN_LAST_MAIN_SHA`。
 - 留空 `tag` 时直接读上游 `Cargo.toml` 的版本（`v<version>`）；release 不存在时由
   `build.sh` 新建，`--target` 是本次构建的上游 commit；存在时只追加资产。
@@ -241,8 +246,8 @@ schedule 绑定：
   `upload-artifact` —— 本仓库 public，artifact 对所有人可下载，而这些是私有上游的产物。
   包只发私有上游 release（发布时已逐资产上传 + 重试）；compare 要的 `.bin` 见下节。
 - 发布上传逐资产 + 自动重试（见上），GitHub 偶发的 502 不再让 job 停在
-  「8 个资产传到一半」；`XN_LAST_MAIN_SHA` 仍只在发布成功后记账，最终失败的话
-  下一轮会重新构建并重传。
+  「8 个资产传到一半」；每个 build job 成功后都会落自己的标记，最终失败的那档
+  下一轮会重编重传。
 - **release 说明每次发布后自动刷新**：按 release 上**实际存在**的资产生成（普通包 /
   tuned 包 / trace / 校验和各自的用途），`gh release edit --notes` 覆盖。所以两个档位
   并发发到同一个 release、谁先建都行；老 tag 重传也会把说明补上。
@@ -251,11 +256,12 @@ schedule 绑定：
 
 ## 对比测试（pgo.compare）
 
-`compare=true` 时**不重编**：`build.sh` 会把本次两档的 xn 二进制留在
-`xn/dist/xn.<triple>.{release,tuned}.bin`，两档各自把它传到**私有上游仓库的固定
-prerelease `xn-ci`**（`gh release upload --clobber`，单 tag 不累积）；`pgo.compare` 是一个
-独立 job，从 `xn-ci` 取回这两份 bin 交给 [`compare.sh`](compare.sh)，后者再摆成
-上游 `build-tuned` 的 run 目录，交给上游 `scripts/test/pgo/compare-ci.sh --no-build`：
+`build.sh` 会把两档的 xn 二进制留在 `xn/dist/xn.<triple>.{release,tuned}.bin`，每个
+build job 成功后都把它传到**私有上游仓库的固定 prerelease `xn-ci`**（`gh release upload
+--clobber`，单 tag 不累积），所以任何一轮构建完成后都能用 `compare=only` 单独补对比。
+`pgo.compare` 是一个独立 job，从 `xn-ci` 取回这两份 bin 交给 [`compare.sh`](compare.sh)，
+后者再摆成上游 `build-tuned` 的 run 目录，交给上游
+`scripts/test/pgo/compare-ci.sh --no-build`：
 
 ```text
 target/tune/prebuilt-<UTC>/02-optimize/xn.control  ← 普通包里的 xn（控制组）
@@ -267,6 +273,21 @@ target/tune/prebuilt-<UTC>/02-optimize/xn.tuned    ← tuned 包里的 xn（优�
 `pgo.compare.size` 只比大小。报告落在上游 checkout 的 `target/pgo/`、`target/test-runs/`，
 workflow 打包成 `compare-<triple>.tar.gz` 传到 `xn-ci` release（报告里有私有符号名，
 不进 public artifact）。
+
+手动 dispatch 的 `compare` 下拉：
+
+| 取值 | 行为 |
+| --- | --- |
+| `false`（默认） | 不跑 compare |
+| `true` | 本轮两档构建都成功（或命中已构建标记、skipped）后跑；skipped 的档用 `xn-ci` 里上次的 bin，bin 不全就报错（`force=true` 重编那一档） |
+| `only` | **完全跳过构建**，直接用 `xn-ci` 里现成的 bin 单独跑；`target=all` 时只跑 bin 齐的那档，点名单个平台却缺 bin 会在 `check` 里直接报错 |
+
+`compare=only` 适合构建已经完成、当时却没开 compare 的场景，或单纯想重跑一次 A/B。
+注意它用的是 `xn-ci` 里**最近一次上传**的 bin，不一定对应当前 `main` 的 SHA；要保证
+bin 和源码对得上，先跑一轮 `compare=true`（或 `force=true`）。`compare=true` 时某一档
+如果因为已构建标记跳过，就直接用它上次传的 bin（同一 SHA）；bin 上传失败时会把同名
+旧 bin 删掉，避免 compare 误用上一个 SHA 的 bin。上传失败只在 `compare=true` 时让
+build job 红（对比要靠它），其余时候只告警、不影响发布。
 
 ```bash
 ./xn/build.sh                                   # 先编两档（产物 + bin 都在 xn/dist）
@@ -302,7 +323,7 @@ workflow 打包成 `compare-<triple>.tar.gz` 传到 `xn-ci` release（报告里�
   `last-report.md` 保持 eBPF 的结果。
 - `all` / `nightly` 按上游口径**不含 pgo**（`run --all` 会过滤掉 pgo 类目）；PGO
   构建 + `pgo.compare` 不在这个 workflow 里，入口是发布链路 `xn.yml` 的
-  `compare` 下拉。
+  `compare` 下拉（`true` 跟构建，`only` 用 `xn-ci` 现成 bin 单独跑）。
 - eBPF 步骤始终要求环境（root / docker / BTF）可用；缺环境直接失败而不是跳过。
 
 ## 与上游的关系

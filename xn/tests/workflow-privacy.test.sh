@@ -50,12 +50,17 @@ cache_paths="$(awk '
 ' "$wf")"
 cache_steps="${cache_paths##*#}"
 cache_paths="${cache_paths%#*}"
-check "只有 2 个 actions/cache 步骤（restore 标记 + save 标记）" test "$cache_steps" -eq 2
+# 5 个 build job：check 里各一次 lookup + job 成功后各存一次（标记按 job 分开）。
+check "10 个 actions/cache 步骤（5 restore + 5 save）" test "$cache_steps" -eq 10
+check "只有 check 做 restore（5 个）" \
+	test "$(grep -c 'uses: actions/cache/restore' "$wf")" -eq 5
+check "只有 build job 做 save（5 个）" \
+	test "$(grep -c 'uses: actions/cache/save' "$wf")" -eq 5
 check "cache 的 path 全是 .xn-built-sha（没有上游 checkout）" \
 	test "$(printf '%s\n' "$cache_paths" | sed '/^$/d' | grep -cv '^\.xn-built-sha$')" -eq 0
 absent "cache key 不带上游 SHA" 'key: xn-main-sha-'
-check "标记 key 用摘要：xn-built-<sha256>" \
-	grep -qF "key: xn-built-\${{" "$wf"
+check "标记 key 用摘要 + job 名：xn-built-<sha256>-<job>" \
+	grep -qF 'key: xn-built-${{ needs.check.outputs.cache_key }}-' "$wf"
 check "标记内容只写 built" \
 	grep -qF "printf 'built" "$wf"
 
