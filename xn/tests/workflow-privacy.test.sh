@@ -70,6 +70,24 @@ check "compare 从私有 release 取 bin" \
 check "build job 把 bin 传到私有 release" \
 	grep -qF 'gh release upload xn-ci' "$wf"
 
+printf '\n== 4) 镜像（docker job）也不把私有层/元数据放进 public 存储\n'
+# 只看真正的配置：文件头的注释会解释「为什么不用 type=gha / 不开 provenance」。
+stripped="$(mktemp)"
+trap 'rm -f "$stripped"' EXIT
+sed -E '/^[[:space:]]*#/d' "$wf" > "$stripped"
+no_code() { # no_code <描述> <必须不出现的字面串>
+	local what="$1" pat="$2"
+	if grep -qF -- "$pat" "$stripped"; then
+		printf '  FAIL %s（workflow 里还有：%s）\n' "$what" "$pat" >&2
+		fail=1
+	else
+		printf '  ok   %s\n' "$what"
+	fi
+}
+no_code "不用 buildx 的 gha 缓存（层就是私有编译产物）" 'type=gha'
+no_code "不打 provenance（attestation 会写 VCS 来源）" '--provenance=true'
+no_code "不把上游 revision 写进镜像标签" 'org.opencontainers.image.revision'
+
 if ((fail)); then
 	printf '\n失败：workflow 违反了「不缓存/不上传上游派生内容」的约束\n' >&2
 	exit 1

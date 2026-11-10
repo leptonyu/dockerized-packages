@@ -241,6 +241,15 @@ schedule 绑定：
   写本仓库的变量 `XN_LAST_MAIN_SHA`；只有 fine-grained（仅授 `leptonyu/xn`）时不行，这时
   可选配 **`XN_VARS_TOKEN`**（fine-grained，本仓库 **Variables: read/write**）。都不配也能跑，
   已构建标记走 `actions/cache`。
+  - fine-grained 的具体 scope（Repository access 只选 `leptonyu/xn`）：
+    **Contents: Read and write**（checkout、读 `Cargo.toml`、`gh release create/upload/delete-asset`
+    都靠它），**Metadata: Read**（自动带上）。**不需要** Actions / Workflows / Packages / Variables。
+    classic PAT 用 `repo` scope 即可。
+  - `docker` job 只 checkout 上游（`contents: read` 就够），**复用同一个 `XN_REPO_TOKEN`**，
+    不用新 secret；ghcr 推送走本仓库的 `GITHUB_TOKEN`（`packages: write`），跟上游 token 无关。
+  - token **不会**传进镜像构建（checkout 是 `persist-credentials: false`，也没有 `--secret` /
+    `--build-arg`）：如果上游 Dockerfile 里自己 `git clone` 私库，会 403；那种情况要么改成用
+    context 里的源码，要么用 buildkit secret（`--secret id=…`），**别塞 build-arg**（会留在镜像历史里）。
 - 默认**不加** cargo features；需要时在手动触发的 `features` 输入或本地 `build.sh --features quic` 里加。
 - **没有 public artifact**：构建产物（`xn/dist/*.tar.xz` / `*.sha256sum` / `*.bin`）不再
   `upload-artifact` —— 本仓库 public，artifact 对所有人可下载，而这些是私有上游的产物。
@@ -252,7 +261,97 @@ schedule 绑定：
   tuned 包 / trace / 校验和各自的用途），`gh release edit --notes` 覆盖。所以两个档位
   并发发到同一个 release、谁先建都行；老 tag 重传也会把说明补上。
 
+- **镜像发 ghcr.io**：普通档编完后，`docker` job 用**上游自带的运行镜像** `Dockerfile` /
+  `Dockerfile.armv7` 构建 amd64 + arm/v7 两档镜像（两档的二进制都**直接取自发布包**，
+  不再现编），按 digest 推到 `ghcr.io/leptonyu/xn`，再合并成一个
+  多架构 manifest（`v<version>`，两档齐了才加 `latest`）。镜像同样属于私有产物：ghcr 包
+  保持 private、不用 buildx 缓存、不打 provenance。见下节「容器镜像」。
+
 `xn` workflow 与 DNS/network 的每日 release 相互独立；它失败不会撤回其它 workflow 的资产。
+
+## 容器镜像（ghcr.io）
+
+`xn.yml` 里 `docker` job 在普通档编完之后用**上游仓库自带的运行镜像**出镜像，推到
+`ghcr.io/leptonyu/xn`：
+
+| 平台 | Dockerfile | `FROM` | buildx `--platform` | 二进制来源 |
+| --- | --- | --- | --- | --- |
+| amd64 | `Dockerfile` | `debian:trixie-slim`（glibc） | `linux/amd64` | 发布包 `xn.x86_64-unknown-linux-gnu.tar.xz` |
+| armv7 | `Dockerfile.armv7` | `arm32v7/debian:trixie-slim` | `linux/arm/v7` | 发布包 `xn.armv7-unknown-linux-musleabihf.tar.xz`（musl 静态） |
+
+两个 Dockerfile 都是**运行镜像**（只 `COPY` 产物、不编译），`COPY` 的路径由上游定死：
+`target/<triple>/release/xn`、`target/THIRD-PARTY-NOTICES.txt`、`entry.sh`、`LICENSE`，
+x86 那份还要 `dlc.dat.xz`。所以 `docker` job 先把这些摆进上游 checkout 再 build：
+
+- **amd64**：`gh release download` 取发布包（校验 `.sha256sum`），解出 `xn` 与
+  `THIRD-PARTY-NOTICES.txt` —— 镜像里的二进制与 release **逐字节一致**。
+- **armv7**：同样从发布包取（校验 `.sha256sum`），用的是 `musleabihf` 的 **musl 静态**
+  二进制，镜像 job 里**不再另编 gnu 档**。`Dockerfile.armv7` 里 `COPY` 的路径写的是
+  `target/armv7-unknown-linux-gnueabihf/release/xn` —— 那只是个 COPY 路径，musl 静态
+  二进制在 `arm32v7/debian` 上照样跑。
+  **代价**：musl 分配器在高 churn 下只涨不还（上游 `docs/datapath-perf.md §2.30`，当年
+  正是因为它在容器里 OOM 才把镜像换成 glibc）；要换回去就把这一步改成
+  `release.sh --target armv7-unknown-linux-gnueabihf`（多一次交叉编译）。
+- **`dlc.dat.xz`**：优先按上游 `scripts/test/fixtures.lock.toml` 的 `[dlc]` 钉的
+  dockerized-packages release 制品取，并校验 sha256；那个 tag 会被本仓库的
+  `delete-releases.yml` 按保留策略删掉（取不到 404），所以取不到 / 校验不过时退回
+  dockerized-packages 最新 release（与运行时默认同一源），并打一条 `::warning::`。
+
+发布方式：
+
+- **两档各按 digest 推，最后合并**：每个平台 `buildx build --output
+  type=image,push-by-digest=true`，只留 digest；再 `docker buildx imagetools create`
+  合成一个 manifest，打 `v<版本>`（版本仍取上游 `Cargo.toml`，与 release tag 一致；手动
+  指定 `tag` 输入时用那个 tag），**两档都在时**才额外打 `latest`。所以同一个 tag 下
+  `linux/amd64` / `linux/arm/v7` 是两个 entry，ghcr 里不会堆 `-amd64` / `-armv7` 中间 tag。
+- **只在「本轮真的编了普通档」时推**：`needs` 是 `check` + `linux-x86_64` + `linux-armv7`；
+  两档都 skipped（已构建标记命中）或 `compare=only` 不跑。要重推已发布版本的镜像，
+  手动 dispatch `force=true`。
+- **普通档有失败就整档不推**：宁可这轮没有镜像，也不把「只有一半」的 manifest 盖到
+  已发布的 `v<版本>` / `latest` 上。
+- `target=all`（默认）时两档都建 —— 哪怕其中一档这轮被标记跳过（两档都是「从发布包取
+  二进制」，不依赖本轮产物）—— 保证 manifest 完整；`target` 只点名一个平台时只推那一档。
+- armv7 那档要 QEMU/binfmt（`docker/setup-qemu-action` 装 `arm`），镜像本身不编译，
+  装 binfmt 只是为了展开 arm32 的层；整个 job 不再装编译依赖，`timeout-minutes: 60`。
+
+**私有产物**（和 cache / artifact 同一条底线）：镜像是私有上游编出来的 xn，所以
+
+- ghcr 包**必须保持 private**（新建默认就是 private）；job 末尾用
+  `gh api /user/packages/container/xn` 查一次可见性，`public` 打 `::warning::`。
+  workflow 只查不改 —— 要改可见性去包的设置页。
+- 不用 buildx 缓存（`type=gha` 的层就是私有源码的编译产物），不跨 run 复用；
+- 不开 provenance / sbom（attestation 会写 VCS 来源 = 上游仓库和提交 SHA），也不写
+  `org.opencontainers.image.revision`；
+- 推送只用 `secrets.GITHUB_TOKEN` + `packages: write`，不需要额外的 PAT（也不需要上游 token
+  带 Packages 权限）；checkout 上游仍复用 `XN_REPO_TOKEN`（这一档只要 `contents: read`），
+  token 不会进镜像构建。
+- 万一推送 403（`denied: permission_denied`）：通常不是 token scope 的问题，而是包 `xn`
+  已经存在且**没链接到本仓库**（比如早先由上游仓库自己的 CI 建过）——在包设置里给
+  `leptonyu/dockerized-packages` 加 Write，或者改用带 **Packages: write** 的 PAT
+  （那会是另一个 secret，不是 `XN_REPO_TOKEN`）。
+
+本地复现（需要有 `leptonyu/xn` 读权限的 token）：
+
+```bash
+# 上游 checkout（任意目录）
+SRC=~/src/xn
+
+# 从发布包解出二进制和 notices，摆到两个 Dockerfile 要的位置
+tar -xJf xn.x86_64-unknown-linux-gnu.tar.xz -C /tmp/pkg-x86
+tar -xJf xn.armv7-unknown-linux-musleabihf.tar.xz -C /tmp/pkg-arm
+mkdir -p "$SRC/target/x86_64-unknown-linux-gnu/release" "$SRC/target/armv7-unknown-linux-gnueabihf/release"
+cp /tmp/pkg-x86/xn "$SRC/target/x86_64-unknown-linux-gnu/release/xn"
+cp /tmp/pkg-arm/xn "$SRC/target/armv7-unknown-linux-gnueabihf/release/xn"
+chmod 0755 "$SRC/target/x86_64-unknown-linux-gnu/release/xn" "$SRC/target/armv7-unknown-linux-gnueabihf/release/xn"
+cp /tmp/pkg-x86/THIRD-PARTY-NOTICES.txt "$SRC/target/THIRD-PARTY-NOTICES.txt"
+# dlc.dat.xz 放到 $SRC/dlc.dat.xz（按 fixtures.lock.toml 的 [dlc] 取）
+
+# amd64
+docker buildx build --file "$SRC/Dockerfile" --platform linux/amd64 "$SRC"
+# armv7（amd64 机器上要先装 binfmt）
+docker run --privileged --rm tonistiigi/binfmt --install arm
+docker buildx build --file "$SRC/Dockerfile.armv7" --platform linux/arm/v7 "$SRC"
+```
 
 ## 对比测试（pgo.compare）
 
