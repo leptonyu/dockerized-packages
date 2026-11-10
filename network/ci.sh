@@ -9,8 +9,9 @@
 #   CIDR=$(command -v cidr) SCANNERS_TARBALL=/tmp/internet-scanners.tar.gz ./network/ci.sh
 #
 # 下载规则：
-#   - 配了 XN_REPO_TOKEN（CI 就是这种）：gh release download 拉最新 release，
-#     不传 tag，等价于 latest；
+#   - 配了 XN_REPO_TOKEN（CI 就是这种）：先列 $XN_REPO 的正式 release，挑**最新一个真的
+#     带 $CIDR_ASSET 的** tag，再 gh release download（不是 gh 的「不传 tag = latest」，
+#     见 fetch_cidr_gh 的注释）；CIDR_TAG 可以钉死某个 tag；
 #   - 没配 token（公开仓库）：curl GitHub 的 latest 地址
 #     https://github.com/<XN_REPO>/releases/latest/download/<asset>；
 #   - 私有仓库的网页下载地址
@@ -87,18 +88,47 @@ fetch_cidr_url() {
 }
 
 # 配了 token：gh release download 走 GitHub API（私有仓库下载资产的唯一可靠方式）。
-# 不传 tag 就是最新 release，等价于 latest。
+#
+# **不用** gh 的「不传 tag = latest」：GitHub 的 /releases/latest 只看「最近发布的正式
+# release」，而上游仓库里经常有「建了但资产没传全」的一版（某一档上传失败，或先建 release
+# 再补资产）。按 latest 下会直接 `no assets to download`。这里显式按 GitHub 返回顺序
+# （新的在前）找**第一个真的带 $CIDR_ASSET 的正式 release**；CIDR_TAG 给了就用它。
+gh_releases() { # 打印 "<tag><TAB><资产名逗号分隔>"，新的在前；不含 draft / prerelease
+	env "GH_TOKEN=$XN_REPO_TOKEN" gh api "repos/$XN_REPO/releases?per_page=50" \
+		--jq '.[] | select(.draft | not) | select(.prerelease | not)
+		      | [.tag_name, ([.assets[].name] | join(","))] | @tsv'
+}
+
+pick_release_tag() { # <asset>：能下载到该资产的最新正式 release tag（没有就空）
+	local asset="$1" tag names
+	gh_releases | while IFS="$(printf '\t')" read -r tag names; do
+		case ",$names," in
+			*",$asset,"*) printf '%s\n' "$tag"; break ;;
+		esac
+	done
+}
+
 fetch_cidr_gh() {
-	local dir="$1" archive="$2" gh_cmd=(env "GH_TOKEN=$XN_REPO_TOKEN" gh) args=(release download)
+	local dir="$1" archive="$2" tag="$CIDR_TAG"
 
 	command -v gh >/dev/null 2>&1 ||
 		die "下载私有 release 需要 gh CLI（ubuntu-latest 自带）；或者用 CIDR=/path/to/cidr 指定"
-	[ -n "$CIDR_TAG" ] && args+=("$CIDR_TAG")
-	args+=(--repo "$XN_REPO" --pattern "$CIDR_ASSET" --dir "$dir" --clobber)
+	if [ -z "$tag" ]; then
+		tag="$(pick_release_tag "$CIDR_ASSET")" ||
+			die "列 $XN_REPO 的 release 失败（XN_REPO_TOKEN 有读权限吗？）"
+	fi
+	if [ -z "$tag" ]; then
+		{
+			echo "ci.sh: $XN_REPO 最近的正式 release（tag 资产）："
+			gh_releases | head -10 | tr '\t' ' ' || true
+		} >&2
+		die "没有哪个正式 release 带 ${CIDR_ASSET}：先跑一轮 xn 普通档构建，或用 CIDR_TAG= 指定 tag"
+	fi
 
-	echo "ci.sh: gh release download ${CIDR_TAG:-latest} ${CIDR_ASSET}（${XN_REPO}）..." >&2
-	"${gh_cmd[@]}" "${args[@]}" ||
-		die "下载普通包失败：确认 $XN_REPO 的 release 里有 ${CIDR_ASSET}（私有仓库需要 XN_REPO_TOKEN）"
+	echo "ci.sh: gh release download ${tag} ${CIDR_ASSET}（${XN_REPO}）..." >&2
+	env "GH_TOKEN=$XN_REPO_TOKEN" gh release download "$tag" \
+		--repo "$XN_REPO" --pattern "$CIDR_ASSET" --dir "$dir" --clobber ||
+		die "下载普通包失败：${XN_REPO}@${tag} 里的 ${CIDR_ASSET}（私有仓库需要 XN_REPO_TOKEN）"
 	[ -f "$archive" ] || die "gh 没有把 $CIDR_ASSET 下到 $dir"
 }
 

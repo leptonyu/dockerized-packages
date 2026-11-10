@@ -203,6 +203,8 @@ check "普通包也有自己的 .sha256sum" test -f "$state/remote/xn.$target.ta
 check "校验和最后传（tuned 然后 trace）" test "$(grep 'release upload' "$state/calls.log" | awk '{print $NF}' | tail -2 | while read -r p; do basename "$p"; done | tr '\n' ' ')" = "xn.$target.tuned.tar.xz.sha256sum xn.$target.tuned.trace.tar.xz.sha256sum "
 check "release 说明刷新，含普通包" grep -q "xn.$target.tar.xz" "$state/edits.log"
 check "release 说明含 tuned 包和 trace" test "$(grep -c 'tuned' "$state/edits.log")" -ge 1
+# latest 只在资产自检通过后才钉（空壳 release 不该抢走 latest）
+check "发布成功后把 latest 钉到这一版（--latest）" grep -q -- '--latest' "$state/edits.log"
 
 # ---------------------------------------------------------------- 5) 两步发布
 printf '== 5) 两步发布：先普通包，再 tuned（同一个 release）\n'
@@ -228,6 +230,7 @@ check "tuned 包和 trace 都在" test -f "$state/remote/xn.$target.tuned.tar.xz
 printf '== 6) dry-run / help\n'
 check "dry-run 退出码 0" bash "$build" --dry-run
 check "dry-run 打印上传计划" bash -c "bash '$build' --dry-run --publish 2>&1 | grep -q 'gh release create/upload'"
+check "dry-run 打印 latest 刷新" bash -c "bash '$build' --dry-run --publish 2>&1 | grep -q -- '--latest'"
 check "help 退出码 0" bash "$build" --help
 
 if ((fail)); then

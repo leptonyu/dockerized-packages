@@ -93,10 +93,16 @@ cidr 包**：`ci.sh` 从 xn 的**最新 release**（不钉版本）下载**普�
 
 | 条件 | 下载方式 |
 | --- | --- |
-| 配了 `XN_REPO_TOKEN`（CI） | `gh release download`（走 GitHub API，不传 tag = 最新 release） |
+| 配了 `XN_REPO_TOKEN`（CI） | 先 `gh api` 列正式 release，挑**最新一个真的带这个包的** tag，再 `gh release download <tag>` |
 | 没配 token（公开仓库） | `curl` GitHub 的 latest 地址：`https://github.com/leptonyu/xn/releases/latest/download/xn.x86_64-unknown-linux-gnu.tar.xz` |
 | 配了 `CIDR_URL` | 直接 `curl` 这个地址（镜像 / 固定 tag / 私有镜像） |
 
+> 不直接用 `gh release download` 的「不传 tag = latest」：release 是**先建后传资产**的，
+> 某一轮建了 release 但资产没传全（构建失败 / 上传 502）时，GitHub 算出来的 latest 就是
+> 那个空壳，只会得到 `no assets to download`。`ci.sh` 因此按时间倒序找第一个带
+> `CIDR_ASSET` 的正式 release（`xn/build.sh` 发布成功后也会 `gh release edit --latest`
+> 把 latest 钉到资产齐全的那一版）。找不到时会连 tag + 资产列表一起打出来。
+>
 > 私有仓库的 release 资产不能走网页下载地址（`releases/download/<tag>/<asset>`），
 > 带 `Authorization` 也是 404；必须走 API，所以 CI 里用 `gh`。
 > 另外 “latest” 的正确路径顺序是 `releases/latest/download/<asset>`，
@@ -110,7 +116,7 @@ cidr 包**：`ci.sh` 从 xn 的**最新 release**（不钉版本）下载**普�
 | `CIDR` | 空（走下载） | 已有 cidr 的路径或命令名，设置后不再下载 |
 | `XN_REPO` | `leptonyu/xn` | release 所在仓库 |
 | `CIDR_ASSET` | `xn.x86_64-unknown-linux-gnu.tar.xz` | release 里含 cidr 的那个包里（默认普通包） |
-| `CIDR_TAG` | 空（最新 release） | 钉到某个 tag，例如 `v6.0.0` |
+| `CIDR_TAG` | 空（自动挑） | 钉到某个 tag，例如 `v6.0.0`；空 = 按时间倒序找第一个带 `CIDR_ASSET` 的正式 release |
 | `CIDR_URL` | 空 | 显式下载地址；设置后用它 curl，不再走 gh |
 | `XN_REPO_TOKEN` | 空 | xn 是私有仓库，下载 release 资产用；和 xn 构建共用同一个 secret，只读即可 |
 | `CIDR_SHA256` | 空 | 固定包的 sha256，设置后下载完先校验 |

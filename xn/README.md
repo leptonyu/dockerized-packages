@@ -248,9 +248,12 @@ schedule 绑定：
 - 发布上传逐资产 + 自动重试（见上），GitHub 偶发的 502 不再让 job 停在
   「8 个资产传到一半」；每个 build job 成功后都会落自己的标记，最终失败的那档
   下一轮会重编重传。
-- **release 说明每次发布后自动刷新**：按 release 上**实际存在**的资产生成（普通包 /
-  tuned 包 / trace / 校验和各自的用途），`gh release edit --notes` 覆盖。所以两个档位
-  并发发到同一个 release、谁先建都行；老 tag 重传也会把说明补上。
+- **release 说明每次发布后自动刷新，并把 latest 钉到这一版**：按 release 上**实际存在**的
+  资产生成（普通包 / tuned 包 / trace / 校验和各自的用途），`gh release edit --notes --latest`
+  覆盖。所以两个档位并发发到同一个 release、谁先建都行；老 tag 重传也会把说明补上。
+  `--latest` 只在**资产自检通过之后**才设置：release 是先建后传资产的，某一轮建了 release
+  但资产没传全（构建失败 / 上传 502）时，GitHub 默认算出来的 latest 会是那个空壳，
+  靠 latest 下载普通包的消费方（`network/ci.sh`、镜像）就会 `no assets to download`。
 
 `xn` workflow 与 DNS/network 的每日 release 相互独立；它失败不会撤回其它 workflow 的资产。
 

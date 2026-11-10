@@ -477,6 +477,7 @@ print_plan() {
 		else
 			printf '+ gh release create/upload v<Cargo.toml version> --repo %q --clobber <包 + 各自的 .sha256sum>\n' "$release_repo"
 		fi
+		printf '+ gh release edit <tag> --latest（资产自检通过后把 latest 钉到这一版）\n'
 	fi
 }
 if $dry_run; then
@@ -831,8 +832,13 @@ refresh_release_notes() {
 	body+="$(printf '%s\n' "$names" | release_notes_from)"
 	body+=$'\n'
 	body+="每个包配一个同名 \`.sha256sum\`：\`shasum -a 256 -c <asset>.sha256sum\`。"
-	retry "更新 release 说明" gh release edit "$tag" --repo "$release_repo" --notes "$body" >/dev/null ||
-		warn "release 说明没更新（不影响资产）"
+	# `--latest`：把「latest release」钉到这一版。GitHub 默认按 created_at 取最新的正式
+	# release，而 release 是**先建后传资产**的：某一轮建了 release、资产却没传全（构建失败 /
+	# 上传 502），latest 就指向那个空壳，靠 latest 下载普通包的消费方（network/ci.sh、
+	# docker 镜像）会直接 `no assets to download`。所以资产自检通过之后才把 latest 挪过来。
+	retry "更新 release 说明与 latest" gh release edit "$tag" --repo "$release_repo" \
+		--notes "$body" --latest >/dev/null ||
+		warn "release 说明 / latest 没更新（不影响资产）"
 }
 
 # 逐个资产上传：一个文件 502 不该让后面的（尤其是排在最后的 .sha256sum）传不上去，
