@@ -27,10 +27,12 @@ run-name: "发布 XN · ${{ inputs.target || 'all' }} · compare=${{ inputs.comp
 #         `compare-ci.sh --no-build`），不重编；skipped 的档用 xn-ci 里上次的 bin
 #         （同一 SHA；bin 不全就报错，`force=true` 重编）。macOS 的产物是 Mach-O，退
 #         `pgo.compare.size` 只比大小；armv7 交叉档没有同机 control / 采样，不跑。
-#   only  本轮完全不构建，直接用 `xn-ci` 里现成的 bin 单独跑 compare（target=all 时只跑
-#         bin 齐的那档）。每个 build job 成功后都会把 bin 传上 `xn-ci`，所以任何一轮
-#         构建完成后都能单独补对比；给已经构建过的 SHA 补对比、或重跑 A/B 时用这个。
-# bin 和对比报告都经私有上游仓库的固定 prerelease `xn-ci` 中转（单 tag，`--clobber` 覆盖，不累积）。
+#   only  本轮完全不构建，直接从已发布的 `v<version>` release 里取普通 / tuned 两档
+#         runtime 包，用 `xn/fetch-bin.sh` 解出 xn 再跑 compare（target=all 时只跑包
+#         齐的那档；点名单个平台却缺包会直接报错）。给已经构建过（`xn-ci` 里没 bin）
+#         的 SHA 补对比、或重跑 A/B 时用这个；发布包在，就不依赖本轮构建。
+# compare=true 的 bin 和对比报告仍经私有上游仓库的固定 prerelease `xn-ci` 中转
+# （单 tag，`--clobber` 覆盖，不累积）；compare=only 的 bin 直接来自发布包。
 #
 # **记账只看普通档**：x86_64 / armv7 / macOS 三个普通 job 都是 success 或 skipped
 # （skipped = 之前已编过）才写 `XN_LAST_MAIN_SHA`（tuned 不参与，失败了也不会把整轮判死）。
@@ -44,7 +46,8 @@ run-name: "发布 XN · ${{ inputs.target || 'all' }} · compare=${{ inputs.comp
 #     固定字符串 —— key/内容里都不出现上游 SHA 或源码。check 据此识别哪些子任务已经
 #     完成并跳过，只编缺的那些（非 main ref / force=true 时忽略标记，一律重编）。
 # **artifact 同理**：public 仓库的 artifact 对所有人可下载，所以构建产物（tar.xz / .bin）
-# 一律不进 artifact，只发私有上游 release；compare 的 bin / 报告走 `xn-ci` prerelease。
+# 一律不进 artifact，只发私有上游 release；compare=true 的 bin / 报告走 `xn-ci` prerelease，
+# compare=only 则从已发布的 runtime 包解出 bin，同样不落 public 存储。
 # 新增 cache / artifact 时先问：这东西是不是从 leptonyu/xn 来的？
 #
 # 触发：每小时检查上游 main SHA；每个 build job 成功后写自己的 `xn-built-<sha256>-<job>`
@@ -82,7 +85,7 @@ on:
       compare:
         description: >-
           false=不跑 pgo.compare | true=构建后拿本轮普通 bin vs PGO bin 跑（不重编；macOS
-          只比尺寸；armv7 不跑） | only=完全不构建，直接用 xn-ci 里现成的 bin 单独跑
+          只比尺寸；armv7 不跑） | only=完全不构建，直接用已发布 runtime 包里的 bin 单独跑
         type: choice
         required: true
         default: "false"
@@ -122,7 +125,8 @@ jobs:
       target: ${{ steps.target.outputs.target }}
       cache_key: ${{ steps.marker.outputs.key }}
       changed: ${{ steps.decide.outputs.changed }}
-      # compare=only 时用：xn-ci 里哪一档的 bin 齐（普通 + tuned 都在）
+      # compare=only 时用：从已发布的 runtime 包取 bin 的 release tag
+      release_tag: ${{ steps.release.outputs.tag }}
       bins_x86_64: ${{ steps.bins.outputs.x86_64 }}
       bins_macos: ${{ steps.bins.outputs.macos }}
       # 每个 build job 单独决策：已完成的跳过，只编缺的（见「Decide which builds to run」）
@@ -146,10 +150,10 @@ jobs:
             echo "::error::XN_REPO_TOKEN 对 leptonyu/xn 没有写权限；创建/更新 v<version> release 需要 contents:write"
             exit 1
           fi
-      - name: Prepare private CI release（bin 中转）
-        # public 仓库的 artifact 不能承载私有上游的产物。构建出的 bin / 对比报告改走
-        # 私有上游仓库里**一个固定 prerelease** `xn-ci`：每次 --clobber 覆盖，不会越积越多。
-        # 每轮构建的 build job 都会把 bin 传上去（compare=only 不必等本轮构建）。
+      - name: Prepare private CI release（compare=true 的 bin / 报告中转）
+        # public 仓库的 artifact 不能承载私有上游的产物。compare=true 的 bin / 对比报告
+        # 走私有上游仓库里**一个固定 prerelease** `xn-ci`：每次 --clobber 覆盖，不会越积越多。
+        # compare=only 不靠它取 bin（直接从发布包解），但报告归档仍需要这个 release 存在。
         env:
           GH_TOKEN: ${{ secrets.XN_REPO_TOKEN }}
         run: |
@@ -186,6 +190,46 @@ jobs:
             echo "sha=$sha"
             echo "ref=$ref"
           } >> "$GITHUB_OUTPUT"
+      - name: Resolve release tag（compare=only 从发布包取 bin）
+        id: release
+        if: ${{ inputs.compare == 'only' }}
+        env:
+          GH_TOKEN: ${{ secrets.XN_REPO_TOKEN }}
+          SHA: ${{ steps.resolve.outputs.sha }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          tag="${INPUT_TAG:-}"
+          if [ -z "$tag" ]; then
+            # 和 xn/fetch-bin.sh 一样从上游 Cargo.toml 读版本（workspace.package 优先）；
+            # check 没有 checkout 上游，这里直接走 contents API 取原文。
+            toml="$(gh api "repos/leptonyu/xn/contents/Cargo.toml?ref=$SHA" \
+              -H "Accept: application/vnd.github.raw")" || {
+              echo "::error::取不到上游 Cargo.toml（用 tag 输入显式指定发布 tag）"
+              exit 1
+            }
+            cargo_version() { # $1 = workspace.package | package
+              printf '%s\n' "$toml" | awk -v want="$1" '
+                $0 == "[" want "]" { in_section = 1; next }
+                in_section && /^\[/ { exit }
+                in_section && /^[[:space:]]*version[[:space:]]*=/ {
+                  line = $0
+                  sub(/^[^=]*=[[:space:]]*/, "", line)
+                  gsub(/["[:space:]]/, "", line)
+                  print line
+                  exit
+                }
+              '
+            }
+            version="$(cargo_version workspace.package)"
+            [ -n "$version" ] || version="$(cargo_version package)"
+            [ -n "$version" ] || {
+              echo "::error::读不到上游 Cargo.toml 的版本，无法定位发布包；用 tag 输入显式指定"
+              exit 1
+            }
+            tag="v$version"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
       - name: Derive marker key
         id: marker
         env:
@@ -279,7 +323,7 @@ jobs:
 
           build_x86_64=false build_x86_64_tuned=false build_armv7=false
           build_macos=false build_macos_tuned=false
-          # compare=only：本轮不构建，直接用 xn-ci 里现成的 bin 跑 pgo.compare。
+          # compare=only：本轮不构建，compare job 直接从发布包取 bin 跑 pgo.compare。
           if [ "$COMPARE" != "only" ]; then
             build_x86_64=$(need x86_64-linux-gnu "$built_x86_64")
             build_x86_64_tuned=$(need x86_64-linux-gnu "$built_x86_64_tuned")
@@ -322,27 +366,27 @@ jobs:
             echo "- compare: \`$COMPARE\`"
             echo "- 要编：\`${list:-无（已构建的跳过 / compare=only）}\`"
           } >> "$GITHUB_STEP_SUMMARY"
-      - name: 清点 compare 用的 bin（xn-ci）
+      - name: 清点 compare 用的发布包（compare=only）
         id: bins
         if: ${{ inputs.compare == 'only' }}
         env:
           GH_TOKEN: ${{ secrets.XN_REPO_TOKEN }}
-          COMPARE: ${{ inputs.compare || 'false' }}
           TARGET: ${{ steps.target.outputs.target }}
+          TAG: ${{ steps.release.outputs.tag }}
         run: |
           set -euo pipefail
-          # xn-ci 是固定 prerelease。compare=only 不重编，直接用里面现成的 bin；
-          # 这里先清点哪一档的 bin 齐（普通 + tuned 各一份），compare job 只跑齐的那档。
-          assets="$(gh release view xn-ci --repo leptonyu/xn --json assets --jq '.assets[].name' 2>/dev/null || true)"
+          # compare=only 不重编，也不要求 xn-ci 里有 bin：直接从发布 tag 的 runtime 包取。
+          # 这里只清点哪一档的普通 + tuned 包都在，compare job 只跑齐的那档。
+          assets="$(gh release view "$TAG" --repo leptonyu/xn --json assets --jq '.assets[].name' 2>/dev/null || true)"
           has() { grep -qxF -- "$1" <<<"$assets"; }
           x86_64=false
           macos=false
-          if has xn.x86_64-unknown-linux-gnu.release.bin &&
-             has xn.x86_64-unknown-linux-gnu.tuned.bin; then
+          if has "xn.x86_64-unknown-linux-gnu.tar.xz" &&
+             has "xn.x86_64-unknown-linux-gnu.tuned.tar.xz"; then
             x86_64=true
           fi
-          if has xn.aarch64-apple-darwin.release.bin &&
-             has xn.aarch64-apple-darwin.tuned.bin; then
+          if has "xn.aarch64-apple-darwin.tar.xz" &&
+             has "xn.aarch64-apple-darwin.tuned.tar.xz"; then
             macos=true
           fi
           {
@@ -351,38 +395,50 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
           target="${TARGET:-all}"
+          if [ "$target" = "armv7-linux-musleabihf" ]; then
+            echo "::notice::armv7-linux-musleabihf 是交叉目标，没有同机 control / 采样；compare=only 不跑 pgo.compare"
+            {
+              echo "### compare 源（发布包）"
+              echo "- tag: \`$TAG\`"
+              echo "- armv7：不适用（交叉目标，没有同机 control / 采样）"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           want_x86=false
           want_macos=false
           case "$target" in all|x86_64-linux-gnu) want_x86=true ;; esac
           case "$target" in all|aarch64-macos) want_macos=true ;; esac
-          if [ "$COMPARE" = "only" ]; then
-            missing=""
-            if [ "$want_x86" = "true" ] && [ "$x86_64" != "true" ]; then
-              missing="x86_64"
-            fi
-            if [ "$want_macos" = "true" ] && [ "$macos" != "true" ]; then
-              missing="${missing:+$missing、}macOS"
-            fi
-            # 明确点名了单个平台却缺 bin：直接报错，别让这一轮默默什么都不跑。
-            if [ -n "$missing" ] && [ "$target" != "all" ]; then
-              echo "::error::xn-ci 里没有完整的 ${missing} bin（普通 + tuned）；compare=only 不重编，先跑一轮 compare=true（或 force=true）把 bin 传上去"
-              exit 1
-            fi
-            if [ "$x86_64" != "true" ] && [ "$macos" != "true" ]; then
-              echo "::error::xn-ci 里一组 bin 都没有，compare=only 无从跑起；先跑一轮构建"
-              exit 1
-            fi
-            if [ "$x86_64" != "true" ]; then
-              echo "::warning::xn-ci 里没有完整的 x86_64 bin；跳过这一档 compare"
-            fi
-            if [ "$macos" != "true" ]; then
-              echo "::warning::xn-ci 里没有完整的 macOS bin；跳过这一档 compare"
+          missing=""
+          if [ "$want_x86" = "true" ] && [ "$x86_64" != "true" ]; then
+            missing="x86_64"
+          fi
+          if [ "$want_macos" = "true" ] && [ "$macos" != "true" ]; then
+            if [ -n "$missing" ]; then
+              missing="${missing}、macOS"
+            else
+              missing="macOS"
             fi
           fi
+          # 明确点名了单个平台却缺包：直接报错，别让这一轮默默什么都不跑。
+          if [ -n "$missing" ] && [ "$target" != "all" ]; then
+            echo "::error::发布 $TAG 里没有完整的 ${missing} runtime 包（普通 + tuned）；compare=only 不重编，先跑一轮构建发布这个 tag，或用 tag 输入指定已有的发布"
+            exit 1
+          fi
+          if [ "$x86_64" != "true" ] && [ "$macos" != "true" ]; then
+            echo "::error::发布 $TAG 里一组 runtime 包都没有，compare=only 无从跑起；先跑一轮构建，或用 tag 输入指定已有的发布"
+            exit 1
+          fi
+          if [ "$x86_64" != "true" ]; then
+            echo "::warning::发布 $TAG 里没有完整的 x86_64 runtime 包；跳过这一档 compare"
+          fi
+          if [ "$macos" != "true" ]; then
+            echo "::warning::发布 $TAG 里没有完整的 macOS runtime 包；跳过这一档 compare"
+          fi
           {
-            echo "### compare 中转（xn-ci）"
-            echo "- x86_64 bin: \`$x86_64\`"
-            echo "- macOS bin: \`$macos\`"
+            echo "### compare 源（发布包）"
+            echo "- tag: \`$TAG\`"
+            echo "- x86_64 runtime 包: \`$x86_64\`"
+            echo "- macOS runtime 包: \`$macos\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
   # ---------------------------------------------------------------- x86_64
@@ -463,7 +519,7 @@ jobs:
           ./xn/build.sh "${args[@]}"
       - name: 上传 bin 到私有 release（compare 用）
         # 不放 public artifact：这里传的是私有上游的二进制。
-        # 每轮都传：compare=only 直接拿这里现成的 bin，不必和构建同一轮。
+        # 每轮都传：compare=true / 报告归档都靠 xn-ci；compare=only 不走这里。
         # compare=true 时上传失败会红（对比要靠它）；其余时候只警告，不连累发布。
         continue-on-error: ${{ inputs.compare != 'true' }}
         env:
@@ -595,7 +651,7 @@ jobs:
           ./xn/build.sh "${args[@]}"
       - name: 上传 bin 到私有 release（compare 用）
         # 不放 public artifact：这里传的是私有上游的二进制。
-        # 每轮都传：compare=only 直接拿这里现成的 bin，不必和构建同一轮。
+        # 每轮都传：compare=true / 报告归档都靠 xn-ci；compare=only 不走这里。
         # compare=true 时上传失败会红（对比要靠它）；其余时候只警告，不连累发布。
         continue-on-error: ${{ inputs.compare != 'true' }}
         env:
@@ -752,7 +808,7 @@ jobs:
           ./xn/build.sh "${args[@]}"
       - name: 上传 bin 到私有 release（compare 用）
         # 不放 public artifact：这里传的是私有上游的二进制。
-        # 每轮都传：compare=only 直接拿这里现成的 bin，不必和构建同一轮。
+        # 每轮都传：compare=true / 报告归档都靠 xn-ci；compare=only 不走这里。
         # compare=true 时上传失败会红（对比要靠它）；其余时候只警告，不连累发布。
         continue-on-error: ${{ inputs.compare != 'true' }}
         env:
@@ -846,7 +902,7 @@ jobs:
           ./xn/build.sh "${args[@]}"
       - name: 上传 bin 到私有 release（compare 用）
         # 不放 public artifact：这里传的是私有上游的二进制。
-        # 每轮都传：compare=only 直接拿这里现成的 bin，不必和构建同一轮。
+        # 每轮都传：compare=true / 报告归档都靠 xn-ci；compare=only 不走这里。
         # compare=true 时上传失败会红（对比要靠它）；其余时候只警告，不连累发布。
         continue-on-error: ${{ inputs.compare != 'true' }}
         env:
@@ -884,10 +940,10 @@ jobs:
   linux-compare:
     name: pgo.compare x86_64（不重编）
     # 普通 bin 和 tuned bin 分属两个 job，这里把两边的 bin 凑到一起再做同机 A/B；
-    # 中转走私有仓库的 `xn-ci` release（public artifact 不放私有产物）。
+    # public artifact 不放私有产物。
     #   compare=true：两档 build 都成功、或标记命中已构建（skipped）后跑；skipped 的档用
     #                 xn-ci 里上次传的 bin（同一 SHA；bin 不全会下载失败，用 force=true 重编）；
-    #   compare=only：不构建，用 xn-ci 里现成的 bin —— check 已确认这一档 bin 齐。
+    #   compare=only：不构建，从已发布 runtime 包解出 bin —— check 已确认这一档包齐。
     needs: [check, linux-x86_64, linux-x86_64-tuned]
     if: |
       always() &&
@@ -913,24 +969,30 @@ jobs:
           path: .cache/xn-src
           fetch-depth: 1
           persist-credentials: false
-      - name: 从私有 release 取两档的 bin
+      - name: 准备 compare 的 bin（only=发布包 / true=xn-ci）
         env:
           GH_TOKEN: ${{ secrets.XN_REPO_TOKEN }}
           COMPARE: ${{ inputs.compare }}
+          TAG: ${{ needs.check.outputs.release_tag }}
         run: |
           set -euo pipefail
-          if [ "$COMPARE" = "only" ]; then
-            echo "::notice::compare=only：用 xn-ci 里现成的 bin（可能是更早一轮的构建，不重编）"
-          fi
           mkdir -p xn/dist
-          gh release download xn-ci --repo leptonyu/xn \
-            --pattern 'xn.x86_64-unknown-linux-gnu.*.bin' --dir xn/dist --clobber || true
-          for f in xn.x86_64-unknown-linux-gnu.release.bin xn.x86_64-unknown-linux-gnu.tuned.bin; do
-            if [ ! -f "xn/dist/$f" ]; then
-              echo "::error::xn-ci 里缺 $f：compare=true 时某一档若是 skipped，说明它上次的 bin 不在中转 release；用 force=true 重编这一档，或先跑一轮构建"
-              exit 1
-            fi
-          done
+          if [ "$COMPARE" = "only" ]; then
+            echo "::notice::compare=only：从发布 $TAG 的 runtime 包解出两档 bin（不重编）"
+            ./xn/fetch-bin.sh \
+              --src "$GITHUB_WORKSPACE/.cache/xn-src" \
+              --target x86_64-unknown-linux-gnu \
+              --tag "$TAG"
+          else
+            gh release download xn-ci --repo leptonyu/xn \
+              --pattern 'xn.x86_64-unknown-linux-gnu.*.bin' --dir xn/dist --clobber || true
+            for f in xn.x86_64-unknown-linux-gnu.release.bin xn.x86_64-unknown-linux-gnu.tuned.bin; do
+              if [ ! -f "xn/dist/$f" ]; then
+                echo "::error::xn-ci 里缺 $f：compare=true 时某一档若是 skipped，说明它上次的 bin 不在中转 release；用 force=true 重编这一档，或先跑一轮构建"
+                exit 1
+              fi
+            done
+          fi
           ls -l xn/dist
       - name: Run pgo.compare（普通 bin vs PGO bin，不重编）
         run: |
@@ -964,7 +1026,7 @@ jobs:
     # macOS 产物是 Mach-O，Linux perf rig 跑不了：只比两个 bin 的大小，同样不重编。
     #   compare=true：两档 build 都成功、或标记命中已构建（skipped）后跑；skipped 的档用
     #                 xn-ci 里上次传的 bin（同一 SHA；bin 不全会下载失败，用 force=true 重编）；
-    #   compare=only：用 xn-ci 里现成的 bin。
+    #   compare=only：从已发布 runtime 包解出 bin，check 已确认这一档包齐。
     needs: [check, macos-aarch64, macos-aarch64-tuned]
     if: |
       always() &&
@@ -990,24 +1052,30 @@ jobs:
           path: .cache/xn-src
           fetch-depth: 1
           persist-credentials: false
-      - name: 从私有 release 取两档的 bin
+      - name: 准备 compare 的 bin（only=发布包 / true=xn-ci）
         env:
           GH_TOKEN: ${{ secrets.XN_REPO_TOKEN }}
           COMPARE: ${{ inputs.compare }}
+          TAG: ${{ needs.check.outputs.release_tag }}
         run: |
           set -euo pipefail
-          if [ "$COMPARE" = "only" ]; then
-            echo "::notice::compare=only：用 xn-ci 里现成的 bin（可能是更早一轮的构建，不重编）"
-          fi
           mkdir -p xn/dist
-          gh release download xn-ci --repo leptonyu/xn \
-            --pattern 'xn.aarch64-apple-darwin.*.bin' --dir xn/dist --clobber || true
-          for f in xn.aarch64-apple-darwin.release.bin xn.aarch64-apple-darwin.tuned.bin; do
-            if [ ! -f "xn/dist/$f" ]; then
-              echo "::error::xn-ci 里缺 $f：compare=true 时某一档若是 skipped，说明它上次的 bin 不在中转 release；用 force=true 重编这一档，或先跑一轮构建"
-              exit 1
-            fi
-          done
+          if [ "$COMPARE" = "only" ]; then
+            echo "::notice::compare=only：从发布 $TAG 的 runtime 包解出两档 bin（不重编）"
+            ./xn/fetch-bin.sh \
+              --src "$GITHUB_WORKSPACE/.cache/xn-src" \
+              --target aarch64-apple-darwin \
+              --tag "$TAG"
+          else
+            gh release download xn-ci --repo leptonyu/xn \
+              --pattern 'xn.aarch64-apple-darwin.*.bin' --dir xn/dist --clobber || true
+            for f in xn.aarch64-apple-darwin.release.bin xn.aarch64-apple-darwin.tuned.bin; do
+              if [ ! -f "xn/dist/$f" ]; then
+                echo "::error::xn-ci 里缺 $f：compare=true 时某一档若是 skipped，说明它上次的 bin 不在中转 release；用 force=true 重编这一档，或先跑一轮构建"
+                exit 1
+              fi
+            done
+          fi
           ls -l xn/dist
       - name: Run pgo.compare (size-only on macOS)
         run: |

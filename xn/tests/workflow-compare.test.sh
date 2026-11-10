@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 离线自测「发布 XN」workflow 的两条约定：
-#   1) pgo.compare 能单独跑（compare=only：不构建，直接用 xn-ci 里现成的 bin）；
+#   1) pgo.compare 能单独跑（compare=only：不构建，直接从已发布 runtime 包解出 bin）；
 #   2) check 按 build job 识别哪个子任务已经完成，跳过它、只编缺的那些。
 #
 #   ./xn/tests/workflow-compare.test.sh
@@ -30,12 +30,18 @@ has() { # has <描述> <必须出现的字面串>
 printf '== 1) compare 下拉支持 only（单独跑，不构建）\n'
 has "compare 有 only 选项" '- only'
 has "compare 描述说明 only 不构建" 'only=完全不构建'
+has "check 输出 release_tag" 'release_tag: ${{ steps.release.outputs.tag }}'
 has "check 输出 bins_x86_64" 'bins_x86_64: ${{ steps.bins.outputs.x86_64 }}'
 has "check 输出 bins_macos" 'bins_macos: ${{ steps.bins.outputs.macos }}'
-has "bins 从私有 release 清点" 'gh release view xn-ci'
-has "x86_64 compare 只跑 bin 齐的档" \
+has "only 从已发布 Cargo.toml 版本推 tag" 'tag="v$version"'
+has "bins 从发布包清点" 'gh release view "$TAG"'
+has "bins 检查普通 runtime 包" 'has "xn.x86_64-unknown-linux-gnu.tar.xz"'
+has "bins 检查 tuned runtime 包" 'has "xn.x86_64-unknown-linux-gnu.tuned.tar.xz"'
+has "compare=only 用 fetch-bin.sh 解包" './xn/fetch-bin.sh'
+has "compare=true 仍从 xn-ci 取 bin" 'gh release download xn-ci'
+has "x86_64 compare 只跑包齐的档" \
 	"inputs.compare == 'only' && needs.check.outputs.bins_x86_64 == 'true'"
-has "macOS compare 只跑 bin 齐的档" \
+has "macOS compare 只跑包齐的档" \
 	"inputs.compare == 'only' && needs.check.outputs.bins_macos == 'true'"
 has "compare=only 时 build job 不跑（decide 里不看标记直接全 false）" \
 	'if [ "$COMPARE" != "only" ]; then'

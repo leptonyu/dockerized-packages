@@ -217,9 +217,9 @@ schedule 绑定：
   `client_payload.sha` 可选；没有 dispatch 时最多晚一小时发现更新。
 - 默认跟踪 `main`；需要临时从别的分支构建时，用手动 `workflow_dispatch` 的 `ref` 输入。
 - 手动 `workflow_dispatch` 可覆盖 `ref`（默认 `main`）、`tag`（默认 `v<Cargo.toml version>`）、
-  `features`（默认空 = 不加 quic）、`compare`（`true` 跟本轮构建跑对比、`only` 不构建直接
-  用 `xn-ci` 现成 bin 跑），`force=true` 可强制重编。手动指定非 `main` 的 `ref` 不会
-  改写 `XN_LAST_MAIN_SHA`。
+  `features`（默认空 = 不加 quic）、`compare`（`true` 跟本轮构建跑对比、`only` 不构建，
+  直接从已发布 runtime 包解出 bin 跑），`force=true` 可强制重编。手动指定非 `main` 的
+  `ref` 不会改写 `XN_LAST_MAIN_SHA`。
 - 留空 `tag` 时直接读上游 `Cargo.toml` 的版本（`v<version>`）；release 不存在时由
   `build.sh` 新建，`--target` 是本次构建的上游 commit；存在时只追加资产。
 - `ubuntu-latest`；依赖分两段装，**普通包先发**：基础编译依赖（clang / bindgen /
@@ -256,12 +256,18 @@ schedule 绑定：
 
 ## 对比测试（pgo.compare）
 
-`build.sh` 会把两档的 xn 二进制留在 `xn/dist/xn.<triple>.{release,tuned}.bin`，每个
-build job 成功后都把它传到**私有上游仓库的固定 prerelease `xn-ci`**（`gh release upload
---clobber`，单 tag 不累积），所以任何一轮构建完成后都能用 `compare=only` 单独补对比。
-`pgo.compare` 是一个独立 job，从 `xn-ci` 取回这两份 bin 交给 [`compare.sh`](compare.sh)，
-后者再摆成上游 `build-tuned` 的 run 目录，交给上游
-`scripts/test/pgo/compare-ci.sh --no-build`：
+`build.sh` 会把两档的 xn 二进制留在 `xn/dist/xn.<triple>.{release,tuned}.bin`。`compare=true`
+时，每个 build job 成功后把这两份 bin 传到**私有上游仓库的固定 prerelease `xn-ci`**
+（`gh release upload --clobber`，单 tag 不累积），compare job 再从那里取回。
+
+`compare=only` 不依赖 `xn-ci`，也不需要本轮构建：它直接下载已发布 tag（默认
+`v<Cargo.toml version>`，可用 `tag` 输入覆盖）里的两档 runtime 包
+`xn.<triple>.tar.xz` / `xn.<triple>.tuned.tar.xz`，用 [`fetch-bin.sh`](fetch-bin.sh)
+解出 `xn`，写成 compare 认的 `xn.<triple>.{release,tuned}.bin`。所以只要发布包在，
+即使 `xn-ci` 里没有 bin（例如那一轮没开 compare，或 bin 上传失败）也能补对比。
+
+`pgo.compare` 是一个独立 job，把两份 bin 交给 [`compare.sh`](compare.sh)，后者再摆成上游
+`build-tuned` 的 run 目录，交给上游 `scripts/test/pgo/compare-ci.sh --no-build`：
 
 ```text
 target/tune/prebuilt-<UTC>/02-optimize/xn.control  ← 普通包里的 xn（控制组）
@@ -280,19 +286,24 @@ workflow 打包成 `compare-<triple>.tar.gz` 传到 `xn-ci` release（报告里�
 | --- | --- |
 | `false`（默认） | 不跑 compare |
 | `true` | 本轮两档构建都成功（或命中已构建标记、skipped）后跑；skipped 的档用 `xn-ci` 里上次的 bin，bin 不全就报错（`force=true` 重编那一档） |
-| `only` | **完全跳过构建**，直接用 `xn-ci` 里现成的 bin 单独跑；`target=all` 时只跑 bin 齐的那档，点名单个平台却缺 bin 会在 `check` 里直接报错 |
+| `only` | **完全跳过构建**，从已发布 `v<version>` 的两档 runtime 包解出 bin 单独跑；`target=all` 时只跑包齐的那档，点名单个平台却缺包会在 `check` 里直接报错 |
 
 `compare=only` 适合构建已经完成、当时却没开 compare 的场景，或单纯想重跑一次 A/B。
-注意它用的是 `xn-ci` 里**最近一次上传**的 bin，不一定对应当前 `main` 的 SHA；要保证
-bin 和源码对得上，先跑一轮 `compare=true`（或 `force=true`）。`compare=true` 时某一档
-如果因为已构建标记跳过，就直接用它上次传的 bin（同一 SHA）；bin 上传失败时会把同名
-旧 bin 删掉，避免 compare 误用上一个 SHA 的 bin。上传失败只在 `compare=true` 时让
-build job 红（对比要靠它），其余时候只告警、不影响发布。
+它用的是**发布 tag** 对应的 runtime 包；tag 默认由当前上游 SHA 的 `Cargo.toml` 版本推出来，
+如果该版本发布包是更早提交发的，bin 不一定对应当前 `main` 的 SHA。要保证 bin 和源码对得上，
+先跑一轮 `compare=true`（或 `force=true`）重新发布；也可以用 `tag` 输入指定一个已知 release。
+`compare=true` 时某一档如果因为已构建标记跳过，就直接用它上次传的 `xn-ci` bin（同一 SHA）；
+bin 上传失败时会把同名旧 bin 删掉，避免 compare 误用上一个 SHA 的 bin。上传失败只在
+`compare=true` 时让 build job 红（对比要靠它），其余时候只告警、不影响发布。
 
 ```bash
 ./xn/build.sh                                   # 先编两档（产物 + bin 都在 xn/dist）
 ./xn/compare.sh --target x86_64-unknown-linux-gnu --rounds 4
 ./xn/compare.sh --target aarch64-apple-darwin --size-only
+
+# compare=only 的取 bin 方式（本地也能用；默认 tag = v<Cargo.toml version>）
+./xn/fetch-bin.sh --target x86_64-unknown-linux-gnu --tag v6.0.0
+./xn/compare.sh --target x86_64-unknown-linux-gnu --rounds 4
 ```
 
 ## 手动测试（测试 XN）
@@ -323,7 +334,7 @@ build job 红（对比要靠它），其余时候只告警、不影响发布。
   `last-report.md` 保持 eBPF 的结果。
 - `all` / `nightly` 按上游口径**不含 pgo**（`run --all` 会过滤掉 pgo 类目）；PGO
   构建 + `pgo.compare` 不在这个 workflow 里，入口是发布链路 `xn.yml` 的
-  `compare` 下拉（`true` 跟构建，`only` 用 `xn-ci` 现成 bin 单独跑）。
+  `compare` 下拉（`true` 跟构建，`only` 从已发布 runtime 包解出 bin 单独跑）。
 - eBPF 步骤始终要求环境（root / docker / BTF）可用；缺环境直接失败而不是跳过。
 
 ## 与上游的关系
