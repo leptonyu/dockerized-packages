@@ -50,7 +50,7 @@ check "run dir 里有 02-optimize/xn.tuned" test -f "$run_dir/02-optimize/xn.tun
 check "control 就是普通 bin" cmp -s "$run_dir/02-optimize/xn.control" "$out/xn.$target.release.bin"
 check "tuned 就是 tuned bin" cmp -s "$run_dir/02-optimize/xn.tuned" "$out/xn.$target.tuned.bin"
 
-printf '== 2) 下载来的 bin 没有执行位（artifact 统一 644）也能用\n'
+printf '== 2) 下载来的 bin 没有执行位（release 下载同样如此）也能用\n'
 rm -f "$out/xn.$target.release.bin" "$out/xn.$target.tuned.bin"
 printf '#!/bin/sh\necho plain\n' >"$out/xn.$target.release.bin"
 printf '#!/bin/sh\necho tuned\n' >"$out/xn.$target.tuned.bin"

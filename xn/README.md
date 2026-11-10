@@ -139,11 +139,11 @@ SHA256SUMS                                        # 上游生成的汇总，只�
   `THIRD-PARTY-NOTICES.txt`（一次 workspace 构建，四个 bin 全在里面；不再单独发
   `cidr.*` / `xn-tui.*` 包）。
 - **tuned runtime 包**：只有 `xn`（上游 `--tuned` 只编 xn）+ 同样的 LICENSE / docs / notices。
-- **PGO 的 optimize 只给 xn 加 profile-use**：`build.sh` 探测上游 `release.sh` 是否支持
-  `--xn-only`（补丁见 [`patches/upstream-xn-only.patch`](patches/upstream-xn-only.patch)），
-  支持就自动加 —— 依赖按基线编（能命中 sccache），不把 profile-use 灌给 tokio/rustls 之类
-  （上游文档：依赖被 PGO 后客户端 CPU/GB +33%，GOAL-094）。上游没打补丁就退回默认，只提示。
-  `--no-xn-only` 可显式关掉。
+- **PGO 覆盖全部 crate（full PGO）**：tuned 档不传任何 PGO 范围开关，依赖也吃
+  `-Cprofile-use`。只给 `xn` crate 加 profile-use（上游的 `--xn-only`）会让体积几乎不缩
+  （实测 +0.099%），也没有可复现的吞吐收益（GOAL-094）；full PGO 才能拿回体积/数据面收益
+  （2026-11-04 NUC：18.46MB → 15.88MB）。代价是客户端 CPU/GB 有已知回退（GOAL-094），
+  发版前用 `pgo.compare` 留同机 A/B 证据。
 - **trace 包**：`trace-files.txt` 列出的诊断文件（各步骤日志、`manifest.tsv`、`bolt.env`、
   `hot-functions.tsv`、`xn.fdata` 等）+ `xn.tuned.env` + 两份清单 +（可选）`build.log` /
   `build-info.txt`。`trace-replay-files.txt` 里列的 `perf.data` / `xn.stage2` **只留清单、
@@ -192,8 +192,12 @@ schedule 绑定：
   `build.sh --profile FILE` 仍保留 `pgo.sh use` 的 PGO 交叉路径，仅本地手动用。
   注意别用 `pgo.sh use` 直接当 zig 调交叉链接：它会和 rustc 的 self-contained
   `crt*.o` 撞 `_start`（duplicate symbol），普通 `release.sh --target` 不会。
-- 已构建的 main SHA 记成 **`actions/cache` 标记 `xn-main-sha-<sha>`**（GITHUB_TOKEN 能写，
-  `check` job 用它跳过同一 SHA），仓库变量 **`XN_LAST_MAIN_SHA`** 只是可选快路径：
+- **禁止缓存上游任何东西**（本仓库 public，`leptonyu/xn` private）：上游 checkout 每轮
+  `actions/checkout` 现拉，不进 cache；sccache 不跨 run 缓存（编译产物里带私有代码的
+  metadata），只在单轮 job 内复用（见下一条）。
+  已构建标记是 **`actions/cache` 的 `xn-built-<sha256(上游SHA)>`**（GITHUB_TOKEN 能写，
+  `check` job 用它跳过同一 SHA）：key 里只有摘要，标记文件内容固定写 `built`，
+  公开 cache 里看不到上游 SHA/源码。仓库变量 **`XN_LAST_MAIN_SHA`** 只是可选快路径：
   Actions Variables 的 API **不接受 GITHUB_TOKEN**（`actions: write` 也 403）。更新顺序：
   secret **`XN_VARS_TOKEN`**（fine-grained PAT，Repository permissions → Variables:
   Read and write）→ 否则复用 **`XN_REPO_TOKEN`**（只有 classic PAT / `repo` scope 才能写
@@ -217,22 +221,22 @@ schedule 绑定：
   不跑 `perf record`；后续要开 `--bolt` 不用再改环境。
 - `build.sh` 的 `require_platform` 只在 `flavors` 含 `tuned` 时才检查 perf——
   只发普通包时不需要 perf。
-- **sccache（跨 run 复用依赖编译）**：上游 `scripts/cargo-env.sh` 每次启动都按
-  `PATH` → `$CARGO_HOME/bin` → `~/.cargo/bin` 探测 sccache，找不到就打一行提示（不是错误）。
-  workflow 用 `taiki-e/install-action@sccache` 装预编译版；随后 `source` 上游的
-  `scripts/cargo-env.sh` 断言 `RUSTC_WRAPPER=sccache` 并真编一个空程序——装不上就直接失败。
-  缓存写上游的 `target/sccache`（`SCCACHE_CACHE_SIZE=1G`），并用 `actions/cache`
-  **按 `<os>-<档位>` + `Cargo.lock` 哈希 restore/save**：依赖没变就命中，省掉依赖重编；
-  命中（`cache-hit=true`）时不再重复上传那 1G 缓存。PGO 三阶段 RUSTFLAGS 各不相同、
-  BOLT 又不经过 rustc，这部分省不掉；要临时关掉用 `XN_SCCACHE=off`。
+- **sccache 只在本轮 job 内用，不跨 run 缓存**：上游 `scripts/cargo-env.sh` 按
+  `PATH` → `$CARGO_HOME/bin` → `~/.cargo/bin` 探测 sccache，找不到只打一行提示（不是错误）。
+  workflow 仍用 `taiki-e/install-action@sccache` 装（PGO 三阶段共享依赖编译，省得多编两遍），
+  但**不再**用 `actions/cache` restore/save 那个 `target/sccache`：曾经按
+  `<os>-<档位>` + `Cargo.lock` 哈希跨 run 复用（~1.8 GiB），而缓存里是私有上游的编译产物
+  （rlib/rmeta 带代码 metadata），本仓库 public，等于把私有代码 metadata 放进公开 cache。
+  runner 结束目录即销毁；要完全不用 sccache 就 `XN_SCCACHE=off`（armv7 交叉档就是这么设的）。
 - 私有上游需要仓库 secret **`XN_REPO_TOKEN`**（对 `leptonyu/xn` **`contents: write`**：
   既要 checkout，也要创建/更新 release）。如果它是 **classic PAT（`repo` scope）**，顺带就能
   写本仓库的变量 `XN_LAST_MAIN_SHA`；只有 fine-grained（仅授 `leptonyu/xn`）时不行，这时
   可选配 **`XN_VARS_TOKEN`**（fine-grained，本仓库 **Variables: read/write**）。都不配也能跑，
   已构建标记走 `actions/cache`。
 - 默认**不加** cargo features；需要时在手动触发的 `features` 输入或本地 `build.sh --features quic` 里加。
-- `Upload build outputs` 收集 `xn/dist/*.tar.xz`、`xn/dist/*.sha256sum` 和两档的
-  `.bin`（compare job 要用），`build.log` 已经在 trace 包里，不再单独上传。
+- **没有 public artifact**：构建产物（`xn/dist/*.tar.xz` / `*.sha256sum` / `*.bin`）不再
+  `upload-artifact` —— 本仓库 public，artifact 对所有人可下载，而这些是私有上游的产物。
+  包只发私有上游 release（发布时已逐资产上传 + 重试）；compare 要的 `.bin` 见下节。
 - 发布上传逐资产 + 自动重试（见上），GitHub 偶发的 502 不再让 job 停在
   「8 个资产传到一半」；`XN_LAST_MAIN_SHA` 仍只在发布成功后记账，最终失败的话
   下一轮会重新构建并重传。
@@ -245,8 +249,9 @@ schedule 绑定：
 ## 对比测试（pgo.compare）
 
 `compare=true` 时**不重编**：`build.sh` 会把本次两档的 xn 二进制留在
-`xn/dist/xn.<triple>.{release,tuned}.bin`，两档各自上传 artifact；`pgo.compare` 是一个
-独立 job，把两边的 artifact 合到一起交给 [`compare.sh`](compare.sh)，后者再把这两份摆成
+`xn/dist/xn.<triple>.{release,tuned}.bin`，两档各自把它传到**私有上游仓库的固定
+prerelease `xn-ci`**（`gh release upload --clobber`，单 tag 不累积）；`pgo.compare` 是一个
+独立 job，从 `xn-ci` 取回这两份 bin 交给 [`compare.sh`](compare.sh)，后者再摆成
 上游 `build-tuned` 的 run 目录，交给上游 `scripts/test/pgo/compare-ci.sh --no-build`：
 
 ```text
@@ -257,7 +262,8 @@ target/tune/prebuilt-<UTC>/02-optimize/xn.tuned    ← tuned 包里的 xn（优�
 于是 `pgo.compare` 就是拿这两个 bin 做同机 A/B（`scripts/perf/run.sh run t1
 --binary control --binary-b tuned`，A,B,B,A 轮转），macOS 的产物是 Mach-O，自动退
 `pgo.compare.size` 只比大小。报告落在上游 checkout 的 `target/pgo/`、`target/test-runs/`，
-workflow 作为 artifact 上传。
+workflow 打包成 `compare-<triple>.tar.gz` 传到 `xn-ci` release（报告里有私有符号名，
+不进 public artifact）。
 
 ```bash
 ./xn/build.sh                                   # 先编两档（产物 + bin 都在 xn/dist）
@@ -299,8 +305,8 @@ workflow 作为 artifact 上传。
 ## 与上游的关系
 
 - 只读上游：不在本仓库改 `release.sh` / `scripts/` / `Cargo.toml`；需要的上游改动以补丁形式
-  放在 [`patches/`](patches/)，由人工在上游仓库 `git apply`（当前只有一个：
-  `upstream-xn-only.patch`，给 PGO 的 optimize 加 `--xn-only`）。
+  放在 `patches/`，由人工在上游仓库 `git apply`（目前没有待应用的补丁；`--xn-only`
+  不再用于发布链路）。
 - `--tuned` 是上游唯一的 PGO+BOLT 入口；本模块的版本门槛是
   `release.sh` 里出现 `--tuned`。上游改成新入口时，先改这里，不复制逻辑。
 - 产物是**候选**：`--tuned` 的采样是合成 loopback 负载 + 测试套件，不等于线上流量；

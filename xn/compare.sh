@@ -84,9 +84,9 @@ fi
 if [[ -z "$run_dir" ]]; then
 	plain="${plain:-$out_dir/xn.$target.release.bin}"
 	tuned="${tuned:-$out_dir/xn.$target.tuned.bin}"
-	# 只要求文件存在，不要求可执行：CI 里 bin 是 actions/upload-artifact 上下载的，
-	# 下载后权限统一变成 644（upload-artifact 的已知限制），-x 会把「拿到了」误判成
-	# 「没找到」。下面复制进 run dir 时再统一 chmod +x。
+	# 只要求文件存在，不要求可执行：CI 里 bin 是从私有 release（gh release download）
+	# 取回来的，下载后不保证带执行位，-x 会把「拿到了」误判成「没找到」。
+	# 下面复制进 run dir 时再统一 chmod +x。
 	[[ -f "$plain" ]] || die "找不到普通档的 xn：${plain}（先跑 ./xn/build.sh，或 --plain 指定）"
 	[[ -f "$tuned" ]] || die "找不到 tuned 档的 xn：${tuned}（先跑 ./xn/build.sh --flavors tuned，或 --tuned 指定）"
 	run_dir="$src/target/tune/prebuilt-$(date -u +%Y%m%dT%H%M%SZ)"
