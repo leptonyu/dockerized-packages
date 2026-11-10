@@ -589,6 +589,38 @@ collect_flavor() { # $1 = release | tuned
 	$any || die "缺 ${flavor} 档的包：${dirs[0]}/xn.*.tar.xz 或 ${dirs[1]}/xn.*.tar.xz（release.sh --pack 是否成功？）"
 }
 
+# tuned 必须是 PGO 优化版本：`xn.tuned.env`（profile/size）与二进制自己的
+# `-V` / `-h` 版本行（`(commit, tuned)`）互相印证。CI 的环境预检保证工具齐备；
+# 这里再做最后一道一致性校验，旧产物 / 拿错二进制 / 非 PGO 产物一律拒绝。
+require_tuned_bin() { # $1 = 候选二进制
+	local bin="$1" env="$src/target/$target/release/xn.tuned.env" profile want size
+	[[ -f "$env" ]] \
+		|| die "tuned：缺 ${env}；上游没有产出 PGO 版本（构建链路异常；环境预检 / --require-tuned 本应更早失败）"
+	profile="$(awk -F= '$1 == "profile" { print $2; exit }' "$env")"
+	case "$profile" in
+		pgo | pgo+bolt) ;;
+		*) die "tuned：${env} 的 profile=${profile:-<空>}，不是 PGO 优化版本" ;;
+	esac
+	want="$(awk -F= '$1 == "size" { print $2; exit }' "$env")"
+	size="$(bytes_of "$bin")"
+	if [[ -n "$want" && "$want" != "$size" ]]; then
+		die "tuned：${env} 记的 size=${want} 与实际 ${size} 不一致（env 与二进制不是同一份）"
+	fi
+	# 二进制自证：`release.sh --tuned` 的 optimize 阶段注入 XN_TUNED=1，
+	# `-V` / `-h` 的版本行必须是 `(commit, tuned)`；空目录避免加载仓库根的 app.yaml。
+	local smoke ver
+	smoke="$(mktemp -d)" || die "tuned：mktemp 失败"
+	if ! ver="$(cd "$smoke" && "$bin" --version 2>&1)"; then
+		rm -rf "$smoke"
+		die "tuned：${bin} --version 执行失败：${ver}"
+	fi
+	rm -rf "$smoke"
+	case "$ver" in
+		*", tuned)"*) ;;
+		*) die "tuned：${bin} --version 没有 ', tuned' 标记（实际：${ver}）" ;;
+	esac
+}
+
 # 把本次编出来的 xn 二进制留一份到 out-dir：`xn/compare.sh` 直接拿它和另一档做
 # 同机 A/B，不用让上游 compare 再重编一遍。
 keep_bin() { # $1 = release | tuned
@@ -597,7 +629,11 @@ keep_bin() { # $1 = release | tuned
 	local flavor="$1" out="$out_dir/xn.$target.$flavor.bin" bin="" c
 	local cands=()
 	if [[ "$flavor" == tuned ]]; then
-		cands=("$src/target/$target/release/xn" "$src/target/release/xn")
+		# 原生 tuned 只认本 target 的产物；`target/release/xn` 可能是 host 的普通档，
+		# 拿它兜底会把错架构 / 错档位的二进制当成 tuned 上传。
+		cands=("$src/target/$target/release/xn")
+		# 交叉 tuned 走 pgo.sh use，没有 xn.tuned.env；仍允许 target 产物。
+		$cross && cands+=("$src/target/release/xn")
 	else
 		cands=("$src/target/release/xn" "$src/target/$target/release/xn")
 	fi
@@ -605,8 +641,14 @@ keep_bin() { # $1 = release | tuned
 		if [[ -x "$c" ]]; then bin="$c"; break; fi
 	done
 	if [[ -z "$bin" ]]; then
+		if [[ "$flavor" == tuned ]]; then
+			die "没找到 tuned 档的 xn 二进制（试过：${cands[*]}）"
+		fi
 		warn "没找到 ${flavor} 档的 xn 二进制（试过：${cands[*]}）；compare 会缺这一组"
 		return 0
+	fi
+	if [[ "$flavor" == tuned ]] && ! $cross; then
+		require_tuned_bin "$bin"
 	fi
 	cp -p "$bin" "$out"
 	chmod +x "$out" 2>/dev/null || true
@@ -620,7 +662,7 @@ pack_cross_tuned() { # $1 = profile 文件
 	use_args=(--target "$target" --cargo-profile release --profile "$prof")
 	[[ -n "$features" ]] && use_args+=(--features "$features")
 	$locked && use_args+=(--locked)
-	( cd "$src" && ./scripts/pgo.sh use "${use_args[@]}" ) 2>&1 | tee -a "$out_dir/build.log"
+	( cd "$src" && env XN_TUNED=1 ./scripts/pgo.sh use "${use_args[@]}" ) 2>&1 | tee -a "$out_dir/build.log"
 	note "交叉打包：pack-release.sh（runtime 包，无 trace）"
 	pack_args=(--release-dir "target/$target/release" --target "$target" --bin xn --flavor tuned)
 	( cd "$src" && ./scripts/pack-release.sh "${pack_args[@]}" ) 2>&1 | tee -a "$out_dir/build.log"
@@ -660,6 +702,13 @@ if ! $package_only; then
 	tuned_args=(--tuned --target "$target" --pack
 		--pack-log "$out_dir/build.log"
 		--pack-info "$build_info")
+	# 缺 PGO/BOLT 工具时上游**默认降级普通 release 并成功退出**；CI 绝不能把普通档
+	# 当 tuned 发出去。支持就硬失败；老 ref 不支持时仍由 require_tuned_bin 兜底。
+	if grep -q -- '--require-tuned' "$src/release.sh"; then
+		tuned_args+=(--require-tuned)
+	else
+		die "上游 release.sh 不支持 --require-tuned（${src}/release.sh）：tuned 必须是 PGO，缺工具不能降级"
+	fi
 	[[ -n "$features" ]] && tuned_args+=(--features "$features")
 	[[ -n "$workload" ]] && tuned_args+=(--workload "$workload")
 	[[ -n "$freq" ]] && tuned_args+=(--freq "$freq")

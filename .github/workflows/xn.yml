@@ -325,6 +325,9 @@ jobs:
           sudo sysctl --system
           perf --version
           /usr/lib/llvm-23/bin/llvm-bolt --version
+          # PGO 的唯一硬依赖；显式检查，别等 release.sh 的 doctor 才发现
+          test -x /usr/lib/llvm-23/bin/llvm-profdata
+          /usr/lib/llvm-23/bin/llvm-profdata --version
       - name: Install Rust
         run: |
           toolchain="$(sed -n 's/^channel *= *"\([^"]*\)".*/\1/p' "$GITHUB_WORKSPACE/.cache/xn-src/rust-toolchain.toml")"
@@ -356,6 +359,15 @@ jobs:
           path: .cache/xn-src/target/sccache
           key: sccache-linux-tuned-${{ hashFiles('.cache/xn-src/Cargo.lock') }}
           restore-keys: sccache-linux-tuned-
+      - name: Verify PGO toolchain
+        # 环境准备的最后一道门：doctor 直接判 PGO 可用性（target==host + llvm-profdata）。
+        # 缺了就在这里红，不让 release.sh 走到「缺工具 → 降级普通 release」那条路。
+        env:
+          LLVM_PROFDATA: /usr/lib/llvm-23/bin/llvm-profdata
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE/.cache/xn-src"
+          ./scripts/build-tuned.sh doctor --target x86_64-unknown-linux-gnu --require pgo
       - name: PGO 优化并上传
         env:
           GH_TOKEN: ${{ secrets.XN_REPO_TOKEN }}
@@ -583,6 +595,15 @@ jobs:
           path: .cache/xn-src/target/sccache
           key: sccache-macos-tuned-${{ hashFiles('.cache/xn-src/Cargo.lock') }}
           restore-keys: sccache-macos-tuned-
+      - name: Verify PGO toolchain
+        # macOS 的 llvm-profdata 来自 Xcode CLT；doctor 同时确认 target==host。
+        # 缺了就在这里红，不让 release.sh 走到「缺工具 → 降级普通 release」那条路。
+        run: |
+          set -euo pipefail
+          test -x "$(xcrun -f llvm-profdata)"
+          "$(xcrun -f llvm-profdata)" --version
+          cd "$GITHUB_WORKSPACE/.cache/xn-src"
+          ./scripts/build-tuned.sh doctor --target aarch64-apple-darwin --require pgo
       - name: PGO 优化并上传
         env:
           GH_TOKEN: ${{ secrets.XN_REPO_TOKEN }}
