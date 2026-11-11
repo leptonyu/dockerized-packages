@@ -5,7 +5,7 @@
 #   ./xn/compare.sh                                  # x86_64-unknown-linux-gnu，xn/dist 里的两份 bin
 #   ./xn/compare.sh --target aarch64-apple-darwin --size-only
 #   ./xn/compare.sh --plain A --tuned B --rounds 4
-#   ./xn/compare.sh --gate                           # t1 之后再跑 gate 三拓扑 A/B（pgo.compare-gate）
+#   XN_PGO_GATE=1 ./xn/compare.sh                    # t1 之后再跑 gate 三拓扑 A/B
 #
 # 为什么这么绕：上游 `scripts/test/pgo/compare-ci.sh` 的 `--no-build` 只认 build-tuned 的
 # run 目录（`02-optimize/xn.control` + `xn.tuned`），所以这里把 build.sh 保存的两个 bin
@@ -16,6 +16,13 @@
 # `scripts/perf/run.sh run t1 --binary 控制 --binary-b 优化`；跑不了 rig（macOS 的 Mach-O、
 # 没有 root）自动退 `pgo.compare.size`，只比 bin 大小。报告落在上游的 target/pgo/、
 # target/test-runs/。
+#
+# gate 三拓扑 A/B（GOAL-122）**不要在这里自己调 compare-gate.sh**：上游
+# `scripts/test/pgo/compare.sh` 已经认 `XN_PGO_GATE=1`，在 t1 之后跑同一个
+# `compare-gate.sh`（r0-mwss-raw / r0-mwss-ws / r0-two-proc），而且是在 compare-ci
+# 以 root 重入之后跑的。本脚本只把 `XN_PGO_GATE` 原样透传过去；自己再跑一遍会在
+# root 拥有（0755）的 target/pgo/ 下写报告，非 root 直接 `Permission denied`
+# （2026-11-11 run 42979842971 就是这么红的），而且白跑十几分钟。
 #
 # 依赖：build.sh 已经跑过（`xn/dist/xn.<triple>.{release,tuned}.bin` 在），上游 checkout
 # 在 --src（CI 就是 .cache/xn-src）。
@@ -30,8 +37,6 @@ rounds="${XN_PGO_ROUNDS:-4}"
 plain="${XN_PLAIN_BIN:-}"
 tuned="${XN_TUNED_BIN:-}"
 size_only=false
-gate="${XN_PGO_GATE:-0}"
-gate_rigs="${XN_PGO_GATE_RIGS:-}"
 run_dir=""
 
 die() { echo "xn/compare.sh: $*" >&2; exit 2; }
@@ -48,8 +53,6 @@ usage() {
   --plain FILE         普通档的 xn 二进制（默认 <out-dir>/xn.<triple>.release.bin）
   --tuned FILE         tuned 档的 xn 二进制（默认 <out-dir>/xn.<triple>.tuned.bin）
   --rounds N           同机 A/B 轮次（默认 4，偶数；A,B,B,A 轮转）
-  --gate               t1 之后再跑 gate 三拓扑 A/B（pgo.compare-gate；需要 socat/iperf3/openssl）
-  --gate-rigs LIST     只跑指定 rig（逗号分隔，默认 compare-gate.sh 的三条全跑）
   --size-only          只比 bin 大小（macOS 自动这样）
   --run-dir DIR        直接用现成的 build-tuned run 目录（跳过 --plain/--tuned）
   -h, --help           本帮助
@@ -70,9 +73,6 @@ while (($#)); do
 		--tuned=*) tuned="${1#*=}"; shift ;;
 		--rounds) rounds="$2"; shift 2 ;;
 		--rounds=*) rounds="${1#*=}"; shift ;;
-		--gate) gate=1; shift ;;
-		--gate-rigs) gate_rigs="$2"; shift 2 ;;
-		--gate-rigs=*) gate_rigs="${1#*=}"; shift ;;
 		--size-only) size_only=true; shift ;;
 		--run-dir) run_dir="$2"; shift 2 ;;
 		--run-dir=*) run_dir="${1#*=}"; shift ;;
@@ -110,24 +110,6 @@ fi
 args=(--no-build --run-dir "$run_dir" --rounds "$rounds")
 $size_only && args+=(--size-only)
 note "compare-ci.sh ${args[*]}（用本次编好的 bin，不重编）"
+[[ "${XN_PGO_GATE:-0}" == 1 ]] && note "XN_PGO_GATE=1：gate 三拓扑 A/B 由上游 pgo.compare 在 t1 之后自己跑（本脚本不重复跑）"
 cd "$src"
-rc=0
-./scripts/test/pgo/compare-ci.sh "${args[@]}" || rc=$?
-
-# gate 三拓扑 A/B（GOAL-122）：t1 之外再验真实 gate 路径。bench2p 的 rig 是普通
-# 进程（socat/iperf3），不需要 root/TUN；macOS 的 Mach-O 上跑不了，size-only 时跳过。
-if [[ "$gate" == 1 ]]; then
-	if [[ "$size_only" == true ]] || [[ "$(uname -s)" != "Linux" ]]; then
-		note "跳过 gate A/B：size-only / 非 Linux"
-	elif ! command -v socat >/dev/null 2>&1 || ! command -v iperf3 >/dev/null 2>&1; then
-		die "gate A/B 需要 socat / iperf3（CI 里先 apt-get install socat iperf3 openssl）"
-	else
-		gate_args=(--run-dir "$run_dir" --rounds "$rounds")
-		[[ -n "$gate_rigs" ]] && gate_args+=(--rigs "$gate_rigs")
-		note "compare-gate.sh ${gate_args[*]}"
-		grc=0
-		./scripts/test/pgo/compare-gate.sh "${gate_args[@]}" || grc=$?
-		((rc == 0)) && rc=$grc
-	fi
-fi
-exit "$rc"
+exec ./scripts/test/pgo/compare-ci.sh "${args[@]}"

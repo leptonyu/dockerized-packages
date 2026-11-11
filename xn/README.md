@@ -291,7 +291,10 @@ workflow 打包成 `compare-<triple>.tar.gz` 传到 `xn-ci` release（报告里�
 
 Linux x86_64 的 compare job 在 t1 之后还会跑 **gate 三拓扑 A/B**（上游
 `scripts/test/pgo/compare-gate.sh`，`r0-mwss-raw` / `r0-mwss-ws` / `r0-two-proc`
-各 6 轮）：workflow 给 compare 步骤设 `XN_PGO_GATE=1`，并预先装
+各 6 轮）：workflow 给 compare 步骤设 `XN_PGO_GATE=1`，由上游
+`scripts/test/pgo/compare.sh` 在 compare-ci 的 root 重入里自己跑；[`compare.sh`](compare.sh)
+只把这个环境变量透传过去，**不重复调** `compare-gate.sh`（重复调时 `target/pgo/` 已经是
+root 拥有、非 root 写报告会 `Permission denied`，还白跑十几分钟）。workflow 额外预装
 `socat iperf3 openssl jq iproute2`。gate 报告同样是 `target/pgo/compare-gate-<UTC>.md`；
 macOS / `--size-only` 自动跳过。
 

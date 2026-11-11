@@ -25,17 +25,21 @@ target="x86_64-unknown-linux-gnu"
 src="$work/src"; out="$work/out"
 mkdir -p "$src/scripts/test/pgo" "$out"
 
-# 假 compare-ci.sh：只把参数记下来
+# 假 compare-ci.sh：只把参数（和 XN_PGO_GATE）记下来
 cat >"$src/scripts/test/pgo/compare-ci.sh" <<'FAKE'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >"${FAKE_ARGS:?}"
+[[ -n "${FAKE_ENV:-}" ]] && printf '%s' "${XN_PGO_GATE:-}" >"$FAKE_ENV"
+exit 0
 FAKE
 chmod +x "$src/scripts/test/pgo/compare-ci.sh"
 
-# 假 compare-gate.sh：只有 --gate 那条用例会用到
+# 假 compare-gate.sh：哨兵 —— xn/compare.sh **不该**自己调它（gate 由上游
+# scripts/test/pgo/compare.sh 认 XN_PGO_GATE=1 之后跑），调到了就留文件。
 cat >"$src/scripts/test/pgo/compare-gate.sh" <<'FAKE'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >"${FAKE_GATE_ARGS:?}"
+exit 0
 FAKE
 chmod +x "$src/scripts/test/pgo/compare-gate.sh"
 
@@ -87,33 +91,32 @@ rc=$?
 check "退出码 0（实际 ${rc}）" test "$rc" -eq 0
 check "用了给定的 run dir" grep -q -- "--run-dir $work/run" "$work/args3.txt"
 
-printf '== 5) --gate 在 t1 之后跑 gate 三拓扑 A/B\n'
-# 第 3 节删掉了 tuned bin，这里补回来（后面两条用 --out-dir）。
+printf '== 5) XN_PGO_GATE=1 只透传给上游，不在本地重复跑 gate\n'
+# gate 三拓扑 A/B 由上游 scripts/test/pgo/compare.sh 在 t1 之后自己跑（compare-ci 已经
+# 以 root 重入过）；xn/compare.sh 再跑一遍会撞 root 拥有的 target/pgo/（Permission denied，
+# run 42979842971 的原样故障），所以这里只验透传 + 哨兵没被触发。
 printf '#!/bin/sh\necho tuned\n' >"$out/xn.$target.tuned.bin"
 chmod +x "$out/xn.$target.tuned.bin"
-# compare.sh 用 uname 判宿主；给 PATH 放一套假 uname/socat/iperf3，让这条在 macOS 上也能测。
-mkdir -p "$work/bin"
-printf '#!/bin/sh\necho Linux\n' >"$work/bin/uname"
-printf '#!/bin/sh\nexit 0\n' >"$work/bin/socat"
-printf '#!/bin/sh\nexit 0\n' >"$work/bin/iperf3"
-chmod +x "$work/bin/uname" "$work/bin/socat" "$work/bin/iperf3"
-FAKE_ARGS="$work/args-gate.txt" FAKE_GATE_ARGS="$work/gate-args.txt" \
-	PATH="$work/bin:$PATH" bash "$compare" --src "$src" --out-dir "$out" --target "$target" \
-	--rounds 4 --gate --gate-rigs r0-mwss-raw >"$work/out-gate.log" 2>"$work/err-gate.log"
+rm -f "$work/gate-args.txt" "$work/gate-env.txt"
+FAKE_ARGS="$work/args-gate.txt" FAKE_ENV="$work/gate-env.txt" FAKE_GATE_ARGS="$work/gate-args.txt" \
+	XN_PGO_GATE=1 bash "$compare" --src "$src" --out-dir "$out" --target "$target" \
+	--rounds 4 --size-only >"$work/out-gate.log" 2>"$work/err-gate.log"
 rc=$?
 check "退出码 0（实际 ${rc}）" test "$rc" -eq 0
 check "t1 仍然先跑" grep -q -- '--no-build' "$work/args-gate.txt"
-check "gate 收到 run dir" grep -q -- '--run-dir' "$work/gate-args.txt"
-check "gate 收到 rounds 4" grep -q -- '--rounds 4' "$work/gate-args.txt"
-check "gate 收到 --rigs" grep -q -- '--rigs r0-mwss-raw' "$work/gate-args.txt"
+check "上游收到 XN_PGO_GATE=1" grep -qx 1 "$work/gate-env.txt"
+check "本地没有再调 compare-gate" test ! -e "$work/gate-args.txt"
+check "日志说明 gate 交给上游" grep -q '上游 pgo.compare' "$work/err-gate.log"
 
-printf '== 6) 没有 --gate 时不调 compare-gate\n'
-rm -f "$work/gate-args-none.txt"
-FAKE_ARGS="$work/args-none.txt" FAKE_GATE_ARGS="$work/gate-args-none.txt" \
-	PATH="$work/bin:$PATH" bash "$compare" --src "$src" --out-dir "$out" --target "$target" \
-	--rounds 4 >"$work/out-none.log" 2>"$work/err-none.log"
+printf '== 6) 没设 XN_PGO_GATE 时不打开 gate\n'
+rm -f "$work/gate-env-none.txt" "$work/gate-args-none.txt"
+FAKE_ARGS="$work/args-none.txt" FAKE_ENV="$work/gate-env-none.txt" \
+	FAKE_GATE_ARGS="$work/gate-args-none.txt" \
+	bash "$compare" --src "$src" --out-dir "$out" --target "$target" --rounds 4 --size-only \
+	>"$work/out-none.log" 2>"$work/err-none.log"
 rc=$?
 check "退出码 0（实际 ${rc}）" test "$rc" -eq 0
+check "上游没收到 gate 开关" test ! -s "$work/gate-env-none.txt"
 check "没有调用 compare-gate" test ! -e "$work/gate-args-none.txt"
 
 printf '== 7) --help\n'
