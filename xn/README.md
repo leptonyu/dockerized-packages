@@ -144,9 +144,14 @@ SHA256SUMS                                        # 上游生成的汇总，只�
   （实测 +0.099%），也没有可复现的吞吐收益（GOAL-094）；full PGO 才能拿回体积/数据面收益
   （2026-11-04 NUC：18.46MB → 15.88MB）。代价是客户端 CPU/GB 有已知回退（GOAL-094），
   发版前用 `pgo.compare` 留同机 A/B 证据。
-- **采样只采数据面（GOAL-117）**：tuned 默认 `--no-tests`，nextest 只做正确性门禁、不 merge；
-  上游默认 workload 是 `tune-workload.sh --coverage --dns`。server/client profraw 必须落盘，
-  profile 形状不合格（ws/tunnel 全 0）会在 optimize 前失败。
+- **采样只采数据面（GOAL-117 / GOAL-121）**：tuned 默认 `--no-tests`，nextest 只做正确性
+  门禁、不 merge；上游默认 workload 是 `tune-workload.sh --profile --dns`（loopback 套件）。
+  x86_64 tuned job 额外设 `XN_TUN_SAMPLE=1`：`release.sh` 把默认 workload 换成
+  `... --profile --dns --tun`，收尾用 `scripts/tune-tun.sh` 跑一次真 TUN 的 t1
+  （netns + veth + 两个真 TUN + iperf3，1 轮 × 1 次 × 10 s）。job 在 40 min 编译**之前**
+  先跑 `tune-tun.sh --check`，没有 `/dev/net/tun` / netns / 免密 sudo 直接红；merge 后的
+  门禁要求 `TunDeviceImpl` / `tx_agg` 计数非零（`pgo-profile-gate.py --require-tun`）。
+  server/client profraw 必须落盘；profile 不合格（空 / 缺真 TUN）会在 optimize 前失败。
 - **trace 包**：`trace-files.txt` 列出的诊断文件（各步骤日志、`manifest.tsv`、`bolt.env`、
   `hot-functions.tsv`、`xn.fdata` 等）+ `xn.tuned.env` + 两份清单 +（可选）`build.log` /
   `build-info.txt`。`trace-replay-files.txt` 里列的 `perf.data` / `xn.stage2` **只留清单、
@@ -184,7 +189,8 @@ schedule 绑定：
 - **一个档位一个 job，全部并发**：`linux-x86_64`（普通）/ `linux-x86_64-tuned`（PGO）/
   `linux-armv7` / `macos-aarch64`（普通）/ `macos-aarch64-tuned`（PGO）都只依赖 `check`，
   `check` 一过同时开跑。普通包走轻量依赖（装完就编、编完就发），PGO job 才装
-  LLVM/perf/BOLT，所以普通包比之前早一大截；tuned 挂了也不影响普通包。
+  LLVM/perf/BOLT，所以普通包比之前早一大截；tuned 挂了也不影响普通包。tuned job 还多
+  一步真 TUN 预检 + 采样（`XN_TUN_SAMPLE=1`，约 +1–2 min）。
 - **普通包和 tuned 包进同一个 release，资产名不重叠**：`xn.<triple>.tar.xz`（普通档，
   含 xn / cidr / xn-tui / xns）和 `xn.<triple>.tuned[.trace].tar.xz`（PGO/BOLT，只含 xn）。两个 job 并发往同一个 release 追加，
   `gh release create` 的竞态由 `build.sh` 兜住（已存在就继续追加）。

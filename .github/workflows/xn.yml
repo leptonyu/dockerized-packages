@@ -561,6 +561,10 @@ jobs:
     if: needs.check.outputs.build_x86_64_tuned == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 300
+    env:
+      # GOAL-121：交付 profile 在 loopback 套件后追加一条真 TUN 采样腿（t1：netns +
+      # veth + 两个真 TUN + iperf3）。只在 job 里开，release.sh 本机默认不变。
+      XN_TUN_SAMPLE: "1"
     steps:
       - uses: actions/checkout@v7
       - name: Checkout upstream xn
@@ -631,6 +635,13 @@ jobs:
           set -euo pipefail
           cd "$GITHUB_WORKSPACE/.cache/xn-src"
           ./scripts/build-tuned.sh doctor --target x86_64-unknown-linux-gnu --require pgo
+      - name: Verify real-TUN sampling
+        # GOAL-121：采集阶段要建 netns / veth / 真 TUN，能力不满足必须在 40 min 编译
+        # **之前**红（--check 只做预检，不采样；免密 sudo 由脚本自己 sudo -n 探测）。
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE/.cache/xn-src"
+          ./scripts/tune-tun.sh --check
       - name: PGO 优化并上传
         env:
           GH_TOKEN: ${{ secrets.XN_REPO_TOKEN }}
