@@ -469,10 +469,12 @@ jobs:
           persist-credentials: false
       - name: Install system dependencies
         # 普通包只要编译器 + bindgen 这一套；perf / LLVM 23 / bolt-23 是 tuned job 才装的。
+        # 走 apt-install.sh：先换掉 cloud image 的 azure 源，再按候选镜像重试
+        # （见脚本头，azure.archive.ubuntu.com 偶发 DNS 失败会直接拖死 job）。
         run: |
           set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config cmake perl nasm \
+          bash "$GITHUB_WORKSPACE/.github/scripts/apt-install.sh" \
+            build-essential pkg-config cmake perl nasm \
             clang lld \
             libclang-dev libssl-dev zlib1g-dev liblzma-dev \
             curl git xz-utils file binutils python3 openssl lsb-release
@@ -584,8 +586,8 @@ jobs:
       - name: Install system dependencies
         run: |
           set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config cmake perl nasm \
+          bash "$GITHUB_WORKSPACE/.github/scripts/apt-install.sh" \
+            build-essential pkg-config cmake perl nasm \
             clang lld \
             libclang-dev libssl-dev zlib1g-dev liblzma-dev \
             curl git xz-utils file binutils python3 openssl lsb-release
@@ -734,8 +736,8 @@ jobs:
         # release.sh --pack 需要的工具，不装 perf / LLVM 23 / BOLT。
         run: |
           set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config cmake perl nasm \
+          bash "$GITHUB_WORKSPACE/.github/scripts/apt-install.sh" \
+            build-essential pkg-config cmake perl nasm \
             clang lld libclang-dev libssl-dev zlib1g-dev liblzma-dev \
             curl git xz-utils file binutils python3 openssl
       - name: Install Rust
@@ -1021,8 +1023,7 @@ jobs:
         # gate 本身由上游 pgo.compare 跑（XN_PGO_GATE=1），本仓只负责把这几个包装上。
         run: |
           set -euo pipefail
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq socat iperf3 openssl jq iproute2
+          bash "$GITHUB_WORKSPACE/.github/scripts/apt-install.sh" socat iperf3 openssl jq iproute2
       - name: Run pgo.compare（普通 bin vs PGO bin，不重编）
         env:
           # t1 之后再跑 gate 三拓扑 A/B（上游 pgo.compare 认这个开关，GOAL-122）；

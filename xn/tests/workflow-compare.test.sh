@@ -40,7 +40,7 @@ has "bins 检查 tuned runtime 包" 'has "xn.x86_64-unknown-linux-gnu.tuned.tar.
 has "compare=only 用 fetch-bin.sh 解包" './xn/fetch-bin.sh'
 has "compare=true 仍从 xn-ci 取 bin" 'gh release download xn-ci'
 has "compare job 打开 gate 三拓扑 A/B" 'XN_PGO_GATE: "1"'
-has "compare job 装 gate rig 依赖" 'apt-get install -y -qq socat iperf3 openssl jq iproute2'
+has "compare job 装 gate rig 依赖" 'apt-install.sh" socat iperf3 openssl jq iproute2'
 has "x86_64 compare 只跑包齐的档" \
 	"inputs.compare == 'only' && needs.check.outputs.bins_x86_64 == 'true'"
 has "macOS compare 只跑包齐的档" \
