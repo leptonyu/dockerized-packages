@@ -289,6 +289,12 @@ target/tune/prebuilt-<UTC>/02-optimize/xn.tuned    ← tuned 包里的 xn（优�
 workflow 打包成 `compare-<triple>.tar.gz` 传到 `xn-ci` release（报告里有私有符号名，
 不进 public artifact）。
 
+Linux x86_64 的 compare job 在 t1 之后还会跑 **gate 三拓扑 A/B**（上游
+`scripts/test/pgo/compare-gate.sh`，`r0-mwss-raw` / `r0-mwss-ws` / `r0-two-proc`
+各 6 轮）：workflow 给 compare 步骤设 `XN_PGO_GATE=1`，并预先装
+`socat iperf3 openssl jq iproute2`。gate 报告同样是 `target/pgo/compare-gate-<UTC>.md`；
+macOS / `--size-only` 自动跳过。
+
 手动 dispatch 的 `compare` 下拉：
 
 | 取值 | 行为 |

@@ -5,6 +5,7 @@
 #   ./xn/compare.sh                                  # x86_64-unknown-linux-gnu，xn/dist 里的两份 bin
 #   ./xn/compare.sh --target aarch64-apple-darwin --size-only
 #   ./xn/compare.sh --plain A --tuned B --rounds 4
+#   ./xn/compare.sh --gate                           # t1 之后再跑 gate 三拓扑 A/B（pgo.compare-gate）
 #
 # 为什么这么绕：上游 `scripts/test/pgo/compare-ci.sh` 的 `--no-build` 只认 build-tuned 的
 # run 目录（`02-optimize/xn.control` + `xn.tuned`），所以这里把 build.sh 保存的两个 bin
@@ -29,6 +30,8 @@ rounds="${XN_PGO_ROUNDS:-4}"
 plain="${XN_PLAIN_BIN:-}"
 tuned="${XN_TUNED_BIN:-}"
 size_only=false
+gate="${XN_PGO_GATE:-0}"
+gate_rigs="${XN_PGO_GATE_RIGS:-}"
 run_dir=""
 
 die() { echo "xn/compare.sh: $*" >&2; exit 2; }
@@ -45,6 +48,8 @@ usage() {
   --plain FILE         普通档的 xn 二进制（默认 <out-dir>/xn.<triple>.release.bin）
   --tuned FILE         tuned 档的 xn 二进制（默认 <out-dir>/xn.<triple>.tuned.bin）
   --rounds N           同机 A/B 轮次（默认 4，偶数；A,B,B,A 轮转）
+  --gate               t1 之后再跑 gate 三拓扑 A/B（pgo.compare-gate；需要 socat/iperf3/openssl）
+  --gate-rigs LIST     只跑指定 rig（逗号分隔，默认 compare-gate.sh 的三条全跑）
   --size-only          只比 bin 大小（macOS 自动这样）
   --run-dir DIR        直接用现成的 build-tuned run 目录（跳过 --plain/--tuned）
   -h, --help           本帮助
@@ -65,6 +70,9 @@ while (($#)); do
 		--tuned=*) tuned="${1#*=}"; shift ;;
 		--rounds) rounds="$2"; shift 2 ;;
 		--rounds=*) rounds="${1#*=}"; shift ;;
+		--gate) gate=1; shift ;;
+		--gate-rigs) gate_rigs="$2"; shift 2 ;;
+		--gate-rigs=*) gate_rigs="${1#*=}"; shift ;;
 		--size-only) size_only=true; shift ;;
 		--run-dir) run_dir="$2"; shift 2 ;;
 		--run-dir=*) run_dir="${1#*=}"; shift ;;
@@ -103,4 +111,23 @@ args=(--no-build --run-dir "$run_dir" --rounds "$rounds")
 $size_only && args+=(--size-only)
 note "compare-ci.sh ${args[*]}（用本次编好的 bin，不重编）"
 cd "$src"
-exec ./scripts/test/pgo/compare-ci.sh "${args[@]}"
+rc=0
+./scripts/test/pgo/compare-ci.sh "${args[@]}" || rc=$?
+
+# gate 三拓扑 A/B（GOAL-122）：t1 之外再验真实 gate 路径。bench2p 的 rig 是普通
+# 进程（socat/iperf3），不需要 root/TUN；macOS 的 Mach-O 上跑不了，size-only 时跳过。
+if [[ "$gate" == 1 ]]; then
+	if [[ "$size_only" == true ]] || [[ "$(uname -s)" != "Linux" ]]; then
+		note "跳过 gate A/B：size-only / 非 Linux"
+	elif ! command -v socat >/dev/null 2>&1 || ! command -v iperf3 >/dev/null 2>&1; then
+		die "gate A/B 需要 socat / iperf3（CI 里先 apt-get install socat iperf3 openssl）"
+	else
+		gate_args=(--run-dir "$run_dir" --rounds "$rounds")
+		[[ -n "$gate_rigs" ]] && gate_args+=(--rigs "$gate_rigs")
+		note "compare-gate.sh ${gate_args[*]}"
+		grc=0
+		./scripts/test/pgo/compare-gate.sh "${gate_args[@]}" || grc=$?
+		((rc == 0)) && rc=$grc
+	fi
+fi
+exit "$rc"

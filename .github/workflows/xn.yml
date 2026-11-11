@@ -25,8 +25,10 @@ run-name: "发布 XN · ${{ inputs.target || 'all' }} · compare=${{ inputs.comp
 #   true  两档 build 都成功、或标记命中已构建（skipped）后，`pgo.compare` 把两边的 bin
 #         取下来做同机 A/B（`xn/compare.sh` 摆成 build-tuned 的 run 目录，交给上游
 #         `compare-ci.sh --no-build`），不重编；skipped 的档用 xn-ci 里上次的 bin
-#         （同一 SHA；bin 不全就报错，`force=true` 重编）。macOS 的产物是 Mach-O，退
-#         `pgo.compare.size` 只比大小；armv7 交叉档没有同机 control / 采样，不跑。
+#         （同一 SHA；bin 不全就报错，`force=true` 重编）。t1 之后还会跑 **gate 三拓扑
+#         A/B**（`pgo.compare-gate`：r0-mwss-raw / r0-mwss-ws / r0-two-proc，需要
+#         socat/iperf3/openssl）。macOS 的产物是 Mach-O，退 `pgo.compare.size` 只比
+#         大小；armv7 交叉档没有同机 control / 采样，不跑。
 #   only  本轮完全不构建，直接从已发布的 `v<version>` release 里取普通 / tuned 两档
 #         runtime 包，用 `xn/fetch-bin.sh` 解出 xn 再跑 compare（target=all 时只跑包
 #         齐的那档；点名单个平台却缺包会直接报错）。给已经构建过（`xn-ci` 里没 bin）
@@ -1010,7 +1012,17 @@ jobs:
             done
           fi
           ls -l xn/dist
+      - name: Install gate rig dependencies
+        # pgo.compare 的 t1 由上游 compare-ci 自己装 iperf3/openssl；gate 三拓扑还要
+        # socat（r0-mwss-raw 的 TLS 边缘）以及 jq/iproute2，这里一次装齐。
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq socat iperf3 openssl jq iproute2
       - name: Run pgo.compare（普通 bin vs PGO bin，不重编）
+        env:
+          # t1 之后再跑 gate 三拓扑 A/B（上游 pgo.compare-gate，GOAL-122）。
+          XN_PGO_GATE: "1"
         run: |
           set -euo pipefail
           ./xn/compare.sh \
