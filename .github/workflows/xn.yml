@@ -641,6 +641,11 @@ jobs:
         run: |
           set -euo pipefail
           cd "$GITHUB_WORKSPACE/.cache/xn-src"
+          # 上游 ref 太旧（GOAL-121 还没合入）时给一句能直接照做的错误，而不是 127。
+          [[ -f scripts/tune-tun.sh ]] || {
+            echo "::error::上游 ref 没有 scripts/tune-tun.sh：GOAL-121 还没合入这个 ref。用 workflow 的 ref 输入指向任务分支（如 task/ci-tun-pgo），或先把 GOAL-121 合入 main"
+            exit 1
+          }
           ./scripts/tune-tun.sh --check
       - name: PGO 优化并上传
         env:
