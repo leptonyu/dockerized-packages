@@ -94,9 +94,12 @@ jobs:
       matrix:
         # smoke（5 条 eBPF）和 pgo（build-tuned + compare）都只在 Linux 上有意义；
         # 其余 suite 加上 macOS 腿，至少把 unit / bench 的 aarch64 覆盖上。
-        include: ${{ (inputs.suite == 'smoke' || inputs.suite == 'pgo')
+        # 必须是 fromJSON(...)：表达式返回的是 JSON **字符串**，matrix.include 要的是
+        # 数组；少了这一层，GitHub 在展开 job 图时直接失败（本次 run 就是 repo tests
+        # 正常、upstream job 根本没被创建）。
+        include: ${{ fromJSON((inputs.suite == 'smoke' || inputs.suite == 'pgo')
           && '[{"runner":"ubuntu-24.04","arch":"x86_64"}]'
-          || '[{"runner":"ubuntu-24.04","arch":"x86_64"},{"runner":"macos-15","arch":"aarch64"}]' }}
+          || '[{"runner":"ubuntu-24.04","arch":"x86_64"},{"runner":"macos-15","arch":"aarch64"}]') }}
     steps:
       - name: Check XN_REPO_TOKEN
         env:

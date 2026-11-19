@@ -70,6 +70,10 @@ printf '\n== 3) hosted runner 的 root / 架构口径\n'
 has "Linux 腿 sudo 跑 unified" 'sudo -E env "PATH=$PATH"'
 has "按 RUNNER_OS 区分" 'if [[ "$RUNNER_OS" == "Linux" ]]'
 has "smoke / pgo 只起 Linux 腿" "inputs.suite == 'smoke' || inputs.suite == 'pgo'"
+# matrix.include 要数组；表达式本身返回 JSON 字符串，少了 fromJSON 会在展开 job 图时
+# 直接失败（44483912654：repo tests 正常、upstream job 没被创建）。
+has "matrix include 用 fromJSON 解成数组" \
+	"include: \${{ fromJSON((inputs.suite == 'smoke' || inputs.suite == 'pgo')"
 has "hosted 6h 上限（不是上游 1440）" 'timeout-minutes: 360'
 absent "没有照抄 self-hosted 的 1440" 'timeout-minutes: 1440'
 absent "没有照抄 self-hosted runner 标签" 'runs-on: [self-hosted'
