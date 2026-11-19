@@ -326,34 +326,46 @@ bin 上传失败时会把同名旧 bin 删掉，避免 compare 误用上一个 S
 
 ## 手动测试（测试 XN）
 
-[`xn-tests.yml`](../.github/workflows/xn-tests.yml) 是手动触发的测试入口，不在 push / PR
-自动跑。Actions → **测试 XN** → **Run workflow** 的菜单配置：
+[`xn-tests.yml`](../.github/workflows/xn-tests.yml) 是手动触发的统一测试入口，不在
+push / PR 自动跑。菜单、步骤、调用方式与上游仓库的 `.github/workflows/test.yml`
+一致（suite 语义见上游 `scripts/test/registry.toml`）。Actions → **测试 XN** →
+**Run workflow**：
 
 | 输入 | 取值 | 含义 |
 | --- | --- | --- |
-| `mode` | `all`（默认） | 本仓库离线测试 + 上游全部 active 条目（数小时，不含 pgo）+ eBPF smoke |
-| `mode` | `repo` | 只跑本仓库离线测试（`xn/tests/run-all.sh`，几秒） |
-| `mode` | `smoke` | 只跑上游 eBPF smoke 矩阵（GOAL-112 的 5 条 `smoke.ebpf.*`） |
-| `mode` | `nightly` | 上游 nightly 档（unit + e2e）+ eBPF smoke |
+| `suite` | `all`（默认） | 上游 registry 全部 active 条目（`run --all`，按上游口径**不含 pgo**）；所有 suite 都另跑本仓库离线测试 |
+| `suite` | `nightly` / `pr` / `release` / `manual` | 按 tier 跑（`run --tier`） |
+| `suite` | `unit` / `smoke` / `e2e` / `bench` / `perf` | 按类目跑（`run --category`） |
+| `suite` | `pgo` | 先 `build-tuned.sh` 编 control + 优化产物，再跑 `run --category pgo` |
+| `keep_going` | 默认 `true` | 失败后继续跑完，结果仍按最差状态退出 |
 
 触发规则：
 
-- `mode=repo` 不 checkout 上游、不需要 `XN_REPO_TOKEN`。
-- 架构固定为 x86_64 Linux + aarch64 macOS（`mode=smoke` 只在 Linux 上跑，eBPF
-  本来就只支持 Linux，macOS 那条腿只会白起一台 runner）；上游 ref 固定 `main`。
-- `mode=all` / `nightly` 先跑 `scripts/test/all.sh`（默认 keep-going，只认
-  `--fail-fast`），再跑 eBPF smoke。unified 以非 root 跑，会跳过 `smoke.ebpf.*`
-  等 root/VM 条目，eBPF 步骤用特权容器补上；eBPF 放在最后，`last-report.md` 是
-  eBPF 的结果，unified 的汇总另存 `last-report-unified.md`。
-- unified 整类都因环境跳过时脚本退 2，workflow 只告警；退 2 但输出里不是「全部
-  跳过」（例如参数/用法错误）仍按失败处理，避免一条没跑却显示绿色。
-- `mode=smoke` 只跑 eBPF 步骤（`scripts/test/ci-ebpf.sh --category smoke`），不再
-  跑 unified —— 避免同一批 5 条被非 root 的 unified 再选一次（全部 skip），并让
-  `last-report.md` 保持 eBPF 的结果。
-- `all` / `nightly` 按上游口径**不含 pgo**（`run --all` 会过滤掉 pgo 类目）；PGO
-  构建 + `pgo.compare` 不在这个 workflow 里，入口是发布链路 `xn.yml` 的
-  `compare` 下拉（`true` 跟构建，`only` 从已发布 runtime 包解出 bin 单独跑）。
-- eBPF 步骤始终要求环境（root / docker / BTF）可用；缺环境直接失败而不是跳过。
+- 上游 ref 固定 `main`，需要仓库 secret `XN_REPO_TOKEN`（对 `leptonyu/xn` 至少
+  `contents:read`）。`repo tests` job 只跑本仓库 `xn/tests/run-all.sh`，不碰上游、
+  也不需要 token。
+- 与上游 `test.yml` 的差异只在 runner：上游是 `[self-hosted, linux, xn-nightly]` +
+  `XN_TEST_ENV=raw-linux`（Alpine、root）；本仓库是 public，跑 GitHub hosted
+  （ubuntu-24.04 x86_64 + macos-15 aarch64）。Linux 腿以 `sudo -E` 跑 unified，
+  netns / TUN / eBPF / perf rig 才能真跑；eBPF 条目由 `run.sh` 自己解析到
+  `env:vm-linux` 的特权 Alpine 容器后端，不再单起 `ci-ebpf.sh`（避免同一批 5 条
+  被跑两遍）。macOS 腿不带 root，Linux-only 条目记 skip。
+- `smoke` / `pgo` 只在 Linux 上起 job（eBPF 只支持 Linux；PGO 构建要 Linux 工具链），
+  其他 suite 加 macOS 腿（能真跑的主要是 aarch64 的 unit / bench，其余记 skip）。
+- hosted runner 缺 Alpine / qemu / 专用内核的条目记 skip（= 上游 `all.sh` 在 CI 外的
+  口径），所以 unified 传 `--skip-env-error`；整类全部 skip 时脚本退 2，workflow 降级
+  成告警，但退 2 且输出里不是「全部跳过」（参数 / 用法错误）仍按失败处理，避免一条
+  没跑却显示绿色。
+- 全套口径有**两道硬检查**，不是口头约定：
+  1. `Detect full test suite`：`run.sh list --json` 清点上游 registry 的 category / tier，
+     与本 workflow 的 suite 菜单对拍；上游新增一类而这里没跟进 → 红，提示同步菜单；
+  2. `Verify full-suite coverage`：跑完拿 registry 的应跑集合与
+     `target/test-runs/*/result.json` 对拍；被选中却没产出结果的条目 → 红（防“少跑了
+     一条还显示绿”；unified 本身失败时只告警，不掩盖首错）。
+- 报告：`run.sh` 的汇总落在 `target/test-runs/last-report.md`，job 日志里 `cat` 一遍，
+  同时打包成 artifact（public 仓库，日志先打 tar.gz）。hosted 单 job **硬上限 6h**，
+  `timeout-minutes` 固定 360（上游 self-hosted 是 1440）：`all` / `pgo` 在 hosted 上可能
+  跑不完全套，按 category 分开跑更稳。
 
 ## 与上游的关系
 

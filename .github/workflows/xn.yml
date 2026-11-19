@@ -1,4 +1,4 @@
-name: 发布 XN
+name: XN 发布
 run-name: "发布 XN · ${{ inputs.target || 'all' }} · compare=${{ inputs.compare || 'false' }}"
 
 # 交付目标（`target` 下拉，默认 all，可单编一个）：

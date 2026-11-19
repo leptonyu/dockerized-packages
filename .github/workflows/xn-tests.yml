@@ -1,34 +1,60 @@
-name: 测试 XN
-run-name: "测试 XN（${{ inputs.mode }}）"
+name: XN CI
+run-name: "测试 XN（${{ inputs.suite }}）"
 
-# 一个参数：mode。每个值只做一件事，不再组合 scope / suite / tier。
+# 上游 `leptonyu/xn` 的统一测试入口（`.github/workflows/test.yml`）在本仓库的镜像：
+# **菜单、步骤、调用方式都相同**，只把「self-hosted Alpine + root」换成 GitHub hosted
+# runner，并额外跑本仓库自己的离线测试。
 #
-#   all      本仓库离线测试 + 上游全部职能条目（不含 pgo）+ eBPF smoke
-#   repo     只跑本仓库离线测试（xn/tests/run-all.sh，几秒）
-#   smoke    只跑上游 eBPF smoke 矩阵（5 条 smoke.ebpf.*，几十分钟）
-#   nightly  上游 nightly 档（unit + e2e）+ eBPF smoke
+# suite 语义与上游 test.yml 一字不差（见 scripts/test/registry.toml）：
+#   nightly / pr / release / manual → `run.sh run --tier <tier>`
+#   unit / smoke / e2e / bench / perf / pgo → `run.sh run --category <category>`
+#   all → `run.sh run --all`（registry 里所有 active 条目；**按上游口径不含 pgo**）
+#   pgo 会先 `build-tuned.sh` 编出 control + 优化产物，再跑 `--category pgo`。
 #
-# PGO 构建 + `pgo.compare` 不在这个 workflow 里：那是发布链路，入口是 `发布 XN`
-# （xn.yml）的 `compare` 下拉。这里只保留测试。
+# 与上游 test.yml 的**刻意差异**（都是 hosted runner 的约束，不是口径差异）：
+#   * 上游跑在 `[self-hosted, linux, xn-nightly]` + `XN_TEST_ENV=raw-linux`（Alpine、root）；
+#     本仓库是 public，跑在 GitHub hosted（ubuntu-24.04 x86_64 + macos-15 aarch64）。
+#   * 因此 Linux 腿以 **root**（`sudo -E`）跑 unified：netns / TUN / eBPF / perf rig 才能
+#     真跑；eBPF 条目自动落到 `env:vm-linux` 的特权 Alpine 容器后端（不另起 ci-ebpf.sh，
+#     避免同一条目跑两遍）。macOS 腿不带 root，Linux-only 条目记 skip。
+#   * 缺环境（apk / qemu / 专用内核 / BTF）记 skip 而不是红（= 上游 `all.sh` 的口径）；
+#     「全部跳过」仍会由 `run.sh` 退 2 暴露，这里降级成告警，不吞假绿。
+#   * 上游 job 超时 1440min（self-hosted 上限），hosted 单 job 上限 6h，所以固定 360min。
+#   * 额外一个 `repo tests` job 跑本仓库 `xn/tests/run-all.sh`（上游没有这部分）。
+#   * 上游 `target/test-runs` 直接传 artifact；本仓库 public，日志先打包成 tar.gz 再传。
 #
-# 架构固定为 **x86_64 Linux + aarch64 macOS**；上游 ref 固定 main。没有别的输入。
+# 「全套测试」不是口头约定，本 workflow 有两条硬检查：
+#   1. `Detect full test suite`：把上游 registry 的 category / tier 清点出来，与本 workflow
+#      的 suite 菜单对拍；上游新增一类而这里没跟进 → 直接红（提示同步菜单）。
+#   2. `Verify full-suite coverage`：跑完后拿 registry 的应跑集合与 `target/test-runs/*/result.json`
+#      对拍；被选中却没产出结果的条目 → 红（防止“少跑了一条还显示绿”）。
 
 on:
   workflow_dispatch:
     inputs:
-      mode:
+      suite:
         description: >-
-          all=本仓库离线测试+上游全部（不含 pgo）+eBPF |
-          repo=只跑本仓库离线测试 | smoke=只跑 eBPF smoke（5 条） |
-          nightly=上游 nightly 档+eBPF
+          nightly/pr/release/manual=按档位跑；unit/smoke/e2e/bench/perf/pgo=按类目跑
+          （pgo 会先编 PGO 再跑 compare）；all=全部职能条目（不含 pgo）
         type: choice
         required: true
         default: all
         options:
           - all
-          - repo
-          - smoke
           - nightly
+          - pr
+          - release
+          - manual
+          - unit
+          - smoke
+          - e2e
+          - bench
+          - perf
+          - pgo
+      keep_going:
+        description: "失败后继续跑完（结果仍按最差状态退出）"
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -47,9 +73,10 @@ env:
   XN_SCCACHE: "off"
 
 jobs:
+  # 上游 test.yml 没有这一段：本仓库的 build.sh / compare.sh / workflow 约定有自己的
+  # 离线测试（`xn/tests/*.test.sh`），也是“全套”的一部分。几秒，所有 suite 都跑。
   repo-tests:
     name: repo tests
-    if: inputs.mode == 'all' || inputs.mode == 'repo'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -59,17 +86,17 @@ jobs:
 
   upstream:
     name: upstream (${{ matrix.arch }})
-    if: inputs.mode == 'all' || inputs.mode == 'nightly' || inputs.mode == 'smoke'
     runs-on: ${{ matrix.runner }}
+    # hosted runner 单 job 硬上限 6h；上游 test.yml 的 1440min 是 self-hosted 才有的。
     timeout-minutes: 360
     strategy:
       fail-fast: false
       matrix:
-        # mode=smoke 只跑 eBPF smoke，而它只在 Linux 上执行；macOS 那条腿会白起一台
-        # runner（checkout / 装 Rust / 打包空日志），所以 smoke 的矩阵只留 Linux。
-        include: ${{ fromJSON(inputs.mode == 'smoke'
+        # smoke（5 条 eBPF）和 pgo（build-tuned + compare）都只在 Linux 上有意义；
+        # 其余 suite 加上 macOS 腿，至少把 unit / bench 的 aarch64 覆盖上。
+        include: ${{ (inputs.suite == 'smoke' || inputs.suite == 'pgo')
           && '[{"runner":"ubuntu-24.04","arch":"x86_64"}]'
-          || '[{"runner":"ubuntu-24.04","arch":"x86_64"},{"runner":"macos-15","arch":"aarch64"}]') }}
+          || '[{"runner":"ubuntu-24.04","arch":"x86_64"},{"runner":"macos-15","arch":"aarch64"}]' }}
     steps:
       - name: Check XN_REPO_TOKEN
         env:
@@ -93,7 +120,7 @@ jobs:
           {
             echo "### xn-tests"
             echo ""
-            echo "- mode: \`${{ inputs.mode }}\` · arch: \`${{ matrix.arch }}\`"
+            echo "- suite: \`${{ inputs.suite }}\` · keep_going: \`${{ inputs.keep_going }}\` · arch: \`${{ matrix.arch }}\`"
             echo "- commit: \`$sha\` · subject: $(git log -1 --format=%s)"
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Install Rust (rust-toolchain.toml)
@@ -103,72 +130,229 @@ jobs:
           rustup toolchain install "$toolchain"
           rustup component add --toolchain "$toolchain" clippy rustfmt
       - name: Install cargo-nextest
-        # 只有 unified 档（all / nightly）跑 nextest；smoke 只跑 eBPF，不装。
-        if: inputs.mode == 'all' || inputs.mode == 'nightly'
         uses: taiki-e/install-action@nextest
+      # 与上游 test.yml 完全一致的两步：registry / catalog 自检 + 本机可跑性清单。
       - name: Check registry and catalog
-        run: scripts/test/run.sh check
-      - name: Run unified tests
-        if: inputs.mode == 'all' || inputs.mode == 'nightly'
+        run: |
+          scripts/test/run.sh check
+          scripts/test/run.sh doctor
+      # 全套口径的**第一道检查**：registry 里出现的每个 category / tier 都必须在本
+      # workflow 的 suite 菜单里有对应入口。上游新增一类而这里没跟进 → 直接红。
+      - name: Detect full test suite
         run: |
           set -euo pipefail
-          if [ "${{ inputs.mode }}" = "nightly" ]; then suite=nightly; else suite=all; fi
-          # all.sh 默认就是 keep-going，只认 --fail-fast；不要再传 --keep-going
-          # （未知参数会直接退 2，被下面误当成「全部跳过」）。
+          scripts/test/run.sh list --json > "$RUNNER_TEMP/registry.json"
+          python3 - "$RUNNER_TEMP/registry.json" "$GITHUB_STEP_SUMMARY" <<'PY'
+          import collections
+          import json
+          import sys
+
+          entries = json.load(open(sys.argv[1], encoding="utf-8"))
+          active = [e for e in entries if e.get("status") == "active"]
+          cats = sorted({e["category"] for e in active})
+          tiers = sorted({e["tier"] for e in active})
+
+          # 本 workflow 的 suite 菜单 = 上游 test.yml 的 suite 菜单。
+          want_cats = ["unit", "smoke", "e2e", "bench", "perf", "pgo"]
+          want_tiers = ["pr", "nightly", "release", "manual"]
+
+          unknown = [c for c in cats if c not in want_cats]
+          missing = [c for c in want_cats if c not in cats]
+          unknown_t = [t for t in tiers if t not in want_tiers]
+          missing_t = [t for t in want_tiers if t not in tiers]
+
+          counts = collections.Counter((e["category"], e["tier"]) for e in active)
+          with open(sys.argv[2], "a", encoding="utf-8") as out:
+              out.write("\n### 全套测试清单（上游 registry）\n\n")
+              out.write("| category | " + " | ".join(want_tiers) + " | 合计 |\n")
+              out.write("|---|" + "---|" * (len(want_tiers) + 1) + "\n")
+              for c in want_cats:
+                  row = [counts.get((c, t), 0) for t in want_tiers]
+                  out.write("| `%s` | %s | %d |\n" % (
+                      c, " | ".join(str(n) for n in row), sum(row)))
+              out.write("\n- active 条目合计：**%d**（`suite=all` 跑 %d 条，按上游口径不含 pgo）\n"
+                        % (len(active), sum(1 for e in active if e["category"] != "pgo")))
+
+          print("registry category：%s" % ", ".join(cats))
+          print("registry tier    ：%s" % ", ".join(tiers))
+          print("active 条目      ：%d（suite=all 跑 %d 条）" % (
+              len(active), sum(1 for e in active if e["category"] != "pgo")))
+
+          if unknown or missing or unknown_t or missing_t:
+              print("::error::上游 registry 与本 workflow 的 suite 菜单不一致；"
+                    "同步 .github/workflows/xn-tests.yml 的 options"
+                    "（与 ../rust/xn/.github/workflows/test.yml 对齐）")
+              for label, vals in (("工作流没接的 category", unknown),
+                                  ("registry 里消失的 category", missing),
+                                  ("工作流没接的 tier", unknown_t),
+                                  ("registry 里消失的 tier", missing_t)):
+                  if vals:
+                      print("  - %s：%s" % (label, ", ".join(vals)))
+              sys.exit(1)
+          PY
+      # 与上游 test.yml 一致：suite=pgo 先编一对同 run 的 control / 优化产物，
+      # 否则 pgo.compare 只能 skip（pgo-build）。
+      - name: Build PGO artifacts (control + optimized)
+        if: inputs.suite == 'pgo'
+        run: |
+          set -euo pipefail
+          # llvm-profdata 用 rustup 的 llvm-tools，版本与 rustc 一致。
+          rustup component add llvm-tools-preview
+          # 用运行期负载采 profile（与 release.sh --tuned 同链路）；**不用 --tests**：
+          # nextest 每个用例一个进程，core 子集实测 1875 个 10 MB 的 profraw ≈ 18 GB，
+          # hosted runner 的盘放不下。`pgo.tests.core` 仍会在下面的类目里跑正确性。
+          scripts/build-tuned.sh all --profile pgo --no-bolt --control \
+            --workload "$PWD/scripts/tune-workload.sh --profile --dns"
+          run_dir="$(ls -dt target/tune/*/ | head -1)"
+          test -f "${run_dir%/}/02-optimize/xn.control"
+          echo "XN_PGO_RUN_DIR=$PWD/${run_dir%/}" >> "$GITHUB_ENV"
+      - name: Run unified tests
+        id: unified
+        shell: bash
+        env:
+          SUITE: ${{ inputs.suite }}
+          KEEP_GOING: ${{ inputs.keep_going }}
+        run: |
+          set -euo pipefail
+          suite="$SUITE"
+          args=()
+          case "$suite" in
+            all) args+=(--all) ;;
+            pr|nightly|release|manual) args+=(--tier "$suite") ;;
+            unit|smoke|e2e|bench|perf|pgo) args+=(--category "$suite") ;;
+            *)
+              echo "::error::unknown suite: $suite"
+              exit 4
+              ;;
+          esac
+          # 统一测试按锁取 dlc（离线 runner 会明确报 env-error，不会被当成产品回归）。
+          args+=(--fetch)
+          # hosted runner 没有 Alpine / qemu / 专用内核：缺环境记 skip（= 上游 all.sh 的
+          # CI 外口径）。「全部跳过」仍由 run.sh 退 2 暴露，下面单独判。
+          args+=(--skip-env-error)
+          if [[ "$KEEP_GOING" == "true" ]]; then
+            args+=(--keep-going)
+          fi
           log="$(mktemp)"
           trap 'rm -f "$log"' EXIT
+          run=(scripts/test/run.sh run "${args[@]}")
+          if [[ "$RUNNER_OS" == "Linux" ]]; then
+            # hosted Linux 上的 netns / TUN / eBPF / perf rig 只有 root 能做；eBPF 条目会由
+            # run.sh 解析到 env:vm-linux（特权 Alpine 容器）。macOS 腿保持非 root。
+            # 检出目录属于 runner 用户，root 跑 git（result.json 的 git_sha 等）要先放行
+            # safe.directory，否则 git 直接报 dubious ownership。
+            run=(sudo -E env "PATH=$PATH" "HOME=$HOME" "XN_SCCACHE=off" \
+              "GIT_CONFIG_COUNT=1" \
+              "GIT_CONFIG_KEY_0=safe.directory" "GIT_CONFIG_VALUE_0=$PWD" \
+              "${run[@]}")
+          fi
           set +e
-          scripts/test/all.sh "$suite" 2>&1 | tee "$log"
+          "${run[@]}" 2>&1 | tee "$log"
           code=${PIPESTATUS[0]}
           set -e
-          # 整类都因环境不满足被跳过是 hosted runner 的正常情况（没有 root / VM）；
+          # 整类都因环境不满足被跳过是 hosted runner 的正常情况（没有 apk / qemu）；
           # 脚本退 2 是为了防假绿，这里降级成告警。但参数 / 用法错误也退 2，必须先
           # 确认输出里确实有「全部跳过」，否则会把「一条没跑」吞成绿色。
           if [ "$code" -eq 2 ]; then
             if grep -q '全部 .* 条因环境不满足被跳过' "$log"; then
-              echo "::warning::$suite 的条目全部因环境不满足被跳过（hosted runner 没有 root/VM）"
+              echo "::warning::$suite 的条目全部因环境不满足被跳过（hosted runner 没有 apk/qemu）"
               exit 0
             fi
-            echo "::error::all.sh 退 2，但不是「全部跳过」（多半是参数/用法错误），按失败处理"
+            echo "::error::run.sh 退 2，但不是「全部跳过」（多半是参数/用法错误），按失败处理"
           fi
           exit "$code"
-      - name: Preserve unified report
-        if: always() && (inputs.mode == 'all' || inputs.mode == 'nightly')
-        run: |
-          if [ -f target/test-runs/last-report.md ]; then
-            cp target/test-runs/last-report.md target/test-runs/last-report-unified.md 2>/dev/null || true
-          fi
-      # eBPF：`ci-ebpf.sh` 按 env:vm-linux 起特权 Alpine 容器，并在宿主准备构建工具链
-      # （x86_64 → 原生 cargo + musl-tools + lld；aarch64 / 跨架构才装 zig）。
-      - name: eBPF smoke (env:vm-linux)
-        if: ${{ !cancelled() && runner.os == 'Linux' }}
-        env:
-          XN_TEST_ENV: vm-linux
-        run: |
-          set -euo pipefail
-          sudo -E env "PATH=$PATH" "HOME=$HOME" \
-            scripts/test/ci-ebpf.sh --category smoke --keep-going
-      # eBPF 步骤是 sudo：cargo 会把 target/ 与 .cargo-home/ 写成 root 所有，后面的
-      # 非 root 步骤（打包 / 上传）再读同一批目录会 Permission denied。
-      - name: Restore workspace ownership after root eBPF step
+      # unified 是 sudo：cargo 会把 target/ 与 .cargo-home/ 写成 root 所有，后面的
+      # 非 root 步骤（覆盖校验 / 打包 / 上传）再读同一批目录会 Permission denied。
+      - name: Restore workspace ownership after root tests
         if: always() && runner.os == 'Linux'
         run: sudo chown -R "$(id -u):$(id -g)" .cargo-home target 2>/dev/null || true
+      # 全套口径的**第二道检查**：registry 里本次该跑的每一条，都必须有 result.json。
+      # 被选中却没产出结果 = 少跑了，直接红（unified 本身失败时只告警，别掩盖首错）。
+      - name: Verify full-suite coverage
+        if: always()
+        env:
+          SUITE: ${{ inputs.suite }}
+          RUN_OUTCOME: ${{ steps.unified.outcome }}
+        run: |
+          set -euo pipefail
+          if [ ! -d target/test-runs ] || [ ! -f target/test-runs/last-report.md ]; then
+            echo "没有 target/test-runs（unified 没跑到汇总）；跳过覆盖校验"
+            exit 0
+          fi
+          scripts/test/run.sh list --json > "$RUNNER_TEMP/registry.json"
+          python3 - "$RUNNER_TEMP/registry.json" "$SUITE" "$RUN_OUTCOME" <<'PY'
+          import collections
+          import glob
+          import json
+          import sys
+
+          entries = json.load(open(sys.argv[1], encoding="utf-8"))
+          suite, outcome = sys.argv[2], sys.argv[3]
+          active = [e for e in entries if e.get("status") == "active"]
+
+          if suite == "all":
+              expected = [e for e in active if e["category"] != "pgo"]
+          elif suite in ("pr", "nightly", "release", "manual"):
+              expected = [e for e in active if e["tier"] == suite]
+          else:
+              expected = [e for e in active if e["category"] == suite]
+          expected_ids = {e["id"] for e in expected}
+
+          actual = {}
+          for path in glob.glob("target/test-runs/*/result.json"):
+              try:
+                  result = json.load(open(path, encoding="utf-8"))
+              except (OSError, ValueError):
+                  continue
+              tid = (result.get("test") or {}).get("id")
+              if tid:
+                  actual[tid] = (result.get("run") or {}).get("status")
+
+          missing = sorted(expected_ids - set(actual))
+          extra = sorted(set(actual) - expected_ids)
+          statuses = collections.Counter(actual.values())
+          print("suite=%s：registry 应跑 %d 条，实际产出结果 %d 条（%s）" % (
+              suite, len(expected_ids), len(actual),
+              "，".join("%s=%d" % kv for kv in sorted(statuses.items())) or "无"))
+
+          def show(ids, limit=12):
+              if len(ids) <= limit:
+                  return ", ".join(ids)
+              return "%s …（共 %d 条）" % (", ".join(ids[:limit]), len(ids))
+
+          if missing:
+              msg = "以下条目被选中却没有 result.json：" + show(missing)
+              if outcome == "success":
+                  print("::error::" + msg)
+                  sys.exit(1)
+              print("::warning::" + msg)
+          if extra:
+              print("::warning::结果里有不在本次选择内的条目：" + show(extra))
+          if not statuses or set(statuses) <= {"skip", "env-error"}:
+              print("::warning::本次没有任何一条真正执行（hosted runner 缺环境）")
+          PY
+      # artifact / job summary 之外，汇总原文也要进 job 日志（失败时同样打）。
+      - name: Print test report
+        if: always()
+        run: |
+          set -euo pipefail
+          report=target/test-runs/last-report.md
+          if [[ ! -f "$report" ]]; then
+            echo "没有 ${report}（测试没跑到汇总就退出了）"
+            exit 0
+          fi
+          echo "::group::$report"
+          cat "$report"
+          echo "::endgroup::"
       - name: Package test logs
         if: always()
         run: |
           set -euo pipefail
-          out="xn-test-logs-${{ inputs.mode }}-${{ matrix.arch }}.tar.gz"
+          out="xn-test-logs-${{ inputs.suite }}-${{ matrix.arch }}.tar.gz"
           if [ ! -d target/test-runs ]; then
             echo "没有 target/test-runs，跳过打包"
             exit 0
           fi
-          # 汇总原文进 job 日志（artifact 之外一眼可见）。
-          for report in target/test-runs/last-report.md target/test-runs/last-report-unified.md; do
-            [[ -f "$report" ]] || continue
-            echo "::group::$report"
-            cat "$report"
-            echo "::endgroup::"
-          done
           tar -czf "$out" \
             --exclude='target/test-runs/*/artifacts' \
             --exclude='target/test-runs/*/artifacts/*' \
@@ -178,7 +362,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: xn-test-logs-${{ inputs.mode }}-${{ matrix.arch }}
-          path: xn-test-logs-${{ inputs.mode }}-${{ matrix.arch }}.tar.gz
+          name: xn-test-logs-${{ inputs.suite }}-${{ matrix.arch }}
+          path: xn-test-logs-${{ inputs.suite }}-${{ matrix.arch }}.tar.gz
           if-no-files-found: warn
           retention-days: 14
