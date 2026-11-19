@@ -62,8 +62,11 @@ has "统一执行入口" 'scripts/test/run.sh run "${args[@]}"'
 has "all → --all" 'all) args+=(--all) ;;'
 has "tier → --tier" 'pr|nightly|release|manual) args+=(--tier "$suite") ;;'
 has "category → --category" 'unit|smoke|e2e|bench|perf|pgo) args+=(--category "$suite") ;;'
-has "跟 latest 取 dlc（日期 tag 会 404）" 'args+=(--fetch-latest)'
-absent "不再用按锁的 --fetch（vYYYYMMDD 会 404）" 'args+=(--fetch)'
+# 上游 xn 已把 `--fetch` 的语义改成 releases/latest，并删掉 `--fetch-latest`
+# 别名；传旧名不属于任何已知选项，会被 run.sh 当透传参数直接退 4
+# （run 44530118800：两条 arch 腿都是「透传参数只允许配一个 <id>」）。
+has "跟 latest 取 dlc（日期 tag 会 404）" 'args+=(--fetch)'
+absent "不再传已删除的 --fetch-latest 别名" 'args+=(--fetch-latest)'
 has "hosted 缺环境记 skip" 'args+=(--skip-env-error)'
 has "keep_going 透传" 'args+=(--keep-going)'
 

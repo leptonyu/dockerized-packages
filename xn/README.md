@@ -352,7 +352,7 @@ push / PR 自动跑。菜单、步骤、调用方式与上游仓库的 `.github/
   被跑两遍）。macOS 腿不带 root，Linux-only 条目记 skip。
 - `smoke` / `pgo` 只在 Linux 上起 job（eBPF 只支持 Linux；PGO 构建要 Linux 工具链），
   其他 suite 加 macOS 腿（能真跑的主要是 aarch64 的 unit / bench，其余记 skip）。
-- dlc 跟 `releases/latest`（`--fetch-latest`），不按上游 test.yml 的 `--fetch` 锁：上游
+- dlc 跟 `releases/latest`（`--fetch`；上游 xn 已删掉 `--fetch-latest` 别名）：上游
   `fixtures.lock.toml` 钉的是 dockerized-packages 的日期 tag（`vYYYYMMDD`），该 release
   会重建 / 消失，按锁会 404；latest 用同一次 release 的 `.sha256sum` 校验，实际 sha 仍
   记进 `result.json` 的 `inputs.fixtures`。
