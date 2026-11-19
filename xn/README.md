@@ -352,6 +352,10 @@ push / PR 自动跑。菜单、步骤、调用方式与上游仓库的 `.github/
   被跑两遍）。macOS 腿不带 root，Linux-only 条目记 skip。
 - `smoke` / `pgo` 只在 Linux 上起 job（eBPF 只支持 Linux；PGO 构建要 Linux 工具链），
   其他 suite 加 macOS 腿（能真跑的主要是 aarch64 的 unit / bench，其余记 skip）。
+- dlc 跟 `releases/latest`（`--fetch-latest`），不按上游 test.yml 的 `--fetch` 锁：上游
+  `fixtures.lock.toml` 钉的是 dockerized-packages 的日期 tag（`vYYYYMMDD`），该 release
+  会重建 / 消失，按锁会 404；latest 用同一次 release 的 `.sha256sum` 校验，实际 sha 仍
+  记进 `result.json` 的 `inputs.fixtures`。
 - hosted runner 缺 Alpine / qemu / 专用内核的条目记 skip（= 上游 `all.sh` 在 CI 外的
   口径），所以 unified 传 `--skip-env-error`；整类全部 skip 时脚本退 2，workflow 降级
   成告警，但退 2 且输出里不是「全部跳过」（参数 / 用法错误）仍按失败处理，避免一条

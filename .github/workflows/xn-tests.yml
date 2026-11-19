@@ -19,6 +19,10 @@ run-name: "测试 XN（${{ inputs.suite }}）"
 #     避免同一条目跑两遍）。macOS 腿不带 root，Linux-only 条目记 skip。
 #   * 缺环境（apk / qemu / 专用内核 / BTF）记 skip 而不是红（= 上游 `all.sh` 的口径）；
 #     「全部跳过」仍会由 `run.sh` 退 2 暴露，这里降级成告警，不吞假绿。
+#   * dlc 跟 `releases/latest`（`--fetch-latest`），不按上游 test.yml 的 `--fetch` 锁：
+#     fixtures.lock.toml 钉的是 dockerized-packages 的日期 tag（vYYYYMMDD），那个 release
+#     会重建 / 消失，按锁直接 404；latest 的字节仍用同一次 release 的 .sha256sum 校验，
+#     实际 sha 记进 result.json 的 inputs.fixtures。
 #   * 上游 job 超时 1440min（self-hosted 上限），hosted 单 job 上限 6h，所以固定 360min。
 #   * 额外一个 `repo tests` job 跑本仓库 `xn/tests/run-all.sh`（上游没有这部分）。
 #   * 上游 `target/test-runs` 直接传 artifact；本仓库 public，日志先打包成 tar.gz 再传。
@@ -228,8 +232,11 @@ jobs:
               exit 4
               ;;
           esac
-          # 统一测试按锁取 dlc（离线 runner 会明确报 env-error，不会被当成产品回归）。
-          args+=(--fetch)
+          # 跟 latest，不按锁：上游 test.yml 用 `--fetch` 读 fixtures.lock.toml 里的
+          # **日期 tag**（vYYYYMMDD），但 dockerized-packages 的日期 release 会重建/消失，
+          # 按锁直接 404。latest 用同一次 release 的 .sha256sum 校验，实际 sha 仍会记进
+          # result.json 的 inputs.fixtures。
+          args+=(--fetch-latest)
           # hosted runner 没有 Alpine / qemu / 专用内核：缺环境记 skip（= 上游 all.sh 的
           # CI 外口径）。「全部跳过」仍由 run.sh 退 2 暴露，下面单独判。
           args+=(--skip-env-error)
