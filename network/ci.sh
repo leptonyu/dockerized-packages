@@ -188,7 +188,12 @@ sha256sum -c \
 	xn_vpn.txt.sha256sum \
 	xn_allow.txt.sha256sum
 
-# 发布用：每份 .txt 单独 xz，不打包 tar。保留 plain .txt 供本地校验。
+# xn_us.txt 是唯一随 release 发 plain 版的名单：家里的 mik 每天 /tool fetch 它来刷
+# xn_us_v4 / xn_us_v6（RouterOS 解不了 xz）。校验和发 sha512 而不是 sha256 ——
+# RouterOS 脚本没有 sha256，:convert 的 transform 只有 md5 / sha512，机上要能自己算。
+sha512sum xn_us.txt >xn_us.txt.sha512sum
+
+# 发布用：每份 .txt 单独 xz，不打包 tar。其余 plain .txt 只留本地校验。
 command -v xz >/dev/null 2>&1 || {
 	echo "ci.sh: 找不到 xz" >&2
 	exit 1

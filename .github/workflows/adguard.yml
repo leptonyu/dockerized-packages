@@ -130,6 +130,7 @@ jobs:
             network/xn_us.txt.xz.sha256sum
             network/xn_us.txt
             network/xn_us.txt.sha256sum
+            network/xn_us.txt.sha512sum
             network/xn_vpn.txt.xz
             network/xn_vpn.txt.xz.sha256sum
             network/xn_allow.txt.xz
