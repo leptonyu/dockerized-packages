@@ -94,8 +94,12 @@ jobs:
           XN_REPO_TOKEN: ${{ secrets.XN_REPO_TOKEN }}
         run: ./network/ci.sh
       - name: Remove obsolete plain network assets
-        # release 以后只保留 .xz；清掉旧版本 workflow 留下的 plain .txt / .txt.sha256sum，
+        # release 只保留 .xz；清掉旧版本 workflow 留下的 plain .txt / .txt.sha256sum，
         # 否则用户把 release 全下下来后 `xz -d xn_block.txt.xz` 会因输出已存在而失败。
+        # 例外：xn_us.txt 是故意发的 plain 版 —— 家里的 mik 每天 /tool fetch 它来刷
+        # xn_us_v4 / xn_us_v6（machine 仓库 templates/load_addr_v4|v6.rsc.tftpl 的
+        # Step 5），RouterOS 解不了 xz 也没法在机上算 sha256，所以这里不删它，
+        # 下面的 for 列表里也不要有它。
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
@@ -103,7 +107,7 @@ jobs:
           TAG="v${{ needs.dns.outputs.date }}"
           for f in \
             xn_block.txt xn_block_orig.txt xn_block_all.txt \
-            xn_cn.txt xn_fake.txt xn_us.txt xn_vpn.txt xn_allow.txt; do
+            xn_cn.txt xn_fake.txt xn_vpn.txt xn_allow.txt; do
             gh release delete-asset "$TAG" "$f" --yes >/dev/null 2>&1 || true
             gh release delete-asset "$TAG" "$f.sha256sum" --yes >/dev/null 2>&1 || true
           done
@@ -124,6 +128,8 @@ jobs:
             network/xn_fake.txt.xz.sha256sum
             network/xn_us.txt.xz
             network/xn_us.txt.xz.sha256sum
+            network/xn_us.txt
+            network/xn_us.txt.sha256sum
             network/xn_vpn.txt.xz
             network/xn_vpn.txt.xz.sha256sum
             network/xn_allow.txt.xz
