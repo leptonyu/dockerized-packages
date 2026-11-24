@@ -42,6 +42,12 @@ run-name: "发布 XN · ${{ inputs.target || 'all' }} · compare=${{ inputs.comp
 # **记账只看普通档**：x86_64 / armv7 / macOS 三个普通 job 都是 success 或 skipped
 # （skipped = 之前已编过）才写 `XN_LAST_MAIN_SHA`（tuned 不参与，失败了也不会把整轮判死）。
 #
+# **镜像自动跟上**：x86_64 普通包发出去之后，`trigger-docker` 用 `repository_dispatch`
+# （`event_type: xn-release`，`client_payload.tag` = 本次发布 tag）触发上游 `leptonyu/xn`
+# 的 `docker.yml`，重建并推 `ghcr.io/leptonyu/xn` / `ghcr.io/leptonyu/xn-web`。镜像只吃
+# `xn.x86_64-unknown-linux-gnu.tar.xz`，所以 `tuned` / armv7 / macOS 不参与；`skipped`
+# （这个 SHA 之前编过、资产和镜像都在）不重按。
+#
 # **禁止缓存上游任何东西**：本仓库是 public，`leptonyu/xn` 是 private。
 # actions/cache 的 key 和内容对 public 仓库可见/可下载，所以：
 #   - 不缓存上游 checkout（`.cache/xn-src` 每轮 actions/checkout 现拉）；
@@ -195,9 +201,12 @@ jobs:
             echo "sha=$sha"
             echo "ref=$ref"
           } >> "$GITHUB_OUTPUT"
-      - name: Resolve release tag（compare=only 从发布包取 bin）
+      # tag 有两个用途：compare=only 从已发布 runtime 包解 bin；`trigger-docker` 把
+      # 刚发布 x86_64 资产的那个 tag 交给上游 docker workflow。所以**每轮都解析**，
+      # 不再只在 compare=only 时算；语义与 xn/build.sh 一致：显式 `tag` 输入优先，
+      # 否则 `v<上游 Cargo.toml 版本>`（同一个 SHA，build.sh 算出来的 tag 必然相同）。
+      - name: Resolve release tag
         id: release
-        if: ${{ inputs.compare == 'only' }}
         env:
           GH_TOKEN: ${{ secrets.XN_REPO_TOKEN }}
           SHA: ${{ steps.resolve.outputs.sha }}
@@ -229,7 +238,7 @@ jobs:
             version="$(cargo_version workspace.package)"
             [ -n "$version" ] || version="$(cargo_version package)"
             [ -n "$version" ] || {
-              echo "::error::读不到上游 Cargo.toml 的版本，无法定位发布包；用 tag 输入显式指定"
+              echo "::error::读不到上游 Cargo.toml 的版本，无法定位发布 tag；用 tag 输入显式指定"
               exit 1
             }
             tag="v$version"
@@ -1199,3 +1208,63 @@ jobs:
           if [[ "$got" != "$SHA" ]]; then
             echo "::warning::XN_LAST_MAIN_SHA 没更新：XN_VARS_TOKEN 没配、XN_REPO_TOKEN 也写不了（多半是只授了 leptonyu/xn 的 fine-grained token）。已构建标记仍以各 build job 的 cache 标记 \`xn-built-<sha256>-<job>\` 为准，不影响下一轮跳过；要更新变量就配 XN_VARS_TOKEN（fine-grained，Variables: read/write），或把 XN_REPO_TOKEN 换成 classic PAT（repo scope）。"
           fi
+
+  # ---------------------------------------------------------------- 镜像
+  # 镜像由上游 `leptonyu/xn` 的 `docker.yml` 推：ghcr 的新包会关联到「推它的仓库」，
+  # ghcr.io/leptonyu/xn 必须在上游名下（见 xn/README.md「与上游的关系」）。本仓库只
+  # 在 x86_64 普通包**真正发出去之后**按一下，不自己 build/push。
+  #
+  # 用 `repository_dispatch`（`event_type: xn-release`）而不是 `workflow_dispatch`：
+  #   - 跨仓库都得用 PAT（本仓库的 GITHUB_TOKEN 动不了别人的 workflow）；
+  #   - repository_dispatch 只要求对目标仓库 `contents: write` —— 就是 XN_REPO_TOKEN
+  #     现在为了 checkout / 发布本来就得有的权限；workflow_dispatch 要求
+  #     `Actions: write`，同一个 token 多半没有，会 403。
+  # payload 带 `tag`，上游 docker.yml 用它 checkout 该 tag、也用它当镜像 tag。
+  #
+  # 条件只看 `linux-x86_64`（普通包，唯一能进镜像的资产）：
+  #   - `success`：这一轮真的编了并上传了 `xn.x86_64-unknown-linux-gnu.tar.xz`；
+  #   - `skipped`（= 这个 SHA 之前编过）：资产在、镜像上一轮也推过，不重按；
+  #   - `tuned` / armv7 / macOS、compare=only 都不进镜像。
+  trigger-docker:
+    name: 触发上游镜像发布（docker.yml）
+    needs: [check, linux-x86_64]
+    if: |
+      always() &&
+      needs.check.result == 'success' &&
+      needs.linux-x86_64.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Dispatch xn-release 到 leptonyu/xn
+        env:
+          GH_TOKEN: ${{ secrets.XN_REPO_TOKEN }}
+          TAG: ${{ needs.check.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          [[ -n "${TAG:-}" ]] || {
+            # 正常不会走到这里（check 每轮都解析 tag）；只重跑这个 job 时可能拿不到
+            # 上游 job 的 outputs，就手动跑上游 docker workflow 补。
+            echo "::error::没有 release tag，不能触发镜像发布（check 没解析出，或只重跑了这个 job）。手动补：https://github.com/leptonyu/xn/actions/workflows/docker.yml"
+            exit 1
+          }
+          payload="$(jq -n --arg tag "$TAG" '{event_type:"xn-release", client_payload:{tag:$tag}}')"
+          # GitHub API 偶发 5xx / 网络抖动：重试几次再判死。
+          for i in 1 2 3; do
+            if printf '%s\n' "$payload" |
+              gh api --method POST repos/leptonyu/xn/dispatches --input - >/dev/null; then
+              echo "已触发 leptonyu/xn 的 docker workflow（tag=${TAG}）"
+              {
+                echo "### 镜像发布已触发"
+                echo
+                echo "- 上游：\`leptonyu/xn\` 的 \`docker.yml\`（\`repository_dispatch: xn-release\`）"
+                echo "- release tag：\`$TAG\`"
+                echo "- 进度：https://github.com/leptonyu/xn/actions/workflows/docker.yml"
+              } >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            [[ "$i" -lt 3 ]] && sleep $((i * 5))
+          done
+          # 镜像没自动出就红：发布本身成功了，但交付链没走完，必须让人看见。
+          # 手动补：Actions → docker → Run workflow，填同一个 tag。
+          echo "::error::触发 leptonyu/xn 的 docker workflow 失败（XN_REPO_TOKEN 对 leptonyu/xn 需要 contents:write，看上面的 gh 报错）。镜像没自动出，可手动跑：https://github.com/leptonyu/xn/actions/workflows/docker.yml"
+          exit 1

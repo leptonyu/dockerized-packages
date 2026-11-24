@@ -260,6 +260,17 @@ schedule 绑定：
   `--latest` 只在**资产自检通过之后**才设置：release 是先建后传资产的，某一轮建了 release
   但资产没传全（构建失败 / 上传 502）时，GitHub 默认算出来的 latest 会是那个空壳，
   靠 latest 下载普通包的消费方（`network/ci.sh`、镜像）就会 `no assets to download`。
+- **镜像自动跟上（不再手动点上游）**：`linux-x86_64`（普通包）成功后，`trigger-docker`
+  用 `repository_dispatch`（`event_type: xn-release`，`client_payload.tag` = 本轮发布 tag）
+  触发上游 `leptonyu/xn` 的 `docker.yml`，由它下载该 tag 的
+  `xn.x86_64-unknown-linux-gnu.tar.xz` 重建并推 `ghcr.io/leptonyu/xn` /
+  `ghcr.io/leptonyu/xn-web`（ghcr 的新包会关联到「推它的仓库」，所以必须上游推）。
+  为什么用 `repository_dispatch`：只要求调用方 PAT 对 `leptonyu/xn` 有 `contents: write`
+  —— 就是 `XN_REPO_TOKEN` 本来就有的权限；`workflow_dispatch` 要 `Actions: write`，
+  同一个 token 多半没有。触发条件只看 x86_64 普通包：`tuned` / armv7 / macOS、`compare=only`
+  都不出镜像；`skipped`（这个 SHA 之前编过、资产和镜像都在）不重按。dispatch 重试 3 次，
+  仍失败则本轮**变红**（发布本身已成功，但交付链没走完），也可手动跑上游
+  `docker` workflow 补同一个 tag。
 
 `xn` workflow 与 DNS/network 的每日 release 相互独立；它失败不会撤回其它 workflow 的资产。
 
@@ -376,6 +387,9 @@ push / PR 自动跑。菜单、步骤、调用方式与上游仓库的 `.github/
 - 只读上游：不在本仓库改 `release.sh` / `scripts/` / `Cargo.toml`；需要的上游改动以补丁形式
   放在 `patches/`，由人工在上游仓库 `git apply`（目前没有待应用的补丁；`--xn-only`
   不再用于发布链路）。
+- 镜像发布把「按一下」交给上游：发布成功后本仓库用 `repository_dispatch`（`event_type:
+  xn-release`）触发上游 `docker.yml`，不改上游任何文件、也不在本仓库 build/push —— ghcr
+  的包必须落在 `leptonyu/xn` 名下（新包会关联到推它的仓库）。
 - `--tuned` 是上游唯一的 PGO+BOLT 入口；本模块的版本门槛是
   `release.sh` 里出现 `--tuned`。上游改成新入口时，先改这里，不复制逻辑。
 - 产物是**候选**：`--tuned` 的采样是合成 loopback 负载 + 测试套件，不等于线上流量；
